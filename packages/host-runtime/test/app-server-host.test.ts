@@ -4,7 +4,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { PassThrough } from "node:stream";
+import { PassThrough, Readable } from "node:stream";
 
 import { describe, expect, it, vi } from "vitest";
 import type {
@@ -50,6 +50,8 @@ import {
   type CodexAccount,
   type HostUpdateCoordinator,
 } from "../src/index.js";
+import { runDelegationCli } from "../src/delegation-cli.js";
+import { startDelegationControlServer } from "../src/delegation-control-server.js";
 import type { OfficialAppServerConnection } from "../src/official-app-server-connection.js";
 
 class FakeOfficialProcess extends EventEmitter {
@@ -7052,6 +7054,177 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  it("rejects Plan turns when the Harness does not advertise work mode", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const officialWrite = vi.fn();
+    fixture.official.stdin.on("data", officialWrite);
+    writeRequest(fixture.desktopInput, {
+      id: 40,
+      method: "turn/start",
+      params: {
+        threadId,
+        input: [{ type: "text", text: "plan this" }],
+        collaborationMode: { mode: "plan" },
+      },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 40)),
+    ).resolves.toMatchObject({
+      error: { message: "Planning mode is unavailable for this Harness" },
+    });
+    expect(officialWrite).not.toHaveBeenCalled();
+    await stopFixture(fixture);
+  });
+
+  it("steers a native-capable external Turn without cancelling it", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const oldTurnId = await startPiTurn(fixture, threadId);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const interject = vi.fn(async () => ({
+      ok: true as const,
+      value: { accepted: true as const },
+    }));
+    session.steering = { interject };
+    const execute = vi.spyOn(session, "execute");
+    const officialWrite = vi.fn();
+    fixture.official.stdin.on("data", officialWrite);
+    writeRequest(fixture.desktopInput, {
+      id: 100,
+      method: "turn/steer",
+      params: {
+        threadId,
+        expectedTurnId: oldTurnId,
+        clientUserMessageId: "steer-message",
+        input: [{ type: "text", text: "new direction" }],
+      },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 100)),
+    ).resolves.toMatchObject({ result: { turnId: oldTurnId } });
+    expect(interject).toHaveBeenCalledWith({
+      expectedTurnId: oldTurnId,
+      text: "new direction",
+      interjectionId: "steer-message",
+    });
+    expect(execute).not.toHaveBeenCalled();
+    expect(officialWrite).not.toHaveBeenCalled();
+    session.succeedTurn();
+    await stopFixture(fixture);
+  });
+
+  it("applies Plan before starting a Turn and keeps a start lock across the mode switch", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    let releaseMode: () => void = () => undefined;
+    const modeGate = new Promise<void>((resolve) => {
+      releaseMode = resolve;
+    });
+    const order: string[] = [];
+    session.workMode = {
+      current: "default",
+      set: async (mode) => {
+        order.push(`set:${mode}`);
+        await modeGate;
+        return { ok: true, value: undefined };
+      },
+    };
+    const execute = vi.spyOn(session, "execute");
+    writeRequest(fixture.desktopInput, {
+      id: 41,
+      method: "turn/start",
+      params: {
+        threadId,
+        input: [{ type: "text", text: "plan this" }],
+        collaborationMode: { mode: "plan" },
+      },
+    });
+    await vi.waitFor(() => expect(order).toEqual(["set:plan"]));
+    expect(execute).not.toHaveBeenCalled();
+    writeRequest(fixture.desktopInput, {
+      id: 42,
+      method: "turn/start",
+      params: { threadId, input: [{ type: "text", text: "second" }] },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 42)),
+    ).resolves.toMatchObject({ error: { code: -32072 } });
+    releaseMode();
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 41)),
+    ).resolves.toHaveProperty("result.turn.id");
+    expect(execute).toHaveBeenCalled();
+    await stopFixture(fixture);
+  });
+
+  it("advertises Grok native steering from Thread identity without a live Session", async () => {
+    const grok = new FakeHarnessAdapter(harnessIdSchema.parse("grok"));
+    const first = createFixture({
+      externalAdapters: new Map([["grok", grok]]),
+    });
+    const threadId = await startExternalThread(first, "codexhost/grok-native", 1);
+    const directory = first.mappingStoreDirectory;
+    await closeFixture(first);
+    const restarted = createFixture({
+      externalAdapters: new Map([["grok", new FakeHarnessAdapter(harnessIdSchema.parse("grok"))]]),
+      mappingStoreDirectory: directory,
+    });
+    writeRequest(restarted.desktopInput, {
+      id: 42,
+      method: "codexhost/thread/ownership/list",
+      params: { threadIds: [threadId] },
+    });
+    await expect(restarted.collector.waitFor((message) => requestId(message, 42))).resolves.toEqual(
+      {
+        id: 42,
+        result: {
+          threads: [{ threadId, owner: "external", harnessId: "grok", nativeSteering: true }],
+        },
+      },
+    );
+    await stopFixture(restarted);
+  });
+
+  it("keeps native steer unsupported when interject fails and does not cancel", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const oldTurnId = await startPiTurn(fixture, threadId);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const execute = vi.spyOn(session, "execute");
+    session.steering = {
+      interject: async () => ({
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: "Grok ACP Method Not Found: _x.ai/interject",
+          retryable: false,
+        },
+      }),
+    };
+    writeRequest(fixture.desktopInput, {
+      id: 100,
+      method: "turn/steer",
+      params: {
+        threadId,
+        expectedTurnId: oldTurnId,
+        input: [{ type: "text", text: "new direction" }],
+      },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 100)),
+    ).resolves.toMatchObject({
+      error: { code: -32074, message: "Grok ACP Method Not Found: _x.ai/interject" },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    session.succeedTurn();
+    await stopFixture(fixture);
+  });
+
   it("writes the interrupt response before cancellation lifecycle notifications", async () => {
     const fixture = createFixture();
     const threadId = await startPiThread(fixture);
@@ -7494,4 +7667,145 @@ describe("AppServerHost HarnessAdapter projection", () => {
     expect(fixture.adapter.sessions).toHaveLength(0);
     await stopFixture(fixture);
   });
+});
+
+describe("Desktop responsiveness during observation", () => {
+  it("serves unrelated Desktop queries while another Thread resumes slowly", async () => {
+    const fixture = createFixture();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let entered = false;
+    try {
+      const idleId = await startPiThread(fixture);
+      const otherId = await startExternalThread(fixture, "codexhost/pi-native", 10);
+      const session = fixture.adapter.sessions[0];
+      if (!session) throw new Error("Missing fixture Session");
+      const original = session.readSnapshot.bind(session);
+      session.readSnapshot = async () => {
+        entered = true;
+        await gate;
+        return original();
+      };
+      writeRequest(fixture.desktopInput, {
+        id: 20,
+        method: "thread/resume",
+        params: { threadId: idleId },
+      });
+      await vi.waitFor(() => expect(entered).toBe(true));
+      writeRequest(fixture.desktopInput, {
+        id: 21,
+        method: "codexhost/thread/inspect",
+        params: { threadId: otherId },
+      });
+      writeRequest(fixture.desktopInput, {
+        id: 22,
+        method: "thread/name/set",
+        params: { threadId: idleId, name: "after resume" },
+      });
+      const inspected = await fixture.collector.waitFor((m) => m.id === 21);
+      expect(inspected.error).toBeUndefined();
+      expect(fixture.collector.messages.some((m) => m.id === 20)).toBe(false);
+      expect(fixture.collector.messages.some((m) => m.id === 22)).toBe(false);
+      release();
+      await fixture.collector.waitFor((m) => m.id === 20);
+      const renamed = await fixture.collector.waitFor((m) => m.id === 22);
+      expect(renamed.error).toBeUndefined();
+    } finally {
+      release();
+      await stopFixture(fixture);
+    }
+  });
+});
+
+it("keeps Desktop models and Thread queries responsive during CLI observe and native history I/O", async () => {
+  let api: DelegationControlRegistration | undefined;
+  const fixture = createFixture({
+    onDelegationApi: (value) => {
+      api = value;
+      return () => {};
+    },
+  });
+  let server: Awaited<ReturnType<typeof startDelegationControlServer>> | undefined;
+  let cli: Promise<number> | undefined;
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let entered = false;
+  let active = false;
+  let activeSession: FakeHarnessSession | undefined;
+  try {
+    const idleId = await startPiThread(fixture);
+    const activeId = await startExternalThread(fixture, "codexhost/pi-native", 10);
+    const turnId = await startPiTurn(fixture, activeId, 11);
+    active = true;
+    activeSession = fixture.adapter.sessions[1];
+    if (!activeSession || !api) throw new Error("Missing observer fixture");
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Missing fixture Session");
+    const original = session.readSnapshot.bind(session);
+    session.readSnapshot = async () => {
+      entered = true;
+      await gate;
+      return original();
+    };
+    server = await startDelegationControlServer({ token: "fixture-token", api });
+    const output = new PassThrough();
+    let requests = 0;
+    cli = runDelegationCli({
+      arguments: ["thread", "observe", "--targets-file", "-", "--timeout-ms", "4000"],
+      stdin: Readable.from([JSON.stringify([{ threadId: activeId, expectedTurnId: turnId }])]),
+      output,
+      environment: {
+        CODEXHOST_RUNTIME_ENDPOINT: server.endpoint,
+        CODEXHOST_RUNTIME_TOKEN: "fixture-token",
+      },
+      fetchImpl: async (url, init) => {
+        requests++;
+        return fetch(url, init);
+      },
+    });
+    await vi.waitFor(() => expect(requests).toBe(2));
+    writeRequest(fixture.desktopInput, {
+      id: 20,
+      method: "thread/resume",
+      params: { threadId: idleId },
+    });
+    await vi.waitFor(() => expect(entered).toBe(true));
+    for (let index = 0; index < 10; index++) {
+      activeSession.appendText(`progress ${index}`);
+      writeRequest(fixture.desktopInput, {
+        id: 100 + index,
+        method: "codexhost/thread/inspect",
+        params: { threadId: activeId },
+      });
+      const result = await fixture.collector.waitFor((m) => m.id === 100 + index);
+      expect(result.error).toBeUndefined();
+    }
+    writeRequest(fixture.desktopInput, { id: 200, method: "model/list", params: {} });
+    const forwarded = await readJsonLine(fixture.official.stdin);
+    expect(forwarded.method).toBe("model/list");
+    fixture.official.stdout.write(
+      `${JSON.stringify({ id: forwarded.id, result: { data: [], nextCursor: null } })}\n`,
+    );
+    const models = await fixture.collector.waitFor((m) => m.id === 200);
+    expect(models.error).toBeUndefined();
+    expect(fixture.collector.messages.some((m) => m.id === 20)).toBe(false);
+    expect(requests).toBe(2);
+    expect(output.readableLength).toBe(0);
+    release();
+    await fixture.collector.waitFor((m) => m.id === 20);
+    activeSession.succeedTurn();
+    active = false;
+    expect(await cli).toBe(0);
+    expect(JSON.parse(output.read().toString()).reason).toBe("attention");
+  } finally {
+    release();
+    if (active && activeSession) activeSession.succeedTurn();
+    await server?.close();
+    await cli;
+    await stopFixture(fixture);
+  }
 });

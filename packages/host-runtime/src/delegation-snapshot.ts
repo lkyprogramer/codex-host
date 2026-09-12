@@ -136,6 +136,26 @@ export function validateReadOptions(input: ThreadReadInput): Required<
   return { view: input.view, ...(input.cursor ? { cursor: input.cursor } : {}), limit };
 }
 
+export function projectDelegationThreadStatus(input: {
+  thread: JsonObject;
+  turns: readonly JsonObject[];
+  running: boolean;
+}): Pick<DelegationThreadSnapshot, "status" | "turn"> {
+  const latestTurn = input.turns.at(-1) ?? null;
+  const latestTurnId = latestTurn ? stringValue(latestTurn.id) : null;
+  const latestTurnStatus = latestTurn ? turnStatus(latestTurn.status) : null;
+  const status = input.running
+    ? "running"
+    : latestTurnStatus === "failed" || latestTurnStatus === "interrupted"
+      ? latestTurnStatus
+      : threadStatus(input.thread.status, input.running);
+  return {
+    status,
+    turn:
+      latestTurnId && latestTurnStatus ? { turnId: latestTurnId, status: latestTurnStatus } : null,
+  };
+}
+
 export function projectDelegationThreadSnapshot(input: {
   threadId: string;
   harnessId: RoutedHarnessId;
@@ -153,14 +173,9 @@ export function projectDelegationThreadSnapshot(input: {
     ...(input.limit !== undefined ? { limit: input.limit } : {}),
   });
   const visible = allVisibleMessages(input.turns);
+  const { status, turn } = projectDelegationThreadStatus(input);
   const latestTurn = input.turns.at(-1) ?? null;
-  const latestTurnId = latestTurn ? stringValue(latestTurn.id) : null;
-  const latestTurnStatus = latestTurn ? turnStatus(latestTurn.status) : null;
-  const status = input.running
-    ? "running"
-    : latestTurnStatus === "failed" || latestTurnStatus === "interrupted"
-      ? latestTurnStatus
-      : threadStatus(input.thread.status, input.running);
+  const latestTurnId = turn?.turnId ?? null;
   const latestTurnMessages = latestTurnId
     ? visible.filter((message) => message.turnId === latestTurnId && message.role === "agent")
     : [];
@@ -188,8 +203,7 @@ export function projectDelegationThreadSnapshot(input: {
     threadId: input.threadId,
     harnessId: input.harnessId,
     status,
-    turn:
-      latestTurnId && latestTurnStatus ? { turnId: latestTurnId, status: latestTurnStatus } : null,
+    turn,
     progress,
     result,
     ...(page ? { messages: page } : {}),

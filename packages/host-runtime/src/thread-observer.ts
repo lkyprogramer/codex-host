@@ -225,6 +225,7 @@ export async function observeThreads(input: {
         await input.waitMany(
           {
             timeoutMs,
+            changeKind: "attention",
             targets: targets.map(({ threadId, afterRevision }) => ({
               threadId,
               ...(afterRevision ? { afterRevision } : {}),

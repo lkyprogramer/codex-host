@@ -35,6 +35,8 @@ import type {
   HarnessSession,
   HarnessSessionCapabilities,
   HarnessSessionState,
+  HarnessSteeringControl,
+  HarnessWorkModeControl,
   InspectHarnessInput,
   HostAgentMessageItem,
   HostApprovalInteraction,
@@ -157,6 +159,8 @@ export class FakeHarnessSession implements HarnessSession {
   readonly initialState: HarnessSessionState;
   readonly initialUsage: HostUsage | null;
   commands?: HarnessCommandCapability;
+  workMode?: HarnessWorkModeControl;
+  steering?: HarnessSteeringControl;
   readonly interactionResponses: InteractionRespondCommand[] = [];
   readonly outputs: AsyncIterable<HarnessOutput>;
   get closed(): boolean {

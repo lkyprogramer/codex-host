@@ -182,3 +182,42 @@ describe("delegation control server", () => {
     }
   });
 });
+
+it("aborts the server wait when the HTTP observer disconnects", async () => {
+  let receivedSignal: AbortSignal | undefined;
+  const waitMany = vi.fn((_input, signal?: AbortSignal) => {
+    receivedSignal = signal;
+    return new Promise<never>((_resolve, reject) => {
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+    });
+  });
+  const server = await startDelegationControlServer({
+    token,
+    api: {
+      inspect: vi.fn(),
+      start: vi.fn(),
+      send: vi.fn(),
+      cancel: vi.fn(),
+      read: vi.fn(),
+      wait: vi.fn(),
+      list: vi.fn(),
+      ...extraApi(),
+      waitMany,
+    },
+  });
+  const controller = new AbortController();
+  try {
+    const response = fetch(`${server.endpoint}/v1/thread/wait-many`, {
+      ...authorized({ targets: [{ threadId: "one" }], timeoutMs: 10000 }),
+      signal: controller.signal,
+    });
+    const rejected = expect(response).rejects.toMatchObject({ name: "AbortError" });
+    await vi.waitFor(() => expect(waitMany).toHaveBeenCalled());
+    controller.abort();
+    await rejected;
+    await vi.waitFor(() => expect(receivedSignal?.aborted).toBe(true));
+  } finally {
+    controller.abort();
+    await server.close();
+  }
+});

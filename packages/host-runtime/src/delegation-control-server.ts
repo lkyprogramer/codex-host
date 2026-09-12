@@ -42,6 +42,7 @@ function errorBody(error: unknown): {
 }
 
 function writeJson(response: ServerResponse, status: number, value: unknown): void {
+  if (response.destroyed || response.writableEnded) return;
   response.writeHead(status, { "content-type": "application/json; charset=utf-8" });
   response.end(`${JSON.stringify(value)}\n`);
 }
@@ -82,6 +83,8 @@ export async function startDelegationControlServer(input: {
   api: DelegationControlApi;
 }): Promise<DelegationControlServer> {
   const server = createServer((request, response) => {
+    const disconnected = new AbortController();
+    response.once("close", () => disconnected.abort());
     void (async () => {
       if (request.method !== "POST") {
         writeJson(response, 405, {
@@ -125,7 +128,7 @@ export async function startDelegationControlServer(input: {
           writeJson(
             response,
             200,
-            await input.api.waitMany(body as unknown as ThreadWaitManyInput),
+            await input.api.waitMany(body as unknown as ThreadWaitManyInput, disconnected.signal),
           );
           return;
         case "/v1/thread/evidence":

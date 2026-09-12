@@ -230,6 +230,7 @@ export interface ThreadWaitManyTarget {
 }
 
 export interface ThreadWaitManyInput {
+  changeKind?: "any" | "attention";
   targets: ThreadWaitManyTarget[];
   timeoutMs: number;
 }
@@ -331,7 +332,7 @@ export interface DelegationControlApi {
   wait(input: ThreadWaitInput): Promise<DelegationThreadSnapshot & { timedOut: boolean }>;
   list(input: ThreadListInput): Promise<DelegationThreadListResult>;
   status(input: ThreadStatusInput): Promise<DelegationThreadStatusView>;
-  waitMany(input: ThreadWaitManyInput): Promise<ThreadWaitManyResult>;
+  waitMany(input: ThreadWaitManyInput, signal?: AbortSignal): Promise<ThreadWaitManyResult>;
   evidence(input: ThreadEvidenceInput): Promise<ThreadEvidenceResult>;
   configuration(
     input: ThreadConfigurationInput,

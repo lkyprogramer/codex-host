@@ -83,7 +83,8 @@ describe("observer through the real loopback Runtime and CLI", () => {
         });
       await vi.waitFor(() => expect(observedRequests).toBeGreaterThanOrEqual(2));
       session.appendText("ordinary progress must stay inside the observer");
-      await vi.waitFor(() => expect(observedRequests).toBeGreaterThanOrEqual(3));
+      await delay(100);
+      expect(observedRequests).toBe(2);
       expect(done).not.toHaveBeenCalled();
       expect(output.readableLength).toBe(0);
       session.succeedTurn();
@@ -91,7 +92,7 @@ describe("observer through the real loopback Runtime and CLI", () => {
       const value = JSON.parse(output.read().toString());
       expect(value.events).toEqual([{ threadId: child.threadId, reason: "terminal" }]);
       expect(value.inputVisibilityUnavailable).toEqual([]);
-      expect(value.suppressedChanges).toBeGreaterThan(0);
+      expect(value.suppressedChanges).toBe(0);
       expect(JSON.stringify(value)).not.toContain("ordinary progress");
     } finally {
       await f.close();

@@ -862,7 +862,10 @@ describe("HarnessDelegationCoordinator", () => {
         timeoutMs: 0,
         targets: [{ threadId: officialId }],
       });
-      const afterRevision = first.results[0]?.revision;
+      const firstTarget = first.results[0];
+      if (!firstTarget || firstTarget.outcome === "error")
+        throw new Error("Missing official status");
+      const afterRevision = firstTarget.revision;
       if (!afterRevision) throw new Error("Missing official revision");
       const started = Date.now();
       const result = await value.coordinator.waitMany({
@@ -905,18 +908,21 @@ describe("HarnessDelegationCoordinator", () => {
       );
       const result = await value.coordinator.waitMany({
         timeoutMs: 0,
-        targets: started.map((row, index) => ({
-          threadId: row.threadId,
-          afterRevision: statuses[index]?.revision,
-        })),
+        targets: started.map((row, index) => {
+          const status = statuses[index];
+          if (!status) throw new Error("Missing fixture status");
+          return { threadId: row.threadId, afterRevision: status.revision };
+        }),
       });
       const text = JSON.stringify(result);
       expect(result.results).toHaveLength(3);
       expect(result.results.every((row) => row.outcome === "timedOut")).toBe(true);
-      expect(result.results.every((row) => row.status && !("cwd" in row.status))).toBe(true);
-      expect(result.results.every((row) => row.status && !("configuration" in row.status))).toBe(
+      expect(result.results.every((row) => row.outcome !== "error" && !("cwd" in row.status))).toBe(
         true,
       );
+      expect(
+        result.results.every((row) => row.outcome !== "error" && !("configuration" in row.status)),
+      ).toBe(true);
       expect(text.includes("OBSERVE04_BODY_")).toBe(false);
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4096);
     } finally {
@@ -960,6 +966,96 @@ describe("HarnessDelegationCoordinator", () => {
         requestId: "send-1",
       });
       expect(retry.turnId).not.toBe(first.turnId);
+    } finally {
+      await value.close();
+    }
+  });
+});
+
+describe("compact observer status", () => {
+  it("reads live metadata without loading native history or projecting message bodies", async () => {
+    const value = await fixture();
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "fixture",
+        cwd: value.directory,
+        parentThreadId: randomUUID(),
+      });
+      const thread = value.registered[0];
+      if (!thread) throw new Error("Missing fixture Thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      thread.thread.status = { type: "idle" };
+      thread.turns = [
+        {
+          id: started.turnId,
+          status: "completed",
+          get items(): never {
+            throw new Error("status must not project bodies");
+          },
+        },
+      ];
+      const read = vi.spyOn(thread.session, "readSnapshot").mockImplementation(() => {
+        throw new Error("status must not refresh history");
+      });
+      const result = await value.coordinator.status({ threadId: started.threadId });
+      expect(result.status).toBe("completed");
+      expect(result.turn?.turnId).toBe(started.turnId);
+      expect(read).not.toHaveBeenCalled();
+    } finally {
+      await value.close();
+    }
+  });
+});
+
+describe("bounded observer waits", () => {
+  it("bounds a stalled official status read and reuses that in-flight read", async () => {
+    const value = await fixture();
+    let release!: (value: unknown) => void;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    const read = vi.fn(() => blocked);
+    Object.assign(value.coordinator, { read });
+    try {
+      const input = { targets: [{ threadId: randomUUID() }], timeoutMs: 20 };
+      const result = await value.coordinator.waitMany(input);
+      expect(result.results[0]).toMatchObject({ outcome: "error" });
+      await value.coordinator.waitMany(input);
+      expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      release({});
+      await value.close();
+    }
+  });
+
+  it("cancels a server-side wait without cancelling the child Turn", async () => {
+    const value = await fixture();
+    try {
+      const child = await value.coordinator.start({
+        harnessId: "pi",
+        task: "fixture",
+        cwd: value.directory,
+        parentThreadId: randomUUID(),
+      });
+      const status = await value.coordinator.status({ threadId: child.threadId });
+      const controller = new AbortController();
+      const thread = value.registered[0];
+      if (!thread) throw new Error("Missing fixture Thread");
+      const wait = vi.spyOn(thread.changes, "wait");
+      const pending = value.coordinator.waitMany(
+        {
+          targets: [{ threadId: child.threadId, afterRevision: status.revision }],
+          timeoutMs: 10_000,
+        },
+        controller.signal,
+      );
+      const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(wait).toHaveBeenCalled());
+      controller.abort();
+      await rejected;
+      expect(thread.running).toBe(true);
     } finally {
       await value.close();
     }

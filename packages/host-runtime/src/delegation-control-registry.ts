@@ -63,13 +63,13 @@ export class DelegationControlRegistry implements DelegationControlApi {
     return (await this.#registrationForThread(input.threadId)).status(input);
   }
 
-  async waitMany(input: Parameters<DelegationControlApi["waitMany"]>[0]) {
+  async waitMany(input: Parameters<DelegationControlApi["waitMany"]>[0], signal?: AbortSignal) {
     if (input.targets.length === 1 && input.targets[0]) {
-      return (await this.#registrationForThread(input.targets[0].threadId)).waitMany(input);
+      return (await this.#registrationForThread(input.targets[0].threadId)).waitMany(input, signal);
     }
     const registrations = [...this.#registrations];
     if (registrations.length === 1) {
-      return only(registrations, "unreachable").waitMany(input);
+      return only(registrations, "unreachable").waitMany(input, signal);
     }
     throw new DelegationControlError(
       "PARENT_THREAD_AMBIGUOUS",

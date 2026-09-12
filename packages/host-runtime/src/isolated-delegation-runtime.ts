@@ -204,12 +204,12 @@ export async function startIsolatedDelegationRuntime(
         }
         return registration.status(input);
       },
-      waitMany: (input) => {
+      waitMany: (input, signal) => {
         if (!registration) throw new Error("Isolated Host Delegation API is not registered");
         if (!registration.waitMany) {
           throw new DelegationControlError("INVALID_ARGUMENT", "wait-many is unavailable");
         }
-        return registration.waitMany(input);
+        return registration.waitMany(input, signal);
       },
       evidence: (input) => {
         if (!registration) throw new Error("Isolated Host Delegation API is not registered");

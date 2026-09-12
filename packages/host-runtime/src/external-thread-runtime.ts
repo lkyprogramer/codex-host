@@ -1,3 +1,4 @@
+import { awaitWithSignal } from "./abortable-read.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -72,6 +73,7 @@ export interface ExternalThread {
   persistenceError: Error | null;
   ignoredInteractionIds: Set<HostInteractionId>;
   changes: ThreadChangeHub;
+  attentionChanges: ThreadChangeHub;
 }
 
 export type ExternalThreadLocation =
@@ -190,7 +192,17 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+const EXTERNAL_READ_TIMEOUT_MS = 10_000;
+
 export class ExternalThreadRuntime {
+  readonly #refreshes = new Map<
+    ExternalThread,
+    {
+      pending: Promise<ExternalThreadRpcError | null>;
+      signal: AbortSignal;
+      abort: AbortController;
+    }
+  >();
   readonly #adapters: Map<ExternalHarnessId, HarnessAdapter>;
   readonly #consumeOutputs: (thread: ExternalThread) => Promise<void>;
   readonly #diagnose: (error: unknown) => void;
@@ -199,6 +211,7 @@ export class ExternalThreadRuntime {
   readonly #restores = new Map<string, Promise<ExternalThread>>();
   readonly #threads = new Map<string, ExternalThread>();
   readonly #epoch: string;
+  readonly #historyReadTimeoutMs: number;
 
   constructor(input: {
     adapters: Map<ExternalHarnessId, HarnessAdapter>;
@@ -207,6 +220,7 @@ export class ExternalThreadRuntime {
     consumeOutputs(thread: ExternalThread): Promise<void>;
     diagnose(error: unknown): void;
     epoch?: string;
+    historyReadTimeoutMs?: number;
   }) {
     this.#adapters = input.adapters;
     this.#environment = input.environment ?? process.env;
@@ -214,6 +228,7 @@ export class ExternalThreadRuntime {
     this.#consumeOutputs = input.consumeOutputs;
     this.#diagnose = input.diagnose;
     this.#epoch = input.epoch ?? randomUUID();
+    this.#historyReadTimeoutMs = input.historyReadTimeoutMs ?? EXTERNAL_READ_TIMEOUT_MS;
   }
 
   get epoch(): string {
@@ -233,6 +248,8 @@ export class ExternalThreadRuntime {
   }
 
   clear(): void {
+    for (const refresh of this.#refreshes.values()) refresh.abort.abort();
+    this.#refreshes.clear();
     this.#threads.clear();
     this.#restores.clear();
   }
@@ -295,6 +312,7 @@ export class ExternalThreadRuntime {
       persistenceError: null,
       ignoredInteractionIds: new Set(),
       changes: new ThreadChangeHub(this.#epoch),
+      attentionChanges: new ThreadChangeHub(`${this.#epoch}:attention`),
     };
     externalThread.outputTask = this.#consumeOutputs(externalThread);
     this.#threads.set(externalThread.id, externalThread);
@@ -386,7 +404,11 @@ export class ExternalThreadRuntime {
       this.#restores.set(threadId, restoring);
     }
     try {
-      return { kind: "external", thread: await restoring, historyFresh: true };
+      return {
+        kind: "external",
+        thread: await awaitWithSignal(restoring, AbortSignal.timeout(this.#historyReadTimeoutMs)),
+        historyFresh: true,
+      };
     } catch (error) {
       return {
         kind: "error",
@@ -399,22 +421,55 @@ export class ExternalThreadRuntime {
   }
 
   async refresh(thread: ExternalThread): Promise<ExternalThreadRpcError | null> {
-    const snapshot = await thread.session.readSnapshot();
-    if (!snapshot.ok) return mapExternalThreadHarnessError(snapshot.error, "read");
+    let refresh = this.#refreshes.get(thread);
+    if (!refresh) {
+      const abort = new AbortController();
+      const signal = AbortSignal.any([
+        abort.signal,
+        AbortSignal.timeout(this.#historyReadTimeoutMs),
+      ]);
+      const latestTurn = thread.turns.at(-1);
+      const activeTurn = thread.activeTurnId;
+      const current = () =>
+        this.#threads.get(thread.id) === thread &&
+        !thread.running &&
+        thread.activeTurnId === activeTurn &&
+        thread.turns.at(-1) === latestTurn;
+      const pending = Promise.resolve()
+        .then(async () => {
+          const snapshot = await thread.session.readSnapshot();
+          signal.throwIfAborted();
+          if (!snapshot.ok) return mapExternalThreadHarnessError(snapshot.error, "read");
+          if (!current()) return null;
+          const aligned = await this.#repository.alignSnapshot(thread.record, snapshot.value);
+          signal.throwIfAborted();
+          if (!current()) return null;
+          thread.record = aligned.record;
+          thread.turns = aligned.turns;
+          thread.historyHydrated = true;
+          thread.thread = externalThreadValue({
+            record: aligned.record,
+            turns: aligned.turns,
+            sessionId: thread.sessionId,
+            running: thread.running,
+          });
+          return null;
+        })
+        .finally(() => this.#refreshes.delete(thread));
+      refresh = { pending, signal, abort };
+      this.#refreshes.set(thread, refresh);
+    }
     try {
-      const aligned = await this.#repository.alignSnapshot(thread.record, snapshot.value);
-      thread.record = aligned.record;
-      thread.turns = aligned.turns;
-      thread.historyHydrated = true;
-      thread.thread = externalThreadValue({
-        record: aligned.record,
-        turns: aligned.turns,
-        sessionId: thread.sessionId,
-        running: thread.running,
-      });
-      return null;
-    } catch {
-      return { code: -32081, message: "External Thread history could not be persisted" };
+      // Keep one native read in flight even after timeout. Its late result cannot mutate history.
+      return await awaitWithSignal(refresh.pending, refresh.signal);
+    } catch (error) {
+      return {
+        code: -32081,
+        message:
+          error instanceof Error && error.name === "TimeoutError"
+            ? "External Thread history read timed out"
+            : "External Thread history could not be read",
+      };
     }
   }
 

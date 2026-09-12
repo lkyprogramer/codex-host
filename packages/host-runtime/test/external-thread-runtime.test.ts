@@ -474,3 +474,53 @@ describe("ExternalThreadRuntime register", () => {
     },
   );
 });
+
+describe("bounded native history", () => {
+  it("shares a hung read, returns timeout, and discards its late result", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const original = opened.value.readSnapshot.bind(opened.value);
+    const read = vi.spyOn(opened.value, "readSnapshot").mockImplementation(async () => {
+      await gate;
+      return original();
+    });
+    const alignSnapshot = vi.fn();
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      historyReadTimeoutMs: 20,
+      repository: { alignSnapshot } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const thread = runtime.register({
+      record: record(),
+      session: opened.value,
+      sessionId: hostThreadId,
+      thread: { id: hostThreadId },
+      turns: [],
+    });
+    try {
+      const first = runtime.refresh(thread);
+      const second = runtime.refresh(thread);
+      expect(await first).toMatchObject({
+        code: -32081,
+        message: "External Thread history read timed out",
+      });
+      expect(await second).toMatchObject({ code: -32081 });
+      expect(await runtime.refresh(thread)).toMatchObject({ code: -32081 });
+      expect(read).toHaveBeenCalledTimes(1);
+      release();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(alignSnapshot).not.toHaveBeenCalled();
+    } finally {
+      release();
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+});

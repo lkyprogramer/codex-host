@@ -1,3 +1,4 @@
+import { awaitWithSignal } from "./abortable-read.js";
 import { setTimeout as cancellableDelay } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -59,6 +60,7 @@ import {
 import {
   projectDelegationEvidence,
   projectDelegationThreadSnapshot,
+  projectDelegationThreadStatus,
   validateReadOptions,
 } from "./delegation-snapshot.js";
 import { decodeThreadRevision } from "./thread-change-hub.js";
@@ -185,6 +187,7 @@ export class HarnessDelegationCoordinator {
     string,
     { message: string; promise: Promise<ThreadSendResult> }
   >();
+  readonly #officialStatusReads = new Map<string, Promise<DelegationThreadSnapshot>>();
   readonly #sendResults = new Map<string, { message: string; result: ThreadSendResult }>();
 
   constructor(input: {
@@ -919,7 +922,7 @@ export class HarnessDelegationCoordinator {
     return (await this.#statusView(input.threadId)).configuration;
   }
 
-  async waitMany(input: ThreadWaitManyInput): Promise<ThreadWaitManyResult> {
+  async waitMany(input: ThreadWaitManyInput, signal?: AbortSignal): Promise<ThreadWaitManyResult> {
     if (!Array.isArray(input.targets) || input.targets.length === 0) {
       throw new DelegationControlError(
         "INVALID_ARGUMENT",
@@ -929,10 +932,22 @@ export class HarnessDelegationCoordinator {
     if (!Number.isSafeInteger(input.timeoutMs) || input.timeoutMs < 0 || input.timeoutMs > 60_000) {
       throw new DelegationControlError("INVALID_ARGUMENT", "timeoutMs must be between 0 and 60000");
     }
+    if (
+      input.changeKind !== undefined &&
+      input.changeKind !== "any" &&
+      input.changeKind !== "attention"
+    ) {
+      throw new DelegationControlError("INVALID_ARGUMENT", "Invalid wait-many change kind");
+    }
+    signal?.throwIfAborted();
     const deadline = Date.now() + input.timeoutMs;
+    const readDeadline = AbortSignal.timeout(input.timeoutMs || 5_000);
+    const readSignal = signal ? AbortSignal.any([signal, readDeadline]) : readDeadline;
     const collect = async (): Promise<ThreadWaitManyResult> => {
       const results = await Promise.all(
-        input.targets.map(async (target) => this.#waitManyTarget(target)),
+        input.targets.map(async (target) =>
+          this.#waitManyTarget(target, input.changeKind, readSignal),
+        ),
       );
       const changed = results.some(
         (result) =>
@@ -941,33 +956,36 @@ export class HarnessDelegationCoordinator {
       return { timedOut: !changed, results };
     };
     let snapshot = await collect();
+    signal?.throwIfAborted();
     if (!snapshot.timedOut || input.timeoutMs === 0)
       return { ...snapshot, timedOut: snapshot.timedOut };
     while (Date.now() < deadline) {
       const remaining = deadline - Date.now();
       const waiters: Promise<unknown>[] = [];
       const round = new AbortController();
+      const roundSignal = signal ? AbortSignal.any([signal, round.signal]) : round.signal;
       let hasNonExternal = false;
       try {
         for (const target of input.targets) {
-          const resolution = await this.#externalRuntime.resolve(target.threadId).catch(() => null);
-          if (resolution && resolution.kind === "external") {
+          const thread = this.#externalRuntime.get(target.threadId);
+          if (thread) {
+            const changes =
+              input.changeKind === "attention" ? thread.attentionChanges : thread.changes;
             const observed = snapshot.results.find((row) => row.threadId === target.threadId);
             const cursor =
               observed && observed.outcome !== "error"
                 ? decodeThreadRevision(target.threadId, observed.revision)
                 : undefined;
             // Use the collected revision: an event between collect and subscribe must wake this wait.
-            const seq =
-              cursor && !("invalid" in cursor) ? cursor.seq : resolution.thread.changes.revision;
-            waiters.push(resolution.thread.changes.wait(seq, remaining, round.signal));
+            const seq = cursor && !("invalid" in cursor) ? cursor.seq : changes.revision;
+            waiters.push(changes.wait(seq, remaining, roundSignal));
           } else {
             hasNonExternal = true;
           }
         }
         await Promise.race([
           cancellableDelay(hasNonExternal ? Math.min(100, remaining) : remaining, undefined, {
-            signal: round.signal,
+            signal: roundSignal,
           }),
           ...waiters,
         ]);
@@ -975,7 +993,10 @@ export class HarnessDelegationCoordinator {
         // A progress event in one Thread must not leave all other waiters alive for 60 seconds.
         round.abort();
       }
+      signal?.throwIfAborted();
+      if (Date.now() >= deadline) return snapshot;
       snapshot = await collect();
+      signal?.throwIfAborted();
       if (!snapshot.timedOut) return snapshot;
     }
     return snapshot;
@@ -1128,10 +1149,43 @@ export class HarnessDelegationCoordinator {
     };
   }
 
-  async #statusView(threadId: string): Promise<DelegationThreadStatusView> {
-    const snapshot = await this.read({ threadId, view: "result" });
-    const resolution = await this.#externalRuntime.resolve(threadId).catch(() => null);
-    const thread = resolution && resolution.kind === "external" ? resolution.thread : undefined;
+  #officialStatus(threadId: string): Promise<DelegationThreadSnapshot> {
+    let pending = this.#officialStatusReads.get(threadId);
+    if (!pending) {
+      pending = this.read({ threadId, view: "result" }).finally(() =>
+        this.#officialStatusReads.delete(threadId),
+      );
+      this.#officialStatusReads.set(threadId, pending);
+    }
+    return pending;
+  }
+
+  async #statusView(
+    threadId: string,
+    changeKind: ThreadWaitManyInput["changeKind"] = "any",
+  ): Promise<DelegationThreadStatusView> {
+    const location = await this.#externalRuntime.locate(threadId);
+    if (location.kind === "error")
+      throw new DelegationControlError("THREAD_NOT_FOUND", location.error.message);
+    const thread = location.kind === "external" ? location.thread : undefined;
+    if (location.kind === "external" && !thread) {
+      throw new DelegationControlError(
+        "DELEGATION_FAILED",
+        "Thread is not loaded; read or reconcile it before observing",
+      );
+    }
+    const snapshot = thread
+      ? {
+          harnessId: thread.harnessId,
+          ...projectDelegationThreadStatus({
+            thread: thread.thread,
+            running: thread.running,
+            turns: thread.activeTurnId
+              ? [{ id: thread.activeTurnId, status: "inProgress" }]
+              : thread.turns,
+          }),
+        }
+      : await this.#officialStatus(threadId);
     const delegation = await this.#repository.getDelegationByChild(
       hostThreadIdSchema.parse(threadId),
     );
@@ -1172,8 +1226,9 @@ export class HarnessDelegationCoordinator {
     if (!delegation?.parentHostThreadId) unknown.push("parent");
     if (!snapshot.turn) unknown.push("turn");
     if (!delegation) unknown.push("delegation");
-    const revision = thread
-      ? thread.changes.encode({
+    const changes = changeKind === "attention" ? thread?.attentionChanges : thread?.changes;
+    const revision = changes
+      ? changes.encode({
           threadId,
           turnId: snapshot.turn?.turnId ?? null,
           status: snapshot.status,
@@ -1217,9 +1272,13 @@ export class HarnessDelegationCoordinator {
 
   async #waitManyTarget(
     target: ThreadWaitManyInput["targets"][number],
+    changeKind?: ThreadWaitManyInput["changeKind"],
+    signal?: AbortSignal,
   ): Promise<ThreadWaitManyResult["results"][number]> {
     try {
-      const status = await this.#statusView(target.threadId);
+      signal?.throwIfAborted();
+      const pending = this.#statusView(target.threadId, changeKind);
+      const status = signal ? await awaitWithSignal(pending, signal) : await pending;
       const decoded = decodeThreadRevision(target.threadId, target.afterRevision);
       if (decoded && "invalid" in decoded) {
         return {
@@ -1229,7 +1288,13 @@ export class HarnessDelegationCoordinator {
           status: compactWaitManyStatus(status),
         };
       }
-      if (decoded && decoded.epoch !== this.#externalRuntime.epoch) {
+      if (
+        decoded &&
+        decoded.epoch !==
+          (this.#externalRuntime.get(target.threadId) && changeKind === "attention"
+            ? `${this.#externalRuntime.epoch}:attention`
+            : this.#externalRuntime.epoch)
+      ) {
         return {
           threadId: target.threadId,
           outcome: "resync",

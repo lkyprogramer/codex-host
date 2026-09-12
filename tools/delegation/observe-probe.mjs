@@ -121,10 +121,10 @@ try {
   const result = JSON.parse(observed.stdout);
   assert.equal(result.reason, "attention");
   assert.deepEqual(result.events, [{ threadId: one.threadId, reason: "terminal" }]);
-  assert(result.suppressedChanges >= 1, "ordinary progress was not observed and suppressed");
+  assert.equal(result.suppressedChanges, 0, "ordinary progress escaped the semantic server wait");
   assert(
-    result.requests >= (durationMs > 62000 ? 4 : 3),
-    "internal continuation was not exercised",
+    result.requests === (durationMs > 62000 ? 3 : 2),
+    "unexpected wakeups or missing internal continuation",
   );
   assert(
     observed.firstOutputMs >= durationMs - 500,

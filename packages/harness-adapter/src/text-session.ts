@@ -128,10 +128,26 @@ export interface HostTextInput {
   text: string;
 }
 
+export type HarnessWorkMode = "default" | "plan";
+
+export interface HarnessWorkModeControl {
+  readonly current: HarnessWorkMode | null;
+  set(mode: HarnessWorkMode): Promise<HarnessResult<void>>;
+}
+
+export interface HarnessSteeringControl {
+  interject(input: {
+    expectedTurnId: HostTurnId;
+    text: string;
+    interjectionId: string;
+  }): Promise<HarnessResult<{ accepted: true }>>;
+}
+
 export interface TurnStartCommand {
   type: "turn.start";
   turnId: HostTurnId;
   input: HostTextInput[];
+  workMode?: HarnessWorkMode;
 }
 
 export interface TurnCancelCommand {
@@ -512,6 +528,8 @@ export interface HarnessSession {
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly commands?: HarnessCommandCapability;
+  readonly workMode?: HarnessWorkModeControl;
+  readonly steering?: HarnessSteeringControl;
 
   refreshUsage?(): Promise<void>;
   readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>>;

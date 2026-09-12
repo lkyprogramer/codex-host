@@ -1,45 +1,88 @@
-# Thread observer
+# 任务观察器
 
-`thread observe` is a read-only CLI client loop over the existing Runtime `wait-many` API. It invokes no Model, starts no Turn, and makes no scheduling or business-state decisions. Runtime requests still wait at most 60 seconds; the observer renews them internally without returning each idle checkpoint to its caller.
+`thread observe` 是基于现有 Runtime `wait-many` API 的只读 CLI 观察器。它在程序内部持续检查任务状态，不调用模型、不启动新的 Turn，也不决定业务验收或派发策略。每次 Runtime 请求仍最多等待60秒；请求到期后，由观察器自动续等，不把每次“还没完成”都返回给协调者。
 
-## Invocation
+## 为什么能减少协调者空调用
 
-Use the CLI path supplied by the current Host. POSIX example (use the equivalent environment-variable invocation on other shells):
+没有观察器时，协调者可能反复执行下面的过程：
+
+```text
+模型发起状态查询 → 工具返回“仍在运行” → 模型判断继续等待 → 模型再次发起查询
+```
+
+即使任务没有变化，工具结果仍会回到模型，形成没有推进工作的推理回合。观察器把这些重复判断放到普通程序里执行：
+
+```text
+模型启动观察器一次
+  → 程序查询或等待多个任务
+  → 没有变化：程序自行续等
+  → 只有普通输出变化：服务端继续等，不唤醒 CLI
+  → 完成、失败、需要输入或到达复查时间：返回一次结果
+  → 模型处理结果，决定采纳、返修或派发下一项任务
+```
+
+子任务不需要主动向父协调者发消息。任务状态和输出进入 Host 后，观察器通过 `wait-many` 的 `changeKind: "attention"` 获取变化；服务端只在状态、Turn、交互或配置变化时唤醒 CLI。普通日志保留在任务历史中，不触发观察请求。未指定该参数的 `wait-many` 仍保留普通变化通知。
+
+这需要同时满足两层条件：
+
+| 层次 | 谁负责等待 | 是否需要模型介入 |
+|---|---|---|
+| 观察器内部 | CLI 自动续接最多60秒的 Runtime 请求，维护游标并过滤普通进度 | 不需要 |
+| 外层工具内部 | 一次程序化工具调用持续等待同一个 CLI 进程；若底层返回进程句柄，由程序继续等待 | 不需要 |
+| 结果回到协调者 | 有待处理事件、复查到期、总等待到期或观察器被取消 | 模型恢复处理 |
+
+如果只增加观察器，却仍让外层工具每隔几秒返回模型，再由模型发起下一次进程查询，空调用仍然存在。因此，节省的是**中途没有业务变化时的模型推理回合**。普通程序的 CPU、网络和工具执行开销仍然存在；不能据此推算固定节省多少额度。
+
+## 调用方式
+
+使用当前 Host 提供的 CLI 路径。下面是 POSIX shell 示例，其它 shell 使用对应的环境变量调用语法：
 
 ```sh
 "$CODEXHOST_CLI_PATH" thread observe --targets-file /absolute/targets.json --timeout-ms 300000
 ```
 
-Targets are a nonempty JSON array; IDs must be unique:
+目标文件必须是非空 JSON 数组，任务 ID 不得重复：
 
 ```json
 [
   {"threadId": "child-a", "expectedTurnId": "turn-a"},
-  {"threadId": "child-b", "afterRevision": "opaque-revision-from-status"}
+  {"threadId": "child-b", "afterRevision": "opaque-revision-from-observe"}
 ]
 ```
 
-A target can also contain `reviewAt`, an absolute ISO timestamp with a timezone. Choose that timestamp from the current task's next useful review time. The earliest target deadline bounds each internal wait. The overall timeout defaults to five minutes and is capped at one hour; zero performs one immediate Runtime snapshot. Neither deadline cancels a child.
+每个目标还可以设置 `reviewAt`，格式为带时区的绝对 ISO 时间戳，表示“最晚何时需要协调者复查”。根据该任务下一次有必要检查的时间设置；所有目标中最早的复查时间会约束内部等待。任务提前完成或失败时会提前返回，不必等到复查时间。
 
-The command writes **one JSON result** when:
+`--timeout-ms` 是观察器的总等待上限，默认5分钟，最多1小时；传入0时只请求一次即时 Runtime 状态。这与每个 Runtime 请求最多60秒是两个不同的时间限制。任何等待或复查到期都不会取消子任务。
 
-- a target completes, fails, or is interrupted;
-- a projected Host Interaction needs input;
-- a target changes Turn, a cursor requires resync, or a target reports an error;
-- a target's review deadline or the overall timeout expires;
-- SIGINT/SIGTERM stops the observer (exit 130/143).
+满足以下任一条件时，命令输出**一份 JSON 结果**：
 
-Ordinary output revisions update the internal cursor and do not return control. The result contains `reason`, `events`, compact `statuses`, resumable `targets`, `elapsedMs`, `requests`, and `suppressedChanges`. It contains no historical messages or tool bodies. On resumption, consume the returned cursors, remove handled terminal targets, and advance consumed review deadlines. Use `thread read` or `thread evidence` separately for the changed target's details.
+- 任务完成、失败或被中断。
+- Host 中实际投影出的审批或提问正在等待输入。
+- 任务切换了 Turn、游标需要重新同步，或某个目标返回错误。
+- 某个任务的复查时间或观察器总等待时间到期。
+- 收到 SIGINT/SIGTERM，停止观察器；退出码分别为130/143。
 
-`expectedTurnId` prevents silently observing replacement work. Without it, the observer binds the first observed Turn. Invalid or restarted-Runtime cursors return `resync`; the caller decides whether the new state still belongs to its attempt. Transport failures get at most two internal retries; authentication and protocol failures return immediately. The observer keeps no independent task database and never mutates the targets file.
+普通输出变化不会唤醒当前 Runtime 的语义等待；兼容旧 Runtime 时，CLI 仍会过滤收到的普通变化，不返回控制权。结果包含 `reason`、`events`、紧凑的 `statuses`、可用于继续观察的 `targets`，以及 `elapsedMs`、`requests`、`suppressedChanges`。它不包含历史消息或工具输出正文。
 
-`pendingInteractions` is derived from the live external Turn projector, not guessed from text. Official Threads, unloaded projections, and older Runtimes may not expose this field; the result lists them in `inputVisibilityUnavailable`. Bounded review remains necessary for targets without this capability. The observer never answers or approves an interaction.
+继续观察时，使用返回的游标；移除已经处理完的终态任务，并更新已经消费的复查时间。只对需要处理的任务另行调用 `thread read` 或 `thread evidence` 获取详细结果，不重新读取所有任务的长历史。
 
-## Outer-tool boundary
+`expectedTurnId` 防止观察器悄悄跟随另一次工作；未指定时，观察器绑定首次看到的 Turn。无效游标或 Runtime 重启后的游标会返回 `resync`，由调用方判断当前状态是否仍属于原来的执行尝试。传输故障最多在内部重试两次；认证和协议错误立即返回。观察器不维护独立任务数据库，也不修改目标文件。
 
-Keeping a CLI process alive does **not** by itself prove the coordinator Model stayed idle. The calling tool must await that same process without returning to model inference on every transport timeout. If a tool yields a process/session handle, retain it and resume that process; do not start another observer. A programmatic tool wrapper can await internal process polls without model inference, provided its own invocation is allowed to remain pending.
+`pendingInteractions` 来自正在运行的外部 Turn 投影器，不通过文字猜测。原生 Codex 任务、没有加载投影的任务以及旧版 Runtime 可能无法提供这个字段，结果会在 `inputVisibilityUnavailable` 中列出这些任务。对它们仍须设置有界复查，不能把“无法观察”当成“没有输入请求”。观察器不会代答问题或批准操作。
 
-For a caller with programmatic tool orchestration, put **all** process-handle polling inside one awaited invocation, and give that invocation a yield budget longer than the observer's total timeout plus transport overhead. The following is the pattern tested in a Codex session exposing `functions.exec` (POSIX command; tool names and budgets must match the actual caller):
+## 响应性与读取边界
+
+已加载的外部任务通过内存中的状态、Turn 标识和交互计数提供观察结果，不刷新原生历史，不构造消息正文。未加载的外部任务会明确返回错误；调用方先通过 `thread read` 或 reconcile 恢复它，再观察，不能把未加载状态推断成完成。
+
+桌面 `thread/read`、`thread/resume`、分页历史读取及任务查询异步分发，慢历史读取不会阻塞其它任务和模型列表的请求入口。同一任务的历史读取和后续操作保持顺序；中断及轻量查询独立处理。单任务并发历史刷新共享一笔读取，默认10秒超时。底层 Harness 没有取消读取接口时，超时不会被描述为原生操作已停止：在途读取仍被保留以防重复启动，迟到结果不能覆盖新 Turn 的历史。
+
+`wait-many` 的截止时间覆盖首次状态读取；HTTP 客户端断开会取消服务端等待，释放等待器，不取消子任务。原生 Codex 状态读取仍通过其原有读取路径，同一个在途查询会被复用。状态无法及时取得时返回具名错误，不伪造终态。
+
+## 外层工具如何持续等待
+
+CLI 进程一直存活，本身**不能证明协调者模型没有被反复调用**。外层工具必须持续等待同一个进程，而不是每次底层超时都返回模型。如果底层工具返回进程或会话句柄，应保留句柄并继续等待原进程，不能重复启动观察器。
+
+对于支持程序化工具编排的调用方，将**全部进程状态查询**放在同一个等待中的工具调用内，并让外层调用的等待时间覆盖观察器总等待时间及传输余量。下面是在提供 `functions.exec` 的 Codex 会话中实测过的调用形式；POSIX 命令、工具名称和等待参数都应与实际调用环境对应：
 
 ```javascript
 // @exec: {"yield_time_ms": 120000}
@@ -59,18 +102,37 @@ while (result.session_id) {
 text({ exitCode: result.exit_code, output });
 ```
 
-The bounded probe was observed through one such outer invocation for approximately 75 seconds, with no intermediate model return. This establishes that invocation path, not unlimited waiting or a guarantee for every tool. Do not configure a five-minute observer inside a two-minute outer wait and claim the same result.
+这个例子有三个不同的时间参数：
 
-If the outer tool itself has a hard short yield/deadline, repeated resumptions can still invoke the Model. Report this limitation rather than claiming zero wakeups. A detached process or result file cannot wake a suspended parent; no callback/daemon is added here. Stop observation independently from `thread cancel` and `thread release`.
+- `thread observe --timeout-ms 90000`：观察器最多等待90秒；发生需处理事件时提前结束。
+- 外层 `yield_time_ms: 120000`：请求外层工具在120秒内保持本次调用，为观察器留出返回余量；实际是否允许取决于该工具。
+- 内部 `exec_command` 的1000毫秒和 `write_stdin` 的10000毫秒：底层进程工具的返回周期。`while` 循环由 JavaScript 程序执行，期间并不需要模型发起这些调用。
 
-## Verification
+因此，内部即使执行多次 `write_stdin`，只要外层 `functions.exec` 没有中途返回，协调者模型就不必为这些进程查询反复推理。最后的 `text(...)` 才把聚合结果交回协调者。
 
-Focused tests use `tests/vitest.config.js`: `thread-observer`, `thread-observer-runtime`, `thread-change-hub`, `harness-delegation-coordinator`, `delegation-cli`, and `delegation-skill` tests, plus the projector interaction test.
+本次受控实验中，CLI 在约66秒时输出终态结果；包含启动、取消检查和清理的整段外层调用约75秒，中途没有返回模型。这个结果只证明本次调用路径，不代表无限等待，也不保证其它工具具有同样能力。不能把5分钟观察器放进只允许等待2分钟的外层调用，再声称不会产生中途返回。
 
-After building the owning package, the bounded wall-clock probe runs the real Runtime HTTP server and a real observer CLI process against controlled fixture Threads:
+如果外层工具存在不可调整的较短返回上限，仍可能需要模型发起续等，应明确保留这个限制。独立后台进程或结果文件不能自行唤醒暂停的父协调者；本实现没有新增回调或守护进程。停止观察、`thread cancel` 和 `thread release` 是不同动作，不能互相替代。
+
+## 验证方式与已证明范围
+
+定向测试使用 `tests/vitest.config.js`，覆盖 `thread-observer`、`thread-observer-runtime`、`thread-change-hub`、`harness-delegation-coordinator`、`delegation-cli`、`delegation-skill`，以及投影器交互测试。2026-09-10 的105项测试及66秒实验仅证明观察器续等、输出和取消行为，没有覆盖桌面并发响应。响应性修复增加了慢历史读取期间的桌面查询与模型列表、真实 CLI + HTTP 并发观察、原生读取截止及迟到结果、HTTP 断开取消等回归。
+
+构建所属包后，可以执行有时间上限的实际等待实验。它使用真实 Runtime HTTP 服务和真实观察器 CLI 进程，任务由受控 Harness fixture 驱动：
 
 ```sh
 node tools/delegation/observe-probe.mjs --duration-ms 66000
 ```
 
-It crosses an actual 60-second idle wait, introduces ordinary progress, completes a target, and checks that the CLI emitted one result. It also sends SIGTERM to another observer and confirms its child remains running. Fixtures call no Model. The probe reports Runtime/CLI evidence only: actual outer-tool wakeups must be checked in the invocation that runs it, separately from fixture success. It creates a temporary isolated Runtime, closes it, and removes only its own temporary files. It does not restart or install the user's Host.
+实验跨过一次真实的60秒空等待，随后制造普通进度、完成任务，并检查 CLI 只输出一份结果。当前版本同时断言普通进度不唤醒 CLI：66秒实验为3次请求（首次快照、等待、续等），短于60秒的实验为2次。还会向另一个观察器发送 SIGTERM，确认其子任务仍在运行。
+
+2026-09-10 的修复前实测结果（保留原始证据，不代表当前请求频率）：
+
+- 观察器内部发起5次状态请求，过滤2次普通变化。
+- CLI 首次输出约在66.03秒，返回1个终态事件。
+- 整段外层仅调用一次 `functions.exec`；程序内部查询进程状态8次，中途返回模型0次。
+- 观察器取消退出码143，子任务保持 `running`；清理无错误。
+
+受控 fixture 不调用模型。CLI 只输出一次，并不能单独证明外层模型调用次数；本次外层连续等待结论来自实际承载该实验的工具调用，两层证据需要分开核对。这也不是额度账单测量或真实 Grok 业务任务验收。
+
+实验创建临时隔离 Runtime，结束后关闭它，并只删除自己的临时文件；不会重启或安装用户当前使用的 Host。

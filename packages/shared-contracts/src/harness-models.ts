@@ -369,6 +369,7 @@ const externalThreadOwnershipSchema = z
     threadId: hostThreadIdSchema,
     owner: z.literal("external"),
     harnessId: z.string().max(256).pipe(harnessIdSchema),
+    nativeSteering: z.boolean().optional(),
   })
   .strict();
 
