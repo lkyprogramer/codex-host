@@ -689,7 +689,7 @@ function findComposerConversationThreadId(composer?: Element): HostThreadId | nu
   return threadId;
 }
 
-function isCurrentDraftWrapper(value: unknown): value is readonly unknown[] {
+function isLegacySevenSlotDraftWrapper(value: unknown): value is readonly unknown[] {
   if (
     !Array.isArray(value) ||
     value.length !== 7 ||
@@ -707,6 +707,28 @@ function isCurrentDraftWrapper(value: unknown): value is readonly unknown[] {
   } catch {
     return false;
   }
+}
+
+function duplicatedClientNewThreadId(value: unknown): string | null {
+  if (!Array.isArray(value)) return null;
+  const ids = value.filter(
+    (item): item is string => typeof item === "string" && item.startsWith("client-new-thread:"),
+  );
+  if (ids.length < 2 || ids.some((id) => id !== ids[0])) return null;
+  return ids[0] ?? null;
+}
+
+function draftIdFromMemoValue(value: unknown): string | null {
+  if (
+    isLegacySevenSlotDraftWrapper(value) &&
+    typeof value[2] === "string" &&
+    value[2].startsWith("client-new-thread:")
+  ) {
+    return value[2];
+  }
+  // Codex 26.908 stores the same client-new-thread identity twice in a longer
+  // memo-cache tuple (length 13/19 observed) instead of the seven-slot atom.
+  return duplicatedClientNewThreadId(value);
 }
 
 type ComposerDomIdentity =
@@ -742,13 +764,8 @@ function findComposerDraftIds(composer: Element): Set<string> {
     const memoCache = isRecord(updateQueue) ? updateQueue.memoCache : null;
     const data = isRecord(memoCache) && Array.isArray(memoCache.data) ? memoCache.data : [];
     for (const value of data) {
-      if (
-        isCurrentDraftWrapper(value) &&
-        typeof value[2] === "string" &&
-        value[2].startsWith("client-new-thread:")
-      ) {
-        draftIds.add(value[2]);
-      }
+      const draftId = draftIdFromMemoValue(value);
+      if (draftId) draftIds.add(draftId);
     }
     const parent = fiber.return;
     fiber =
