@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   installRendererDraftPrewarmPolicy,
   installRendererDraftPrewarmPolicyDirect,
+  requestManagerFromHookState,
   selectRendererRequestManager,
 } from "../src/renderer-draft-prewarm-policy.js";
 import {
@@ -248,6 +249,30 @@ describe("Renderer draft prewarm policy", () => {
     ).toBeNull();
   });
 
+  it("unwraps a Desktop 26.908 ready snapshot to the owned request manager", () => {
+    const requestClient = {
+      hostId: "local",
+      sendRequest: vi.fn(),
+      prewarmThreadStart: vi.fn(),
+      enqueueRequest: vi.fn(),
+    };
+    const manager = {
+      requestClient,
+      sendRequest: vi.fn(),
+      getHostId: () => "local",
+      prewarmedThreadManager: { discardAllPrewarmedThreads: vi.fn() },
+    };
+
+    expect(requestManagerFromHookState(manager)).toBe(manager);
+    expect(requestManagerFromHookState({ hostId: "local", manager, status: "ready" })).toBe(
+      manager,
+    );
+    expect(requestManagerFromHookState({ status: "success", isPending: false, data: {} })).toBeNull();
+    expect(
+      requestManagerFromHookState({ hostId: "local", manager: { hostId: "local" }, status: "ready" }),
+    ).toBeNull();
+  });
+
   it("retains the single-manager fallback when the Composer has no Host markers", () => {
     const candidate = {
       manager: {},
@@ -276,10 +301,8 @@ describe("Renderer draft prewarm policy", () => {
     expect(evaluate).toHaveBeenCalledOnce();
     const expression = evaluate.mock.calls[0]?.[0] ?? "";
     expect(expression).toContain("webContents.fromId(17)");
-    expect(expression).toContain("typeof value.requestClient.enqueueRequest === 'function'");
-    expect(expression).toContain(
-      "typeof value.prewarmedThreadManager?.discardAllPrewarmedThreads === 'function'",
-    );
+    expect(expression).toContain("requestManagerFromHookState");
+    expect(expression).toContain("value.manager");
     expect(expression).toContain("executionTargetHostId");
     expect(expression).toContain("permissionsHostId");
   });

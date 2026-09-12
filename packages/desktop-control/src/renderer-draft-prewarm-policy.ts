@@ -43,6 +43,27 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+export function requestManagerFromHookState(value: unknown): object | null {
+  const asRecord = (candidate: unknown): candidate is Record<string, unknown> =>
+    typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
+  const isManager = (candidate: unknown): candidate is Record<string, unknown> => {
+    if (!asRecord(candidate) || !asRecord(candidate.requestClient)) return false;
+    const client = candidate.requestClient;
+    const prewarmed = asRecord(candidate.prewarmedThreadManager)
+      ? candidate.prewarmedThreadManager
+      : null;
+    return (
+      typeof client.prewarmThreadStart === "function" &&
+      typeof client.sendRequest === "function" &&
+      typeof client.enqueueRequest === "function" &&
+      typeof prewarmed?.discardAllPrewarmedThreads === "function" &&
+      typeof candidate.sendRequest === "function"
+    );
+  };
+  if (isManager(value)) return value;
+  return asRecord(value) && isManager(value.manager) ? value.manager : null;
+}
+
 const FIND_REQUEST_MANAGER_EXPRESSION = `(() => {
   const editors = [...document.querySelectorAll(
     '[data-codex-composer], [contenteditable="true"][role="textbox"]',
@@ -71,19 +92,8 @@ const FIND_REQUEST_MANAGER_EXPRESSION = `(() => {
     }
     let hook = fiber.memoizedState;
     for (let index = 0; hook != null && index < 120; index += 1, hook = hook.next) {
-      const value = hook.memoizedState;
-      if (
-        value != null &&
-        typeof value === 'object' &&
-        value.requestClient != null &&
-        typeof value.requestClient.prewarmThreadStart === 'function' &&
-        typeof value.requestClient.sendRequest === 'function' &&
-        typeof value.requestClient.enqueueRequest === 'function' &&
-        typeof value.prewarmedThreadManager?.discardAllPrewarmedThreads === 'function' &&
-        typeof value.sendRequest === 'function'
-      ) {
-        managers.add(value);
-      }
+      const manager = (${requestManagerFromHookState.toString()})(hook.memoizedState);
+      if (manager) managers.add(manager);
     }
   }
   const candidates = [...managers].map((manager) => {

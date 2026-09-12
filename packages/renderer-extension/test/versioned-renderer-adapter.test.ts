@@ -121,6 +121,47 @@ describe("current Codex Renderer Agent adapter", () => {
     );
   });
 
+  it("unwraps a Desktop 26.908 ready snapshot to the owned request manager", () => {
+    const editor = {
+      parentElement: null,
+      querySelectorAll: () => [],
+    } as unknown as Element;
+    const root = { querySelector: () => editor } as unknown as ParentNode;
+    const addNotificationCallback = vi.fn(() => () => undefined);
+    const requestClient = {
+      hostId: "local",
+      sendRequest: vi.fn<(method: string, params: unknown) => void>(),
+      prewarmThreadStart: () => undefined,
+      enqueueRequest: () => undefined,
+    };
+    const manager = {
+      requestClient,
+      sendRequest: async (method: string, params: unknown) =>
+        requestClient.sendRequest(method, params),
+      addNotificationCallback,
+      getHostId: () => "local",
+      prewarmedThreadManager: { discardAllPrewarmedThreads: () => undefined },
+    };
+    Object.defineProperty(editor, "__reactFiber$test", {
+      configurable: true,
+      value: {
+        memoizedState: {
+          memoizedState: { status: "success", isPending: false, data: {} },
+          next: {
+            memoizedState: { hostId: "local", manager, status: "ready" },
+            next: null,
+          },
+        },
+        return: null,
+      },
+    });
+
+    expect(findActivePrewarmTargets(root)).toEqual([manager]);
+    expect(findActivePrewarmTargets(root)[0]?.addNotificationCallback).toBe(
+      addNotificationCallback,
+    );
+  });
+
   it("keeps local and remote request targets independently addressable", () => {
     const local = {
       hostId: "local",

@@ -554,6 +554,32 @@ function isCurrentRequestBridge(value: unknown): value is PrewarmTarget {
   );
 }
 
+function hookLooksLikeRequestManager(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (isCurrentRequestBridge(value.requestClient)) return true;
+  const hostId = value.hostId;
+  const sendRequest = value["sendRequest"];
+  const prewarm = value["prewarmThreadStart"];
+  const enqueue = value["enqueueRequest"];
+  if (
+    typeof hostId === "string" &&
+    hostId.length > 0 &&
+    typeof sendRequest === "function" &&
+    typeof prewarm === "function" &&
+    typeof enqueue === "function"
+  ) {
+    return true;
+  }
+  return typeof sendRequest === "function" && isRecord(value.requestClient);
+}
+
+function requestCandidateFromHookState(hookState: unknown): unknown {
+  if (!isRecord(hookState)) return hookState;
+  if (hookLooksLikeRequestManager(hookState)) return hookState;
+  if (hookLooksLikeRequestManager(hookState.manager)) return hookState.manager;
+  return hookState;
+}
+
 export function findActivePrewarmTargets(root: ParentNode): PrewarmTarget[] {
   const editor = root.querySelector<HTMLElement>(
     '[data-codex-composer], [contenteditable="true"][role="textbox"]',
@@ -587,7 +613,7 @@ export function findActivePrewarmTargets(root: ParentNode): PrewarmTarget[] {
   for (let depth = 0; depth < 200; depth += 1) {
     let hook = fiber.memoizedState as { memoizedState?: unknown; next?: unknown } | null;
     for (let hookIndex = 0; hook && hookIndex < 100; hookIndex += 1) {
-      const hookState = hook.memoizedState;
+      const hookState = requestCandidateFromHookState(hook.memoizedState);
       if (isRecord(hookState)) {
         const requestClient = hookState.requestClient;
         const bridge = isCurrentRequestBridge(requestClient)
