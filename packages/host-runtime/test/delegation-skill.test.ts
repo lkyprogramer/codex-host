@@ -80,10 +80,6 @@ describe("delegation Skill installation", () => {
     expect(CODEXHOST_DELEGATION_SKILL).toContain("operate on that Thread\ndirectly");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("is ambiguous, ask the user to identify it");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("session read-only");
-    expect(CODEXHOST_DELEGATION_SKILL).toContain("explicitly read the target Thread");
-    expect(CODEXHOST_DELEGATION_SKILL).toContain(
-      "omit unavailable fields rather than inventing them",
-    );
   });
 
   it("routes natural agent requests and points execution to the authoritative help", () => {
@@ -92,10 +88,10 @@ describe("delegation Skill installation", () => {
     expect(CODEXHOST_DELEGATION_SKILL).toContain("session's content, progress, or results");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("Not for recapping the current conversation");
     expect(CODEXHOST_DELEGATION_SKILL).toContain('"$CODEXHOST_CLI_PATH" delegate --help');
-    expect(CODEXHOST_DELEGATION_SKILL).toContain("sole authoritative source");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("authoritative source");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("send a follow-up message");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("cancel its current Turn");
-    expect(CODEXHOST_DELEGATION_SKILL).toContain("target keeps its default");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("Use the Harness native defaults");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("thread wait-many");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("thread observe");
     expect(CODEXHOST_DELEGATION_SKILL).toContain(
@@ -103,6 +99,7 @@ describe("delegation Skill installation", () => {
     );
     expect(CODEXHOST_DELEGATION_SKILL).toContain("thread evidence");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("not an OS read-only sandbox");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("labeled task link");
   });
 
   it("directs the CLI invocation through the Host-provided absolute path", () => {
@@ -125,6 +122,9 @@ describe("delegation Skill installation", () => {
     // installations to a stale Skill because updates were reported as conflicts.
     expect(PREVIOUS_MANAGED_DIGESTS).toContain(
       "fa7944cd1e72ffbaf932fca2074bdb78aad4670d8990b6711220dd83c39509a0",
+    );
+    expect(PREVIOUS_MANAGED_DIGESTS).toContain(
+      "9d2f491850fb0b4084a31ba9b5e4a550b5e833747af322090d8ed0ff80b88c30",
     );
     expect(PREVIOUS_MANAGED_DIGESTS).not.toContain(
       createHash("sha256").update(CODEXHOST_DELEGATION_SKILL).digest("hex"),

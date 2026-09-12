@@ -117,10 +117,9 @@ export async function aggregateOfficialAccountThreadListPage(input: {
   requestAccountPage(accountId: string, params: JsonObject): Promise<OfficialThreadListPage>;
   observeThread?(threadId: string, accountId: string): Promise<void>;
 }): Promise<OfficialThreadListPage> {
-  // The caller asks for an exact row count when it resolves a partially
-  // consumed batch into a resumable cursor, and that count is smaller than the
-  // page size of the originating query. Honouring `query.limit` instead would
-  // over-deliver and break the caller's prefix accounting.
+  // The outer merger may re-request only its consumed prefix. The decoded
+  // desktop query still carries the original, larger page size in that case.
+  // Honouring `query.limit` there would over-deliver and break prefix accounting.
   const requestedLimit = input.params.limit;
   const pageLimit =
     typeof requestedLimit === "number" && Number.isSafeInteger(requestedLimit) && requestedLimit > 0

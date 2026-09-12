@@ -12,6 +12,7 @@ const SKILL_RELATIVE_PATH = path.join("skills", "codexhost-delegation", "SKILL.m
  */
 export const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
   "20314c67b7be9cd9aaba81949ed87495d3b0f90760c1c43fdd62bfeaef069b86",
+  "9d2f491850fb0b4084a31ba9b5e4a550b5e833747af322090d8ed0ff80b88c30",
   "aff258622dc8ff321f32b15620d081e578cb9c9ed1134d6a57f35ca8e7762c0a",
   "ba509f57e5448e796b3dfdd5031dcb08672eded50b61c0a54de84cfa02c49dd3",
   "d3ddf6db9bc5c5df825479c885bbbf0ca08da66f7057a12e02e1fdf57525149e",
@@ -48,21 +49,13 @@ commands in:
 - PowerShell: \`& $env:CODEXHOST_CLI_PATH delegate --help\`
 - cmd: \`"%CODEXHOST_CLI_PATH%" delegate --help\`
 
-Treat its output as the sole authoritative source for:
+Use CLI help as the authoritative source for commands and behavior. Consult
+command-specific help for options and the Harness listing command when the
+target is unknown. Prefer compact output when supported, and use its task links
+directly for subsequent commands.
 
-- available commands;
-- command parameters;
-- available target Harness IDs;
-- Thread identifier formats;
-- waiting and reading behavior;
-- response fields;
-- errors and recovery guidance.
-
-Do not construct commands, parameters, or Harness IDs from memory.
-
-When the user asks for a specific Model or Thinking level, inspect the target
-Harness first and use the exact opaque IDs returned by the authoritative CLI.
-When they do not specify either setting, omit it so the target keeps its default.
+Use the Harness native defaults. Inspect the target when a Model or Thinking
+selection is needed or the default is unavailable.
 
 For a new delegation, create an independent child session and submit the
 requested task. For an existing external session, resolve the target from the
@@ -82,7 +75,8 @@ user’s request and the task:
 - leave it running in the background.
 
 When the result is needed, explicitly read the target Thread. Report only the
-visible result returned by that Thread.
+visible result returned by that Thread, together with the target agent, status,
+and a labeled task link. Keep internal tracking IDs in tool calls.
 
 Provide the user with the necessary tracking information available from the
 CLI; omit unavailable fields rather than inventing them:

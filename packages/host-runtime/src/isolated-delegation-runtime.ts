@@ -169,6 +169,10 @@ export async function startIsolatedDelegationRuntime(
   const server = await startDelegationControlServer({
     token,
     api: {
+      listHarnesses: () => {
+        if (!registration) throw new Error("Isolated Host Delegation API is not registered");
+        return registration.listHarnesses();
+      },
       inspect: (input) => {
         if (!registration) throw new Error("Isolated Host Delegation API is not registered");
         return registration.inspect(input);

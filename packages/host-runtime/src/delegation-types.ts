@@ -78,6 +78,7 @@ export interface DelegationThreadSnapshot {
     message?: string;
   };
   messages?: DelegationMessage[];
+  hasMore?: boolean;
   nextCursor: string | null;
 }
 
@@ -102,6 +103,10 @@ export interface HarnessInspectResult {
   inspection: HarnessInspection;
 }
 
+export interface HarnessListResult {
+  harnesses: RoutedHarnessId[];
+}
+
 export interface DelegationConfigurationResult {
   requested?: { model?: HarnessModelRef; thinkingOptionId?: HarnessThinkingOptionId };
   effective?: Pick<
@@ -117,6 +122,8 @@ export interface DelegationStartResult {
   harnessId: RoutedHarnessId;
   deepLink: string;
   status: DelegationThreadStatus;
+  cwd?: string;
+  parentThreadId?: string;
   configuration?: DelegationConfigurationResult;
   next: { read: string; wait: string };
 }
@@ -324,6 +331,7 @@ export interface DelegationReconcileResult {
 }
 
 export interface DelegationControlApi {
+  listHarnesses(): Promise<HarnessListResult>;
   inspect(input: HarnessInspectInput): Promise<HarnessInspectResult>;
   start(input: DelegationStartInput): Promise<DelegationStartResult>;
   send(input: ThreadSendInput): Promise<ThreadSendResult>;

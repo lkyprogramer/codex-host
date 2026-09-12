@@ -208,8 +208,19 @@ export interface CommitReadyThreadInput {
   turnMappings?: StoredTurnMappingV1[];
 }
 
+/** Preserve a retained native child's Host identity after its parent Session is replaced. */
+export interface RebindSubagentSessionInput {
+  hostThreadId: HostThreadId;
+  parentHostThreadId: HostThreadId;
+  previousNativeSessionRef: NativeSessionRef;
+  nativeSessionRef: NativeSessionRef;
+  createRequestId: string;
+}
+
 export interface ReplaceReadySessionInput {
   hostThreadId: HostThreadId;
+  expectedRevision: number;
+  expectedNativeSessionRef: NativeSessionRef;
   nativeSessionRef: NativeSessionRef;
   turnMappings: StoredTurnMappingV1[];
   forkSource: { hostThreadId: HostThreadId; hostTurnId: HostTurnId };
@@ -217,6 +228,8 @@ export interface ReplaceReadySessionInput {
 
 export interface ReplaceReadySessionAfterLastTurnInput {
   hostThreadId: HostThreadId;
+  expectedRevision: number;
+  expectedNativeSessionRef: NativeSessionRef;
   nativeSessionRef: NativeSessionRef;
   turnMappings: StoredTurnMappingV1[];
 }
