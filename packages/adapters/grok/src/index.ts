@@ -25,6 +25,16 @@ export type {
   GrokRewindOpenInput,
   GrokTransportEvent,
 } from "./acp-transport.js";
+export { GROK_INTERJECT_METHOD, parseGrokInterjectResponse } from "./grok-interject.js";
+export {
+  GROK_NATIVE_WORK_MODES,
+  grokSessionModesOrNative,
+  hostWorkModeForNativeId,
+  lastModeIdFromEvents,
+  nativeModeIdForHostWorkMode,
+  parseAcpCurrentModeId,
+  parseAcpSessionModes,
+} from "./grok-work-mode.js";
 export {
   GROK_SESSION_FORK_METHOD,
   buildGrokForkParams,

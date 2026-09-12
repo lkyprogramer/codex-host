@@ -24,6 +24,7 @@ import {
   GrokAdapter,
   GrokTransportError,
   GROK_SESSION_FORK_METHOD,
+  parseGrokInterjectResponse,
   type GrokAcpTransportLike,
   type GrokOpenInput,
   type GrokOpenResult,
@@ -62,6 +63,26 @@ class FakeGrokTransport implements GrokAcpTransportLike {
   readonly cancel = vi.fn(async () => undefined);
   readonly close = vi.fn(async () => undefined);
   readonly setModel = vi.fn(async () => undefined);
+  readonly setSessionMode = vi.fn(async (modeId: string) => {
+    this.currentModeId = modeId;
+  });
+  interjectRaw: unknown = { result: { status: "queued" } };
+  readonly interject = vi.fn(async () => {
+    const parsed = parseGrokInterjectResponse(this.interjectRaw);
+    if (!parsed) {
+      throw new GrokTransportError("protocolError", "Grok Interject returned an invalid result");
+    }
+    return parsed;
+  });
+  sessionModes: {
+    currentModeId: string;
+    availableModes: Array<{ id: string; name: string }>;
+  } | null = null;
+  currentModeId: string | null = null;
+  #modeListener: ((modeId: string) => void) | null = null;
+  onModeChange(listener: ((modeId: string) => void) | null): void {
+    this.#modeListener = listener;
+  }
   readonly deleteSession = vi.fn(async (sessionId: string) => {
     this.histories.delete(sessionId);
   });
@@ -126,7 +147,10 @@ class FakeGrokTransport implements GrokAcpTransportLike {
     }
     return {
       initialize,
-      session: { sessionId: this.sessionId },
+      session: {
+        sessionId: this.sessionId,
+        ...(this.sessionModes ? { modes: this.sessionModes } : {}),
+      },
       sessionId: this.sessionId,
       replay: [...this.replay],
       ...(this.signals !== undefined ? { signals: this.signals } : {}),
@@ -2624,5 +2648,88 @@ describe("Grok Adapter ACP projection", () => {
     } finally {
       await rm(grokHome, { recursive: true, force: true });
     }
+  });
+
+  it("sets Plan before a prompt when session/new omits modes, and does not prompt when mode switch fails", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    expect(session.workMode.current).toBe("default");
+    await expect(session.workMode.set("plan")).resolves.toEqual({ ok: true, value: undefined });
+    expect(transport.setSessionMode).toHaveBeenCalledWith("plan");
+    expect(session.workMode.current).toBe("plan");
+    const outputs = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-plan");
+    const started = session.execute({
+      type: "turn.start",
+      turnId,
+      input: [{ type: "text", text: "plan this" }],
+      workMode: "plan",
+    });
+    await nextEvent(outputs);
+    expect(transport.setSessionMode).toHaveBeenCalledWith("plan");
+    expect(transport.lastPromptText).toBe("plan this");
+    transport.finish();
+    await started;
+    transport.setSessionMode.mockRejectedValueOnce(new Error("mode rejected"));
+    await expect(session.workMode.set("default")).resolves.toMatchObject({ ok: false });
+    await adapter.close();
+  });
+
+  it("calls session/set_mode on resume when native current mode is unknown", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport, "resume");
+    expect(session.workMode.current).toBeNull();
+    await expect(session.workMode.set("default")).resolves.toEqual({ ok: true, value: undefined });
+    expect(transport.setSessionMode).toHaveBeenCalledWith("default");
+    transport.setSessionMode.mockRejectedValueOnce(
+      new GrokTransportError("protocolError", "Grok ACP Method Not Found: session/set_mode"),
+    );
+    await expect(session.workMode.set("plan")).resolves.toMatchObject({
+      ok: false,
+      error: { code: "unsupported" },
+    });
+    await adapter.close();
+  });
+
+  it("restores Plan from history mode.update instead of forging default", async () => {
+    const transport = new FakeGrokTransport();
+    transport.histories.set(transport.sessionId, [{ type: "mode.update", modeId: "plan" }]);
+    const { adapter, session } = await openedSession(transport, "resume");
+    expect(session.workMode.current).toBe("plan");
+    transport.setSessionMode.mockClear();
+    await expect(session.workMode.set("plan")).resolves.toEqual({ ok: true, value: undefined });
+    expect(transport.setSessionMode).not.toHaveBeenCalled();
+    await adapter.close();
+  });
+
+  it("queues a native interjection on the active Turn and rejects a stale Turn", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const outputs = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-steer");
+    const started = session.execute({
+      type: "turn.start",
+      turnId,
+      input: [{ type: "text", text: "first" }],
+    });
+    await nextEvent(outputs);
+    await expect(
+      session.steering.interject({
+        expectedTurnId: turnId,
+        text: "steer now",
+        interjectionId: "inject-1",
+      }),
+    ).resolves.toEqual({ ok: true, value: { accepted: true } });
+    expect(transport.interject).toHaveBeenCalledWith("steer now", "inject-1");
+    await expect(
+      session.steering.interject({
+        expectedTurnId: hostTurnIdSchema.parse("other-turn"),
+        text: "late",
+        interjectionId: "inject-2",
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    transport.finish();
+    await started;
+    await adapter.close();
   });
 });

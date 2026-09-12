@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { installRendererExternalSteering } from "../src/renderer-external-steering.js";
 
-function fixture(owner: "external" | "codex" = "external") {
+function fixture(owner: "external" | "codex" = "external", nativeSteering = false) {
   const events: string[] = [];
   const requestOptions: Record<string, unknown> = { timeoutMs: 30_000 };
   let queued: Array<{ id: string; pausedReason?: string }> = [];
@@ -19,7 +19,12 @@ function fixture(owner: "external" | "codex" = "external") {
       if (method === "codexhost/thread/ownership/list") {
         return {
           threads: [
-            { threadId: "thread", owner, ...(owner === "external" ? { harnessId: "pi" } : {}) },
+            {
+              threadId: "thread",
+              owner,
+              ...(owner === "external" ? { harnessId: nativeSteering ? "grok" : "pi" } : {}),
+              ...(nativeSteering ? { nativeSteering: true } : {}),
+            },
           ],
         };
       }
@@ -139,6 +144,19 @@ describe("external direction changes use normal Desktop start presentation", () 
       { timeoutMs: 30_000 },
     );
     expect(f.args[8]).toHaveBeenCalledOnce();
+    f.dispose();
+  });
+
+  it("uses Desktop steer presentation when the Harness supports native interjection", async () => {
+    const f = fixture("external", true);
+    await expect(f.manager.steerTurn(...f.args)).resolves.toEqual({ turnId: "official" });
+    expect(f.originalSteer).toHaveBeenCalledWith(...f.args);
+    expect(f.manager.startTurn).not.toHaveBeenCalled();
+    expect(f.events).toEqual([]);
+    expect(f.rpc).toHaveBeenCalledWith("codexhost/thread/ownership/list", {
+      threadIds: ["thread"],
+    });
+    expect(f.rpc).not.toHaveBeenCalledWith("turn/steer", expect.anything(), expect.anything());
     f.dispose();
   });
 

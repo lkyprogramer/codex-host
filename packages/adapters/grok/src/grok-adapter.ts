@@ -21,6 +21,9 @@ import {
   type HarnessSession,
   type HarnessSessionCapabilities,
   type HarnessSessionState,
+  type HarnessSteeringControl,
+  type HarnessWorkMode,
+  type HarnessWorkModeControl,
   type HarnessSubagentCapability,
   type HostAgentMessageItem,
   type HostApprovalInteraction,
@@ -62,6 +65,7 @@ import {
   type HarnessId,
   type HarnessThinkingOptionId,
   type HostInteractionId,
+  type HostTurnId,
   type NativeCheckpointRef,
   type NativeSessionRef,
   type NativeTurnRef,
@@ -98,6 +102,13 @@ import { projectGrokFileChanges } from "./grok-file-change.js";
 import { forkGrokSession } from "./grok-fork.js";
 import { mapGrokReplay } from "./grok-history.js";
 import { rewindGrokLastTurn } from "./grok-rewind.js";
+import { GROK_INTERJECT_METHOD } from "./grok-interject.js";
+import {
+  grokSessionModesOrNative,
+  hostWorkModeForNativeId,
+  nativeModeIdForHostWorkMode,
+  type GrokSessionModes,
+} from "./grok-work-mode.js";
 import {
   GROK_DEFAULT_PERMISSION_MODE_ID,
   GROK_PERMISSION_MODE_CATALOG,
@@ -166,6 +177,9 @@ export interface GrokAcpTransportLike {
     onEvent: (event: GrokTransportEvent) => void,
   ): Promise<GrokCompactResult>;
   setModel(modelId: string, reasoningEffort?: string): Promise<void>;
+  setSessionMode?(modeId: string): Promise<void>;
+  interject?(text: string, interjectionId: string): Promise<{ queued: boolean }>;
+  onModeChange?(listener: ((modeId: string) => void) | null): void;
   cancel(): Promise<void>;
   close(): Promise<void>;
   ownedProcess?(): { pid: number; pgid: number; startedAtMs: number } | null;
@@ -318,6 +332,8 @@ class GrokHarnessSession implements HarnessSession {
   readonly initialState: HarnessSessionState;
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
+  readonly workMode: HarnessWorkModeControl;
+  readonly steering: HarnessSteeringControl;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly #closeTimeoutMs: number;
   readonly #cwd: string;
@@ -336,6 +352,8 @@ class GrokHarnessSession implements HarnessSession {
   #phase: SessionPhase = "open";
   #state: HarnessSessionState;
   #usage: HostUsage | null = null;
+  #modes: GrokSessionModes;
+  #currentModeId: string | null;
 
   constructor(
     cwd: string,
@@ -351,6 +369,7 @@ class GrokHarnessSession implements HarnessSession {
       knownTurnRefs?: NativeTurnRef[];
       randomUUID: () => string;
       refreshCredits: () => Promise<unknown>;
+      restore: boolean;
       sessionDirectory: string;
       toolOutputLimit: number;
     },
@@ -393,6 +412,24 @@ class GrokHarnessSession implements HarnessSession {
       state: this.#state,
     };
     this.outputs = this.#channel.outputs;
+    this.#modes = grokSessionModesOrNative(opened.session, {
+      restore: options.restore,
+      events: [...opened.replay, ...options.history],
+    });
+    this.#currentModeId = this.#modes.currentModeId;
+    const session = this;
+    this.workMode = {
+      get current(): HarnessWorkMode | null {
+        return hostWorkModeForNativeId(session.#modes.availableModes, session.#currentModeId);
+      },
+      set: (mode) => session.#setWorkMode(mode),
+    };
+    this.steering = {
+      interject: (input) => session.#interject(input),
+    };
+    this.#transport.onModeChange?.((modeId) => {
+      session.#currentModeId = modeId;
+    });
   }
 
   currentConfiguration(): {
@@ -703,6 +740,120 @@ class GrokHarnessSession implements HarnessSession {
     );
     this.#snapshot.turns = refreshed.turns;
     return history;
+  }
+
+  async #setWorkMode(mode: HarnessWorkMode): Promise<HarnessResult<void>> {
+    if (this.#phase !== "open") {
+      return { ok: false, error: invalidState("Grok Session is not open") };
+    }
+    if (!this.#transport.setSessionMode) {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: "Planning mode is unavailable for this Grok Session",
+          retryable: false,
+        },
+      };
+    }
+    const nativeId = nativeModeIdForHostWorkMode(this.#modes.availableModes, mode);
+    if (!nativeId) {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: "Planning mode is unavailable for this Grok Session",
+          retryable: false,
+        },
+      };
+    }
+    if (this.#currentModeId !== null && this.#currentModeId === nativeId) {
+      return { ok: true, value: undefined };
+    }
+    if (this.#active || this.#configuring) {
+      return {
+        ok: false,
+        error: {
+          code: "sessionBusy",
+          message: "Grok Session already has an active operation",
+          retryable: true,
+        },
+      };
+    }
+    this.#configuring = true;
+    try {
+      await this.#transport.setSessionMode(nativeId);
+      this.#currentModeId = nativeId;
+      return { ok: true, value: undefined };
+    } catch (error) {
+      const normalized = normalizeError(error, "nativeFailure");
+      if (normalized.message.includes("session/set_mode")) {
+        return { ok: false, error: { ...normalized, code: "unsupported" } };
+      }
+      return { ok: false, error: normalized };
+    } finally {
+      this.#configuring = false;
+    }
+  }
+
+  async #interject(input: {
+    expectedTurnId: HostTurnId;
+    text: string;
+    interjectionId: string;
+  }): Promise<HarnessResult<{ accepted: true }>> {
+    if (this.#phase !== "open") {
+      return { ok: false, error: invalidState("Grok Session is not open") };
+    }
+    if (!this.#active || this.#active.command.turnId !== input.expectedTurnId) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidState",
+          message: "Grok steering must reference the active Turn",
+          retryable: false,
+        },
+      };
+    }
+    if (!this.#transport.interject) {
+      return {
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: "Grok native interjection is unavailable",
+          retryable: false,
+        },
+      };
+    }
+    if (input.text.trim().length === 0) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidRequest",
+          message: "Grok interjection text must not be empty",
+          retryable: false,
+        },
+      };
+    }
+    try {
+      const queued = await this.#transport.interject(input.text, input.interjectionId);
+      if (!queued.queued) {
+        return {
+          ok: false,
+          error: {
+            code: "nativeFailure",
+            message: "Grok did not queue the interjection",
+            retryable: true,
+          },
+        };
+      }
+      return { ok: true, value: { accepted: true } };
+    } catch (error) {
+      const normalized = normalizeError(error, "unavailable");
+      if (normalized.message.includes(GROK_INTERJECT_METHOD)) {
+        return { ok: false, error: { ...normalized, code: "unsupported" } };
+      }
+      return { ok: false, error: normalized };
+    }
   }
 
   async #selectModel(command: ModelSelectCommand): Promise<HarnessResult<ModelSelectCompleted>> {
@@ -1844,6 +1995,7 @@ export class GrokAdapter implements HarnessAdapter {
             : {}),
           randomUUID: this.#dependencies.randomUUID,
           refreshCredits: () => this.refreshCredits(),
+          restore: input.kind !== "create",
           sessionDirectory,
           toolOutputLimit: this.#toolOutputLimit,
         },

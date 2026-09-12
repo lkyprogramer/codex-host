@@ -1,6 +1,6 @@
 # 外部 Thread 的「调整方向」
 
-codexhost 将外部 Harness Thread 的「调整方向」定义为：**取消当前 Turn，等待它终结，再自动执行本次新输入**。用户继续使用 Codex Desktop 原有按钮、跟进处理方式设置和单条消息反向操作，不需要手动停止后重发。官方 Codex Thread 仍透传原生 `turn/steer`，不改变同轮追加输入的语义。
+codexhost 按 Thread 归属分流 `turn/steer`，外部请求不会落到官方 Codex。提供 `session.steering` 的 Harness（当前为 Grok 原生 `_x.ai/interject`）在同一活动回合中插话，返回当前 `turnId`。未实现该接口的外部 Harness 仍使用 **取消当前 Turn，等待它终结，再自动执行本次新输入**。官方 Codex Thread 透传原生 `turn/steer`。Grok 的 Plan 与 Steer 细节见 [Grok Plan 与运行中 Steer](grok-plan-and-steer.md)。
 
 ## 所有权与执行
 

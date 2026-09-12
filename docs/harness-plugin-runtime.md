@@ -148,7 +148,7 @@ Renderer 的 `listHarnessPlugins()` 使用绑定的 RequestManager 发送此固�
 
 ## 运行中调整方向
 
-外部 Thread 的「调整方向」使用公共 `turn.cancel` → 等待旧轮终态 → `turn.start`，不要求插件新增 steer 命令。Host 负责替换协调，Renderer 复用正常发送展示；官方 Codex Thread 保留原生 steer。执行、版本化绑定、输入限制和验证边界见[外部 Thread 调整方向](external-thread-steering.md)。
+外部 Thread 的「调整方向」优先使用可选 `session.steering`；Grok 走原生插话，未实现该接口的插件仍使用 `turn.cancel` → 等待旧轮终态 → `turn.start`。官方 Codex Thread 保留原生 steer。执行、版本化绑定、输入限制和验证边界见[外部 Thread 调整方向](external-thread-steering.md)。Grok Plan / Steer 见 [Grok Plan 与运行中 Steer](grok-plan-and-steer.md)。
 
 ## 构建、发行与远程路径
 

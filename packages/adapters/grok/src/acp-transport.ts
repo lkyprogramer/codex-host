@@ -47,6 +47,7 @@ import {
   parseGrokRewindResponse,
   type GrokRewindParams,
 } from "./grok-rewind.js";
+import { GROK_INTERJECT_METHOD, parseGrokInterjectResponse } from "./grok-interject.js";
 import { decodeGrokPermissionModeId, grokPermissionModeSessionMeta } from "./permission-modes.js";
 
 export type GrokTransportFaultKind =
@@ -132,7 +133,8 @@ export type GrokTransportEvent =
       status: "completed" | "failed" | "interrupted";
       resultSummary?: string;
       metadata?: Record<string, unknown>;
-    };
+    }
+  | { type: "mode.update"; modeId: string; metadata?: Record<string, unknown> };
 
 export interface GrokPermissionRequest {
   request: RequestPermissionRequest;
@@ -405,6 +407,14 @@ function transportEvent(
     }
     case "usage_update":
       return { type: "usage", update, ...(metadata ? { metadata } : {}) };
+    case "current_mode_update":
+      if (typeof update.currentModeId !== "string" || update.currentModeId.length === 0)
+        return null;
+      return {
+        type: "mode.update",
+        modeId: update.currentModeId,
+        ...(metadata ? { metadata } : {}),
+      };
     default:
       return metadata && typeof metadata.totalTokens === "number"
         ? { type: "usage", update, metadata }
@@ -569,6 +579,7 @@ export class GrokAcpTransport {
   #closing = false;
   #connection: ClientSideConnection | null = null;
   #initialize: InitializeResponse | null = null;
+  #onModeChange: ((modeId: string) => void) | null = null;
   #replay: GrokTransportEvent[] | null = null;
   #sessionId: string | null = null;
   #startupModelId: string | undefined;
@@ -949,6 +960,57 @@ export class GrokAcpTransport {
       if (this.#activeCompact === active) this.#activeCompact = null;
     }
   }
+  async setSessionMode(modeId: string): Promise<void> {
+    const connection = this.#connection;
+    if (!connection || !this.#sessionId) throw new Error("Grok ACP Session is unavailable");
+    try {
+      await connection.setSessionMode({ sessionId: this.#sessionId, modeId });
+    } catch (error) {
+      if (error instanceof RequestError && error.code === -32601) {
+        throw new GrokTransportError(
+          "protocolError",
+          "Grok ACP Method Not Found: session/set_mode",
+          { cause: error },
+        );
+      }
+      throw new GrokTransportError("unavailable", "Grok rejected Session mode configuration", {
+        cause: error,
+      });
+    }
+  }
+
+  async interject(text: string, interjectionId: string): Promise<{ queued: boolean }> {
+    const connection = this.#connection;
+    if (!connection || !this.#sessionId || !this.#activePrompt) {
+      throw new GrokTransportError(
+        "unavailable",
+        "Grok ACP Session has no active Turn to interject",
+      );
+    }
+    try {
+      const raw = await connection.request<unknown, unknown>(GROK_INTERJECT_METHOD, {
+        sessionId: this.#sessionId,
+        text,
+        interjectionId,
+      });
+      const parsed = parseGrokInterjectResponse(raw);
+      if (!parsed) {
+        throw new GrokTransportError("protocolError", "Grok Interject returned an invalid result");
+      }
+      return parsed;
+    } catch (error) {
+      if (error instanceof GrokTransportError) throw error;
+      if (error instanceof RequestError && error.code === -32601) {
+        throw new GrokTransportError(
+          "protocolError",
+          `Grok ACP Method Not Found: ${GROK_INTERJECT_METHOD}`,
+          { cause: error },
+        );
+      }
+      throw new GrokTransportError("unavailable", "Grok Native Interject failed", { cause: error });
+    }
+  }
+
   async setModel(modelId: string, reasoningEffort?: string): Promise<void> {
     const connection = this.#connection;
     if (!connection || !this.#sessionId) throw new Error("Grok ACP Session is unavailable");
@@ -1053,9 +1115,14 @@ export class GrokAcpTransport {
     const event = transportEvent(notification.update, metadata);
     if (!event) return;
     const enriched = metadata ? { ...event, metadata } : event;
+    if (event.type === "mode.update") this.#onModeChange?.(event.modeId);
     if (this.#replay) this.#replay.push(enriched);
     else if (this.#activePrompt) this.#activePrompt.onEvent(enriched);
     else this.#activeCompact?.onEvent(enriched);
+  }
+
+  onModeChange(listener: ((modeId: string) => void) | null): void {
+    this.#onModeChange = listener;
   }
 
   #handleExtensionNotification(method: string, params: Record<string, unknown>): void {

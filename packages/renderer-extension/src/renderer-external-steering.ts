@@ -223,10 +223,12 @@ export function installRendererExternalSteering(target: unknown): (() => void) |
         threadIds: [threadId],
       }),
     );
-    const owner = ownership.threads.find((thread) => thread.threadId === threadId)?.owner;
-    if (!owner) throw new Error("Thread ownership could not be resolved for steering");
+    const owned = ownership.threads.find((thread) => thread.threadId === threadId);
+    if (!owned) throw new Error("Thread ownership could not be resolved for steering");
     if (disposed) throw new Error("External steering binding was disposed");
-    if (owner === "codex") return originalSteer.apply(manager, args);
+    if (owned.owner === "codex" || owned.nativeSteering) {
+      return originalSteer.apply(manager, args);
+    }
     if (!host) throw new Error("Desktop turn submission binding is unavailable");
     const currentRole = manager.getStreamRole?.(threadId);
     if (isRecord(currentRole) && currentRole.role === "follower")
