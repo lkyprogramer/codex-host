@@ -1,8 +1,9 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { parseHostUsage, sanitizeDiagnosticTail, type HostUsage } from "@codexhost/harness-adapter";
+import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import {
   harnessThinkingOptionIdSchema,
   jsonValueSchema,
@@ -26,6 +27,22 @@ import type { OmpNativeModel, OmpNativeModelRef } from "./omp-model-catalog.js";
 import type { OmpPermissionMode } from "./omp-permission-modes.js";
 import { readOmpSessionHistory, verifyOmpSessionCwd } from "./omp-session-file.js";
 import { OmpFrameDecoder } from "./omp-protocol.js";
+
+function waitForLeaderExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("exit", finish);
+  });
+}
 
 export interface OmpSessionState {
   sessionId: string;
@@ -401,30 +418,6 @@ function assistantFailure(value: unknown): Error | null | undefined {
   return new Error(nonBlankString(value.errorMessage) ? value.errorMessage : fallback);
 }
 
-function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return;
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "ESRCH") throw error;
-  }
-}
-
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return Promise.race([
-    new Promise<boolean>((resolve) => child.once("exit", () => resolve(true))),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-  ]);
-}
-
 interface OmpProcessCommandDependencies {
   platform: NodeJS.Platform;
   homeDirectory: string;
@@ -514,6 +507,8 @@ export class OmpRpcSession {
   #activeTurn: ActiveTurn | null = null;
   #buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   #child: ChildProcessWithoutNullStreams | null = null;
+  #ownedProcessTree: OwnedProcessTree | null = null;
+  #closePromise: Promise<void> | null = null;
   #closed = false;
   #compactionActive = false;
   #compactionTurn: ActiveTurn | null = null;
@@ -522,6 +517,7 @@ export class OmpRpcSession {
   #pending = new Map<string, PendingCommand>();
   #state: OmpSessionState | null = null;
   #latestCacheHitRatePercent: number | null | undefined;
+  #subagentSubscription: "events" | "unsupported" = "unsupported";
   #manualCompaction: ManualCompaction | null = null;
   #stderrTail = "";
   #frameDecoder = new OmpFrameDecoder();
@@ -559,6 +555,10 @@ export class OmpRpcSession {
     return this.#stderrTail;
   }
 
+  get subagentSubscription(): "events" | "unsupported" {
+    return this.#subagentSubscription;
+  }
+
   async start(): Promise<this> {
     if (this.#child || this.#closed) throw new Error("Omp RPC Session cannot be started twice");
     const child = this.#processAdapter.spawn({
@@ -576,6 +576,18 @@ export class OmpRpcSession {
       ...(this.#options.permissionMode ? { permissionMode: this.#options.permissionMode } : {}),
     });
     this.#child = child;
+    this.#ownedProcessTree = trackOwnedProcessTree(child, {
+      detached: process.platform !== "win32",
+      closeTimeoutMs: this.#options.closeTimeoutMs,
+      onExitCleanupFailure: (error) =>
+        this.#fail(
+          new OmpRpcFaultError(
+            "processExited",
+            `Omp RPC owned process cleanup failed: ${message(error)}`,
+            this.stderrTail,
+          ),
+        ),
+    });
     child.stdout.on("data", (chunk: Buffer) => this.#push(chunk));
     child.stdout.on("end", () => {
       if (this.#buffer.length !== 0) {
@@ -624,6 +636,12 @@ export class OmpRpcSession {
       ),
     ]);
     await this.#send("negotiate_protocol", { protocolVersion: 2 }).catch(() => undefined);
+    try {
+      await this.#send("set_subagent_subscription", { level: "events" });
+      this.#subagentSubscription = "events";
+    } catch (error) {
+      if (!(error instanceof OmpRpcUnsupportedCommandError)) throw error;
+    }
     try {
       this.#state = parseSessionState(await this.#send("get_state", {}));
     } catch (error) {
@@ -958,23 +976,30 @@ export class OmpRpcSession {
   }
 
   async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#rejectAll(new Error("Omp RPC Session closed"));
-    await this.#stopProcess();
+    if (!this.#closed) {
+      this.#closed = true;
+      this.#rejectAll(new Error("Omp RPC Session closed"));
+    }
+    this.#closePromise ??= this.#stopProcess();
+    return this.#closePromise;
   }
 
   async #stopProcess(): Promise<void> {
     const child = this.#child;
     if (!child) return;
-    if (child.stdin.writable) child.stdin.end();
-    if (await waitForExit(child, this.#options.closeTimeoutMs)) return;
-    signalProcessTree(child, "SIGTERM");
-    if (await waitForExit(child, this.#options.closeTimeoutMs)) return;
-    signalProcessTree(child, "SIGKILL");
-    if (!(await waitForExit(child, this.#options.closeTimeoutMs))) {
-      throw new Error("Omp RPC process tree did not exit within cleanup bounds");
+    const processTree = this.#ownedProcessTree;
+    if (!processTree) {
+      throw new Error("Omp RPC owned process tree is unavailable");
     }
+    if (process.platform === "win32") {
+      await processTree.close();
+      return;
+    }
+    if (child.stdin.writable) child.stdin.end();
+    // A graceful leader exit is only a delay before process-group verification,
+    // never evidence that tool descendants are gone.
+    await waitForLeaderExit(child, this.#options.closeTimeoutMs);
+    await processTree.close();
   }
 
   #push(chunk: Buffer<ArrayBufferLike>): void {

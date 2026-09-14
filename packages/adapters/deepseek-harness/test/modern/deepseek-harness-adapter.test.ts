@@ -3,6 +3,7 @@ import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
 import Schema from "@deepseek-ai/schemastery";
+import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 
 import { nativeCheckpointRefSchema, nativeSessionRefSchema } from "@codexhost/shared-contracts";
 
@@ -203,12 +204,58 @@ class FakeConnection implements ModernConnectionLike {
         return Promise.resolve({ ok: true, value: undefined } as ModernRemoteResult<T>);
       }
       this.permissionSelections.set(request.agentId, permissionModeId);
+      const previous = this.follows
+        .get(request.agentId)
+        ?.seen.findLast(
+          (entry) =>
+            typeof entry === "object" &&
+            entry !== null &&
+            Reflect.get(entry, "type") === "snapshot",
+        ) as
+        | {
+            cursor: number;
+            records: unknown[];
+            projections: { asOfSeq: number; values: Record<string, unknown> };
+          }
+        | undefined;
+      let projectionSeq = 1;
+      if (previous) {
+        const updated = structuredClone(previous);
+        const facts = [
+          ["permission/preset", { preset: permissionModeId }],
+          ["sandbox/mode", { mode: permissionModeId }],
+          [
+            "approval/policy",
+            {
+              policy:
+                permissionModeId === "danger-full-access" && this.validUnattendedFacts
+                  ? "never"
+                  : "ask",
+            },
+          ],
+        ] as const;
+        for (const [type, data] of facts) {
+          updated.records.push({
+            type: "event",
+            event: exactJournalEvent(++updated.cursor, type, data),
+          });
+        }
+        projectionSeq = updated.cursor;
+        updated.projections = {
+          asOfSeq: updated.cursor,
+          values: {
+            ...updated.projections.values,
+            permissions: permissionProjection(permissionModeId),
+          },
+        };
+        this.journalSnapshots.set(request.agentId, updated);
+      }
       this.control.push({
         type: "projection",
         sessionId: request.agentId,
         key: "permissions",
         value: permissionProjection(permissionModeId),
-        seq: 1,
+        seq: projectionSeq,
       });
       return Promise.resolve({
         ok: true,
@@ -620,6 +667,102 @@ function v015Snapshot(input: Parameters<typeof exactJournalSnapshot>[0]): Record
 describe("DSH 0.1.5-rc.1 session operations", () => {
   const locator = { dshVersion: "0.1.5-rc.1" };
 
+  it.each(["fork", "rollbackLastTurn"] as const)(
+    "flushes the isolated source before a V3 %s in another environment",
+    async (kind) => {
+      const cwd = path.resolve("fixture-isolated-v015-source");
+      const sourceId = "session-source";
+      const sourceEvents = [
+        ...forkSourceEvents(),
+        exactJournalEvent(7, "turn/end", { turn: 2, reason: { kind: "completed" } }),
+      ];
+      const timeline: string[] = [];
+      const connections: FakeConnection[] = [];
+      const adapter = new ModernDeepSeekHarnessAdapter(
+        { command: "dsh", version: "0.1.5-rc.1" },
+        {
+          createConnection(options) {
+            const connection = new FakeConnection();
+            const owner = options.environment?.OWNER ?? "inspection";
+            connections.push(connection);
+            connection.journalSnapshots.set(
+              sourceId,
+              v015Snapshot({
+                sessionId: sourceId,
+                cwd,
+                headerAgentPreset: "standard",
+                agentPreset: "standard",
+                events: sourceEvents,
+              }),
+            );
+            connection.journalSnapshots.set(
+              "session-forked",
+              v015Snapshot({
+                sessionId: "session-forked",
+                cwd,
+                parentSession: sourceId,
+                headerAgentPreset: "standard",
+                agentPreset: "standard",
+                events: [
+                  ...sourceEvents.slice(0, 5),
+                  exactJournalEvent(5, "session/end-seed", { inherited: true }),
+                ],
+              }),
+            );
+            connection.flushSession.mockImplementation(async () => {
+              timeline.push(`${owner}:flush`);
+            });
+            const call = connection.call.bind(connection);
+            connection.call = <T>(endpoint: string, args: Readonly<Record<string, unknown>>) => {
+              if (endpoint === "session/fork") timeline.push(`${owner}:fork`);
+              return call<T>(endpoint, args);
+            };
+            return connection;
+          },
+        },
+      );
+      const sourceRef = nativeSessionRefSchema.parse({
+        harnessId: "deepseek-harness",
+        nativeSessionId: sourceId,
+        formatVersion: 1,
+        locator,
+      });
+      try {
+        const source = await adapter.open({
+          kind: "resume",
+          nativeRef: sourceRef,
+          cwd,
+          environment: { OWNER: "source" },
+        });
+        expect(source.ok).toBe(true);
+        const checkpoint = nativeCheckpointRefSchema.parse({
+          ...sourceRef,
+          checkpointId: "v3-turn-end:2",
+        });
+        const common = { cwd, sourceRef, environment: { OWNER: "derived" } };
+        const opened = await adapter.open(
+          kind === "fork" ? { ...common, kind, checkpoint } : { ...common, kind },
+        );
+        expect(opened).toMatchObject({ ok: true });
+        expect(timeline.slice(0, 2)).toEqual(["source:flush", "derived:fork"]);
+        expect(connections[1]?.journalSnapshots.get(sourceId)).toEqual(
+          v015Snapshot({
+            sessionId: sourceId,
+            cwd,
+            headerAgentPreset: "standard",
+            agentPreset: "standard",
+            events: sourceEvents,
+          }),
+        );
+        if (opened.ok) await opened.value.close();
+        if (source.ok) await source.value.close();
+      } finally {
+        await adapter.close();
+      }
+      expect(connections.every((connection) => connection.closeCalls === 1)).toBe(true);
+    },
+  );
+
   it.each(["session", "adapter"] as const)(
     "reports failed V3 persistence confirmation during %s close",
     async (owner) => {
@@ -891,6 +1034,340 @@ describe("DSH 0.1.5-rc.1 session operations", () => {
 });
 
 describe("Modern DeepSeek Harness Adapter", () => {
+  it("reserves a Native identity across isolated environments before connecting twice", async () => {
+    const cwd = path.resolve("fixture-isolated-duplicate");
+    const nativeRef = forkRefs("session-existing", 2).sourceRef;
+    const connections: FakeConnection[] = [];
+    const adapter = new ModernDeepSeekHarnessAdapter(
+      { command: "dsh" },
+      {
+        createConnection() {
+          const connection = new FakeConnection();
+          connection.expectedCwds.set(nativeRef.nativeSessionId, cwd);
+          connections.push(connection);
+          return connection;
+        },
+      },
+    );
+    try {
+      const results = await Promise.all(
+        ["first", "second"].map((OWNER) =>
+          adapter.open({ kind: "resume", nativeRef, cwd, environment: { OWNER } }),
+        ),
+      );
+      expect(results.filter((result) => result.ok)).toHaveLength(1);
+      expect(results.find((result) => !result.ok)).toMatchObject({
+        ok: false,
+        error: { code: "sessionBusy" },
+      });
+      expect(connections.filter((connection) => connection.connectCalls > 0)).toHaveLength(1);
+      for (const result of results) if (result.ok) await result.value.close();
+    } finally {
+      await adapter.close();
+    }
+    expect(connections.every((connection) => connection.closeCalls === 1)).toBe(true);
+  });
+
+  it("does not publish an isolated Session when Adapter close overlaps startup", async () => {
+    const connections: FakeConnection[] = [];
+    const connected = Promise.withResolvers<undefined>();
+    const adapter = new ModernDeepSeekHarnessAdapter(
+      { command: "dsh" },
+      {
+        createConnection() {
+          const connection = new FakeConnection();
+          if (connections.length > 0) connection.connect = () => connected.promise;
+          connections.push(connection);
+          return connection;
+        },
+      },
+    );
+    const opening = adapter.open({
+      kind: "create",
+      cwd: "/synthetic",
+      environment: { OWNER: "closing" },
+    });
+    const closing = adapter.close();
+    connected.resolve(undefined);
+    expect(await opening).toMatchObject({ ok: false, error: { code: "invalidState" } });
+    await closing;
+    expect(connections.every((connection) => connection.closeCalls === 1)).toBe(true);
+  });
+
+  it("runs the shared lifecycle against Modern native journals and independent Web carriers", async () => {
+    const cwd = path.resolve("fixture-dsh-conformance");
+    const history = new Map<string, Array<Record<string, unknown>>>();
+    const connections: FakeConnection[] = [];
+    const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+    let idSequence = 0;
+    const createAdapter = () =>
+      new ModernDeepSeekHarnessAdapter(
+        { command: "dsh", environment: { BASE: "fixture" } },
+        {
+          randomUUID: () => `conformance-${++idSequence}`,
+          createConnection(options) {
+            const connection = new FakeConnection();
+            connections.push(connection);
+            environments.push(options.environment);
+            const syncHistory = (sessionId: string) => {
+              connection.journalSnapshots.set(
+                sessionId,
+                exactJournalSnapshot({
+                  sessionId,
+                  cwd,
+                  headerAgentPreset: "standard",
+                  agentPreset: "standard",
+                  events: history.get(sessionId) ?? [],
+                }),
+              );
+            };
+            for (const sessionId of history.keys()) syncHistory(sessionId);
+            const call = connection.call.bind(connection);
+            connection.call = async <T>(
+              endpoint: string,
+              args: Readonly<Record<string, unknown>>,
+            ): Promise<ModernRemoteResult<T>> => {
+              if (endpoint === "session/create") {
+                const result = await call<T>(endpoint, args);
+                const sessionId = (args.request as { sessionId: string }).sessionId;
+                history.set(sessionId, [
+                  exactJournalEvent(0, "agent-preset/selected", { agentPreset: "standard" }),
+                ]);
+                syncHistory(sessionId);
+                return result;
+              }
+              if (endpoint !== "session/prompt" && endpoint !== "session/cancel")
+                return call<T>(endpoint, args);
+              connection.calls.push({ endpoint, args });
+              const request = args.request as {
+                sessionId: string;
+                requestId?: string;
+                content?: Array<{ text: string }>;
+              };
+              const events = history.get(request.sessionId);
+              const feed = connection.follows.get(request.sessionId);
+              if (!events || !feed) throw new Error("fixture native Session was not opened");
+              const append = (type: string, data: Record<string, unknown>, surface = false) => {
+                const event = exactJournalEvent(events.length, type, data, surface);
+                events.push(event);
+                feed.push({ type: "event", event });
+              };
+              const turn =
+                events.filter((event) => event.type === "turn/start").length +
+                (endpoint === "session/prompt" ? 1 : 0);
+              if (endpoint === "session/prompt") {
+                const text = request.content?.map((item) => item.text).join("") ?? "";
+                append("turn/start", { turn });
+                append(
+                  "user/message",
+                  {
+                    id: `user-${turn}`,
+                    role: "user",
+                    content: [{ type: "text", text }],
+                    source: { kind: "user", rpcId: request.requestId },
+                  },
+                  true,
+                );
+                if (text !== "hold for cancellation")
+                  append("turn/end", { turn, reason: { kind: "completed" } });
+              } else
+                append("turn/end", { turn, reason: { kind: "aborted", reason: { kind: "user" } } });
+              syncHistory(request.sessionId);
+              return { ok: true, value: { accepted: true } } as ModernRemoteResult<T>;
+            };
+            return connection;
+          },
+        },
+      );
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd,
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-transport-fixture:dsh-v012",
+      },
+      environment: {
+        primary: { THREAD_CONTEXT: "primary-fixture" },
+        isolated: { THREAD_CONTEXT: "isolated-fixture" },
+        resume: { THREAD_CONTEXT: "resume-fixture" },
+      },
+      prompts: {
+        first: "first fixture turn",
+        cancellable: "hold for cancellation",
+        followup: "resumed fixture turn",
+      },
+      probes: {
+        assertEnvironmentIsolation: async () => {
+          expect(
+            environments.filter((env) => env?.THREAD_CONTEXT).map((env) => env?.THREAD_CONTEXT),
+          ).toEqual(["primary-fixture", "isolated-fixture"]);
+        },
+        readCleanup: async () => {
+          expect(environments.some((env) => env?.THREAD_CONTEXT === "resume-fixture")).toBe(true);
+          expect(
+            connections.every(
+              (connection) => connection.closeCalls === 1 && connection.faultListeners.size === 0,
+            ),
+          ).toBe(true);
+          return { residue: "none" };
+        },
+      },
+    });
+    expect(receipt.status).toBe("incomplete");
+    expect(receipt.environment.nativeIsolationReadback).toBe("passed");
+    expect(receipt.cleanup.residue).toBe("none");
+    expect(receipt.identityReadback.createdSession).toEqual(
+      receipt.identityReadback.resumedSession,
+    );
+  });
+
+  it.each(["resume", "fork", "rollbackLastTurn"] as const)(
+    "passes the execution environment through %s and preserves source history",
+    async (kind) => {
+      const cwd = path.resolve("fixture-isolated-history");
+      const sourceId = "session-source";
+      const events = [
+        ...forkSourceEvents(),
+        exactJournalEvent(7, "turn/end", { turn: 2, reason: { kind: "completed" } }),
+      ];
+      const snapshot = exactJournalSnapshot({
+        sessionId: sourceId,
+        cwd,
+        events,
+        headerAgentPreset: "minimal",
+        agentPreset: "minimal",
+      });
+      const connections: FakeConnection[] = [];
+      const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+      const adapter = new ModernDeepSeekHarnessAdapter(
+        { command: "dsh", environment: { FACTORY: "base" } },
+        {
+          createConnection(options) {
+            const connection = new FakeConnection();
+            connection.journalSnapshots.set(sourceId, structuredClone(snapshot));
+            connection.journalSnapshots.set(
+              "session-forked",
+              exactJournalSnapshot({
+                sessionId: "session-forked",
+                cwd,
+                parentSession: sourceId,
+                seedLength: 5,
+                events: [...events.slice(0, 5), exactJournalEvent(5, "session/end-seed", {})],
+                headerAgentPreset: "minimal",
+                agentPreset: "minimal",
+              }),
+            );
+            connections.push(connection);
+            environments.push(options.environment);
+            return connection;
+          },
+        },
+      );
+      try {
+        const refs = forkRefs(sourceId, 2);
+        const base = { cwd, environment: { THREAD_ENDPOINT: kind } };
+        const opened = await adapter.open(
+          kind === "resume"
+            ? { ...base, kind, nativeRef: refs.sourceRef }
+            : kind === "fork"
+              ? { ...base, kind, ...refs }
+              : { ...base, kind, sourceRef: refs.sourceRef },
+        );
+        expect(opened.ok).toBe(true);
+        expect(environments[1]).toEqual({ FACTORY: "base", THREAD_ENDPOINT: kind });
+        expect(connections[0]?.calls).toHaveLength(0);
+        expect(connections[1]?.journalSnapshots.get(sourceId)).toEqual(snapshot);
+        if (opened.ok) {
+          expect((await opened.value.readSnapshot()).ok).toBe(true);
+          await opened.value.close();
+        }
+      } finally {
+        await adapter.close();
+      }
+      expect(connections.every((connection) => connection.closeCalls === 1)).toBe(true);
+    },
+  );
+
+  it("restores unattended execution policy on resume and honors an explicit permission override", async () => {
+    for (const explicit of [false, true]) {
+      const { adapter, connection } = setup();
+      connection.permissionModesEnabled = true;
+      const cwd = path.resolve("fixture-resume-policy");
+      const nativeRef = forkRefs("session-restored", 2).sourceRef;
+      connection.expectedCwds.set(nativeRef.nativeSessionId, cwd);
+      connection.permissionSelections.set(nativeRef.nativeSessionId, "workspace-write");
+      try {
+        const opened = await adapter.open({
+          kind: "resume",
+          nativeRef,
+          cwd,
+          executionPolicy: "unattended-full-access",
+          ...(explicit ? { permissionModeId: "workspace-write" as never } : {}),
+        });
+        expect(opened).toMatchObject({
+          ok: true,
+          value: {
+            initialState: {
+              effectivePermissionModeId: explicit ? "workspace-write" : "danger-full-access",
+            },
+          },
+        });
+        if (opened.ok) await opened.value.close();
+      } finally {
+        await adapter.close();
+      }
+    }
+  });
+
+  it("isolates execution environments from inspection and closes each owned Web process", async () => {
+    const connections: FakeConnection[] = [];
+    const environments: Array<NodeJS.ProcessEnv | undefined> = [];
+    let sequence = 0;
+    const cwd = path.resolve("fixture-isolated-environment");
+    const adapter = new ModernDeepSeekHarnessAdapter(
+      { command: "dsh", environment: { BASE: "base", TOKEN: "factory" } },
+      {
+        randomUUID: () => `isolated-${++sequence}`,
+        createConnection(options) {
+          const connection = new FakeConnection();
+          for (const id of ["session-isolated-1", "session-isolated-2"])
+            connection.expectedCwds.set(id, cwd);
+          connections.push(connection);
+          environments.push(options.environment);
+          return connection;
+        },
+      },
+    );
+    try {
+      expect((await adapter.inspect()).status).toBe("ready");
+      const first = await adapter.open({ kind: "create", cwd, environment: { TOKEN: "thread-a" } });
+      const second = await adapter.open({
+        kind: "create",
+        cwd,
+        environment: { TOKEN: "thread-b", BASE: undefined },
+      });
+      expect(first.ok && second.ok).toBe(true);
+      expect(environments).toEqual([
+        { BASE: "base", TOKEN: "factory" },
+        { BASE: "base", TOKEN: "thread-a" },
+        { BASE: undefined, TOKEN: "thread-b" },
+      ]);
+      expect(connections[0]?.calls.some(({ endpoint }) => endpoint === "session/create")).toBe(
+        false,
+      );
+      if (first.ok) await first.value.close();
+      await vi.waitFor(() => expect(connections[1]?.closeCalls).toBe(1));
+      expect(connections[2]?.closeCalls).toBe(0);
+      if (second.ok) await second.value.close();
+    } finally {
+      await adapter.close();
+    }
+    expect(connections.every((connection) => connection.closeCalls === 1)).toBe(true);
+  });
+
   it("lists exact Modern Session candidates through the managed connection", async () => {
     const { adapter, connection } = setup();
     const sessionCwd = path.resolve("fixture-session-import");

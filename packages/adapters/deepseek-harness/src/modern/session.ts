@@ -134,6 +134,7 @@ export function modernSessionCapabilities(
       permissionModeScope: "live",
     },
     history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
+    turnControl: { steering: "restart", workModes: ["default"] },
     autonomousTurns: { observe: true },
   };
 }

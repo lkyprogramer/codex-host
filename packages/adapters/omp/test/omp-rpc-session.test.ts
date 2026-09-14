@@ -28,6 +28,7 @@ class FakeOmpProcess extends EventEmitter {
     readonly compactMode: "complete" | "stalled" = "complete",
     readonly sessionFile?: string,
     readonly terminalMessageMode: "none" | "replay" | "fallback" | "approval" = "none",
+    readonly supportsSubagentSubscription = true,
   ) {
     super();
     this.stdin.on("data", (chunk: Buffer) => {
@@ -98,6 +99,16 @@ class FakeOmpProcess extends EventEmitter {
     }
     if (command.type === "negotiate_protocol")
       return this.#response(command, { protocolVersion: 2 });
+    if (command.type === "set_subagent_subscription") {
+      if (this.supportsSubagentSubscription) return this.#response(command);
+      return this.#output({
+        id: command.id,
+        type: "response",
+        command: command.type,
+        success: false,
+        error: `Unknown command: ${command.type}`,
+      });
+    }
     if (command.type === "get_state") return this.#response(command, this.#state());
     if (command.type === "get_messages") return this.#response(command, { messages: [] });
     if (command.type === "get_subagent_messages") {
@@ -290,6 +301,30 @@ describe("OMP RPC session", () => {
       cancelled: false,
     });
     expect(events).toContainEqual({ type: "text.delta", messageId: "assistant-1", delta: "PONG" });
+    await session.close();
+  });
+
+  it("requests lossless Subagent forwarding when the native RPC supports it", async () => {
+    const process = new FakeOmpProcess();
+    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
+
+    await session.start();
+
+    expect(process.commands).toContainEqual(
+      expect.objectContaining({ type: "set_subagent_subscription", level: "events" }),
+    );
+    await session.close();
+  });
+
+  it("keeps Subagent forwarding disabled when an older native RPC rejects the subscription", async () => {
+    const process = new FakeOmpProcess("complete", undefined, "none", false);
+    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
+
+    await session.start();
+
+    expect(session.subagentSubscription).toBe("unsupported");
     await session.close();
   });
 

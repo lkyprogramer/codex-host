@@ -1,4 +1,4 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
@@ -8,6 +8,7 @@ import {
   type RequestPermissionResponse,
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
+import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import { codeBuddyInvocation } from "./command.js";
 import { bounded, CodeBuddyError, record } from "./common.js";
 
@@ -44,6 +45,7 @@ export class CodeBuddyAcpClient implements CodeBuddyClient {
   readonly #child: ChildProcessWithoutNullStreams;
   readonly #connection: ClientSideConnection;
   readonly #exited: Promise<void>;
+  readonly #ownedProcessTree: OwnedProcessTree | null;
   #closing: Promise<void> | undefined;
   #failure: unknown;
   #exitFailure: CodeBuddyError | undefined;
@@ -66,6 +68,11 @@ export class CodeBuddyAcpClient implements CodeBuddyClient {
       windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       detached: process.platform !== "win32",
+    });
+    this.#ownedProcessTree = trackOwnedProcessTree(this.#child, {
+      detached: process.platform !== "win32",
+      closeTimeoutMs: 3_000,
+      onExitCleanupFailure: (error) => this.#fault(error),
     });
     this.#exited = new Promise((resolve) => this.#child.once("close", () => resolve()));
     this.#child.stderr.on("data", () => {
@@ -212,38 +219,22 @@ export class CodeBuddyAcpClient implements CodeBuddyClient {
   }
 
   async #closeProcess() {
+    // Pipe EOF and leader exit are not proof that detached native tool
+    // descendants are gone. Only the spawn-time ownership tracker may close
+    // that exact process tree.
+    if (!this.#ownedProcessTree) {
+      throw new CodeBuddyError("processExited", "ACP owned process tree is unavailable");
+    }
+    if (process.platform === "win32") {
+      await this.#ownedProcessTree.close();
+      return;
+    }
     this.#child.stdin.end();
-    const exited = await bounded(
+    await bounded(
       this.#exited.then(() => true),
       1_000,
       "ACP shutdown",
-    ).catch(() => false);
-    if (exited) return;
-    // A dead parent's PID can be reused while descendants keep its pipes open.
-    // Never target such a PID with taskkill or a process-group signal.
-    if (this.#child.exitCode !== null || this.#child.signalCode !== null) {
-      this.#child.stdout.destroy();
-      this.#child.stderr.destroy();
-      await bounded(this.#exited, 3_000, "ACP closed process pipes");
-      return;
-    }
-    const pid = this.#child.pid;
-    if (pid && process.platform === "win32") {
-      await new Promise<void>((resolve) =>
-        execFile(
-          "taskkill",
-          ["/PID", String(pid), "/T", "/F"],
-          { windowsHide: true, timeout: 3_000 },
-          () => resolve(),
-        ),
-      );
-    } else if (pid) {
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        /* Already exited. */
-      }
-    }
-    await bounded(this.#exited, 3_000, "ACP process exit");
+    ).catch(() => undefined);
+    await this.#ownedProcessTree.close();
   }
 }

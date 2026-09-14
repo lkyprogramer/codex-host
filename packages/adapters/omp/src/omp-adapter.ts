@@ -121,6 +121,7 @@ export interface OmpAdapterOptions {
 export interface OmpTurnTransport {
   readonly state: OmpSessionState;
   readonly stderrTail?: string;
+  readonly subagentSubscription?: "events" | "unsupported";
   start(): Promise<unknown>;
   getAvailableModels(): Promise<OmpNativeModel[]>;
   getAvailableThinkingLevels(): Promise<HarnessThinkingOptionId[] | null>;
@@ -602,6 +603,7 @@ class OmpHarnessSession implements HarnessSession {
       thinkingOptionId?: HarnessThinkingOptionId;
       toolOutputLimit: number;
       supportsThinkingSelection: boolean;
+      supportsSubagentObservation: boolean;
       permissionMode: OmpPermissionMode;
       permissionModeId: HarnessPermissionModeId;
       startedTransport?: OmpTurnTransport;
@@ -626,7 +628,8 @@ class OmpHarnessSession implements HarnessSession {
         permissionModeScope: "live",
       },
       history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
-      subagents: { observe: true, readTranscript: true },
+      subagents: { observe: options.supportsSubagentObservation, readTranscript: true },
+      ...(options.supportsSubagentObservation ? { autonomousTurns: { observe: true } } : {}),
     };
     this.commands = {
       list: async () => ({ ok: true, value: ompCommandCatalog }),
@@ -1024,7 +1027,7 @@ class OmpHarnessSession implements HarnessSession {
 
   close(): Promise<void> {
     if (!this.#closePromise) {
-      this.#closePromise = this.#close().finally(this.#onClosed);
+      this.#closePromise = this.#close().then(() => this.#onClosed());
     }
     return this.#closePromise;
   }
@@ -2060,6 +2063,7 @@ class OmpHarnessSession implements HarnessSession {
     this.#phase = "faulted";
     this.#event({ type: "session.faulted", error: normalized });
     this.#channel.end();
+    void this.close().catch(() => undefined);
   }
 
   async #close(): Promise<void> {
@@ -2125,6 +2129,7 @@ export class OmpAdapter implements HarnessAdapter {
           sessionFile: sessionFileFromRef(input.parent),
           onFault: () => undefined,
         });
+        this.#ephemeralTransports.add(transport);
         await transport.start();
         const transcript = await transport.getSubagentMessages({
           subagentId: input.nativeSubagentId,
@@ -2142,7 +2147,10 @@ export class OmpAdapter implements HarnessAdapter {
       } catch (error) {
         return { ok: false, error: normalizedError(error, "protocolError") };
       } finally {
-        await transport?.close().catch(() => undefined);
+        if (transport) {
+          await transport.close();
+          this.#ephemeralTransports.delete(transport);
+        }
       }
     },
   };
@@ -2151,6 +2159,10 @@ export class OmpAdapter implements HarnessAdapter {
   readonly #inspectionCache = new Map<string, Extract<HarnessInspection, { status: "ready" }>>();
   readonly #inspectionInFlight = new Map<string, Promise<HarnessInspection>>();
   readonly #inspections = new Set<OmpTurnTransport>();
+  readonly #ephemeralTransports = new Set<OmpTurnTransport>();
+  readonly #openingCreates = new Set<Promise<void>>();
+  readonly #openingTransports = new Set<OmpTurnTransport>();
+  readonly #openingTransportCloses = new WeakMap<OmpTurnTransport, Promise<void>>();
   readonly #sessions = new Set<OmpHarnessSession>();
   readonly #toolOutputLimit: number;
   #closePromise: Promise<void> | null = null;
@@ -2202,6 +2214,7 @@ export class OmpAdapter implements HarnessAdapter {
     const startedAt = Date.now();
     let stage = "spawn";
     const transport = this.#createTransport({ cwd, onFault: () => undefined });
+    let closed = false;
     this.#inspections.add(transport);
     try {
       stage = "startup";
@@ -2211,6 +2224,7 @@ export class OmpAdapter implements HarnessAdapter {
       stage = "capabilities";
       const thinkingLevels = await transport.getAvailableThinkingLevels();
       this.#thinkingSelectionSupported = thinkingLevels !== null;
+      const supportsSubagentObservation = transport.subagentSubscription === "events";
       const catalog = normalizeOmpModelCatalog(
         models,
         nativeModelFromState(transport.state),
@@ -2218,6 +2232,7 @@ export class OmpAdapter implements HarnessAdapter {
         transport.state.thinkingLevel,
       );
       await transport.close();
+      closed = true;
       return {
         status: "ready",
         catalog,
@@ -2230,12 +2245,22 @@ export class OmpAdapter implements HarnessAdapter {
             permissionModeScope: "live",
           },
           history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
-          subagents: { observe: true, readTranscript: true },
+          subagents: {
+            observe: supportsSubagentObservation,
+            readTranscript: true,
+          },
+          ...(supportsSubagentObservation ? { autonomousTurns: { observe: true } } : {}),
         },
       };
     } catch (error) {
-      await transport.close().catch(() => undefined);
-      const normalized = normalizedError(error, "unavailable");
+      let cleanupError: unknown;
+      try {
+        await transport.close();
+        closed = true;
+      } catch (closeError) {
+        cleanupError = closeError;
+      }
+      const normalized = normalizedError(cleanupError ?? error, "unavailable");
       return {
         status: normalized.code === "notInstalled" ? "notInstalled" : "error",
         error: {
@@ -2248,7 +2273,7 @@ export class OmpAdapter implements HarnessAdapter {
         },
       };
     } finally {
-      this.#inspections.delete(transport);
+      if (closed) this.#inspections.delete(transport);
     }
   }
 
@@ -2299,22 +2324,96 @@ export class OmpAdapter implements HarnessAdapter {
           },
         };
       }
-      return {
-        ok: true,
-        value: this.#trackSession(input.cwd, {
+      let resolveOpening!: () => void;
+      const opening = new Promise<void>((resolve) => {
+        resolveOpening = resolve;
+      });
+      this.#openingCreates.add(opening);
+      let session: OmpHarnessSession | undefined;
+      let transport: OmpTurnTransport | undefined;
+      try {
+        transport = this.#createTransport({
+          cwd: input.cwd,
           ...(input.environment ? { environment: input.environment } : {}),
-          ...(input.model ? { model: input.model } : {}),
-          ...(thinkingOptionId?.success ? { thinkingOptionId: thinkingOptionId.data } : {}),
-          supportsThinkingSelection: this.#thinkingSelectionSupported === true,
+          permissionMode,
+          onFault: (error) => session?.handleTransportFault(error),
+          onSubagentEvent: (event) => session?.handleTransportEvent(event),
+        });
+        this.#openingTransports.add(transport);
+        await transport.start();
+        let state = transport.state;
+        let thinkingLevels = await transport.getAvailableThinkingLevels();
+        if (input.model) {
+          const requested = decodeOmpModelRef(input.model);
+          const current = nativeModelFromState(state);
+          if (!sameOmpModel(current, requested)) state = await transport.selectModel(requested);
+          thinkingLevels = await transport.getAvailableThinkingLevels();
+          if (!sameOmpModel(nativeModelFromState(state), requested)) {
+            throw new Error("Omp did not activate the requested create Model");
+          }
+        }
+        if (thinkingOptionId?.success) {
+          if (!thinkingLevels) {
+            throw new OmpAdapterFaultError({
+              code: "unsupported",
+              message: "Installed Omp does not support Thinking selection",
+              retryable: false,
+            });
+          }
+          state = await transport.selectThinkingOption(thinkingOptionId.data);
+          thinkingLevels = await transport.getAvailableThinkingLevels();
+        } else {
+          const reconciled = await reconcileThinkingLevel(transport, state, thinkingLevels);
+          state = reconciled.state;
+          thinkingLevels = reconciled.thinkingLevels;
+        }
+        const initialUsage = await transport.getSessionUsage().catch(() => null);
+        if (this.#closePromise) {
+          return { ok: false, error: invalidState("Omp Adapter is closed") };
+        }
+        session = this.#trackSession(input.cwd, {
+          ...(input.environment ? { environment: input.environment } : {}),
+          startedTransport: transport,
+          startedThinkingLevels: thinkingLevels,
+          initialUsage,
+          supportsThinkingSelection: thinkingLevels !== null,
+          supportsSubagentObservation: transport.subagentSubscription === "events",
           permissionMode,
           permissionModeId,
-        }),
-      };
+        });
+        return { ok: true, value: session };
+      } catch (error) {
+        if (transport && !this.#closePromise) {
+          await this.#closeOpeningTransport(transport).catch(() => undefined);
+        }
+        return { ok: false, error: normalizedError(error, "nativeFailure") };
+      } finally {
+        if (transport) this.#openingTransports.delete(transport);
+        this.#openingCreates.delete(opening);
+        resolveOpening();
+      }
     }
 
     const sourceRef = nativeSessionRefSchema.parse(
       input.kind === "resume" ? input.nativeRef : input.sourceRef,
     ) as NativeSessionRef;
+    let restoredPermissionMode: OmpPermissionMode | undefined;
+    let restoredPermissionModeId = OMP_DEFAULT_PERMISSION_MODE_ID;
+    const requestedPermissionModeId =
+      (input.kind === "resume" || input.kind === "rollbackLastTurn"
+        ? input.permissionModeId
+        : undefined) ??
+      (input.executionPolicy === "unattended-full-access"
+        ? encodeOmpPermissionModeId("yolo")
+        : undefined);
+    if (requestedPermissionModeId) {
+      try {
+        restoredPermissionModeId = harnessPermissionModeIdSchema.parse(requestedPermissionModeId);
+        restoredPermissionMode = decodeOmpPermissionModeId(restoredPermissionModeId);
+      } catch (error) {
+        return { ok: false, error: normalizedError(error, "invalidRequest") };
+      }
+    }
     let session: OmpHarnessSession | undefined;
     let transport: OmpTurnTransport | undefined;
     try {
@@ -2344,6 +2443,8 @@ export class OmpAdapter implements HarnessAdapter {
       }
       transport = this.#createTransport({
         cwd: input.cwd,
+        ...(input.environment ? { environment: input.environment } : {}),
+        ...(restoredPermissionMode ? { permissionMode: restoredPermissionMode } : {}),
         ...(input.kind === "resume"
           ? { sessionFile: sourceSessionFile }
           : { forkSessionFile: sourceSessionFile }),
@@ -2421,6 +2522,7 @@ export class OmpAdapter implements HarnessAdapter {
       );
       startedThinkingLevels = reconciled.thinkingLevels;
       this.#thinkingSelectionSupported = startedThinkingLevels !== null;
+      const supportsSubagentObservation = transport.subagentSubscription === "events";
       const initialUsage = await transport.getSessionUsage().catch(() => null);
       session = this.#trackSession(input.cwd, {
         ...(input.environment ? { environment: input.environment } : {}),
@@ -2428,8 +2530,9 @@ export class OmpAdapter implements HarnessAdapter {
         startedThinkingLevels,
         initialUsage,
         supportsThinkingSelection: startedThinkingLevels !== null,
-        permissionMode: "yolo",
-        permissionModeId: OMP_DEFAULT_PERMISSION_MODE_ID,
+        supportsSubagentObservation,
+        permissionMode: restoredPermissionMode ?? "yolo",
+        permissionModeId: restoredPermissionModeId,
       });
       return { ok: true, value: session };
     } catch (error) {
@@ -2445,6 +2548,7 @@ export class OmpAdapter implements HarnessAdapter {
       model?: HarnessModelRef;
       thinkingOptionId?: HarnessThinkingOptionId;
       supportsThinkingSelection: boolean;
+      supportsSubagentObservation: boolean;
       permissionMode: OmpPermissionMode;
       permissionModeId: HarnessPermissionModeId;
       startedTransport?: OmpTurnTransport;
@@ -2468,6 +2572,7 @@ export class OmpAdapter implements HarnessAdapter {
         ...(options.thinkingOptionId ? { thinkingOptionId: options.thinkingOptionId } : {}),
         toolOutputLimit: this.#toolOutputLimit,
         supportsThinkingSelection: options.supportsThinkingSelection,
+        supportsSubagentObservation: options.supportsSubagentObservation,
         permissionMode: options.permissionMode,
         permissionModeId: options.permissionModeId,
         ...(options.startedTransport ? { startedTransport: options.startedTransport } : {}),
@@ -2481,12 +2586,28 @@ export class OmpAdapter implements HarnessAdapter {
     return session;
   }
 
+  #closeOpeningTransport(transport: OmpTurnTransport): Promise<void> {
+    const existing = this.#openingTransportCloses.get(transport);
+    if (existing) return existing;
+    const closing = transport.close();
+    this.#openingTransportCloses.set(transport, closing);
+    return closing;
+  }
+
   close(): Promise<void> {
     if (!this.#closePromise) {
-      this.#closePromise = Promise.all([
-        ...[...this.#inspections].map((transport) => transport.close()),
-        ...[...this.#sessions].map((session) => session.close()),
-      ]).then(() => undefined);
+      this.#closePromise = (async () => {
+        const opening = [...this.#openingCreates];
+        await Promise.all([
+          ...[...this.#inspections].map((transport) => transport.close()),
+          ...[...this.#ephemeralTransports].map((transport) => transport.close()),
+          ...[...this.#openingTransports].map((transport) =>
+            this.#closeOpeningTransport(transport),
+          ),
+          ...[...this.#sessions].map((session) => session.close()),
+        ]);
+        await Promise.all(opening);
+      })();
     }
     return this.#closePromise;
   }

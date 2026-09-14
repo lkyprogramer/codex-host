@@ -6,8 +6,9 @@ import type { IncomingMessage } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 
 import WebSocket from "ws";
+import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
 
-import { deepSeekProcessInvocation, killDeepSeekProcessTree } from "../executable.js";
+import { deepSeekProcessInvocation } from "../executable.js";
 
 import {
   MODERN_REMOTE_MUX_PATH,
@@ -114,7 +115,7 @@ export interface ModernRemoteConnectionDependencies {
     child: ChildProcess,
     platform: NodeJS.Platform,
     timeoutMs: number,
-  ) => void;
+  ) => void | Promise<void>;
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 20_000;
@@ -137,6 +138,8 @@ function positiveSafeInteger(value: number, name: string, maximum: number): numb
   return value;
 }
 
+const managedProcessTrees = new WeakMap<ChildProcess, OwnedProcessTree>();
+
 const DEFAULT_DEPENDENCIES: ModernRemoteConnectionDependencies = {
   spawn: (command, args, options) => spawn(command, args, options),
   fetch: (input, init) => globalThis.fetch(input, init),
@@ -147,7 +150,12 @@ const DEFAULT_DEPENDENCIES: ModernRemoteConnectionDependencies = {
     }) as unknown as ModernWebSocket,
   randomUUID,
   platform: process.platform,
-  killProcessTree: killDeepSeekProcessTree,
+  killProcessTree: async (child) => {
+    const tree = managedProcessTrees.get(child);
+    if (tree) return tree.close();
+    if (!child.pid) return;
+    throw new Error("DeepSeek Harness process ownership was not captured at spawn");
+  },
 };
 
 type SocketEvent =
@@ -854,6 +862,13 @@ export class ModernRemoteConnection {
       throw this.#spawnFailure(error);
     }
     this.#child = child;
+    if (this.#dependencies.killProcessTree === DEFAULT_DEPENDENCIES.killProcessTree) {
+      const tree = trackOwnedProcessTree(child, {
+        detached: this.#dependencies.platform !== "win32",
+        closeTimeoutMs: this.#closeTimeoutMs,
+      });
+      if (tree) managedProcessTrees.set(child, tree);
+    }
     child.stderr?.on("data", (chunk: Buffer | string) => {
       const truncated =
         typeof chunk === "string"
@@ -1134,7 +1149,7 @@ export class ModernRemoteConnection {
         await gracefulExit;
       }
       try {
-        this.#dependencies.killProcessTree(
+        await this.#dependencies.killProcessTree(
           child,
           this.#dependencies.platform,
           this.#closeTimeoutMs,

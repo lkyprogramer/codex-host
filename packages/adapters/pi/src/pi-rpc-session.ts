@@ -1,8 +1,9 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { parseHostUsage, sanitizeDiagnosticTail, type HostUsage } from "@codexhost/harness-adapter";
+import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import {
   harnessThinkingOptionIdSchema,
   jsonValueSchema,
@@ -23,6 +24,22 @@ import {
 } from "./pi-usage.js";
 import type { PiNativeModel, PiNativeModelRef } from "./pi-model-catalog.js";
 import { verifyPiSessionCwd } from "./pi-session-file.js";
+
+function waitForLeaderExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("exit", finish);
+  });
+}
 
 export interface PiSessionState {
   sessionId: string;
@@ -366,30 +383,6 @@ function assistantFailure(value: unknown): Error | null | undefined {
   return new Error(nonBlankString(value.errorMessage) ? value.errorMessage : fallback);
 }
 
-function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return;
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "ESRCH") throw error;
-  }
-}
-
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return Promise.race([
-    new Promise<boolean>((resolve) => child.once("exit", () => resolve(true))),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-  ]);
-}
-
 interface PiProcessCommandDependencies {
   platform: NodeJS.Platform;
   homeDirectory: string;
@@ -484,6 +477,7 @@ export class PiRpcSession {
   #autonomousTurnHandler: ((turn: PiAutonomousTurn) => void) | null = null;
   #buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
   #child: ChildProcessWithoutNullStreams | null = null;
+  #ownedProcessTree: OwnedProcessTree | null = null;
   #closed = false;
   #closePromise: Promise<void> | null = null;
   #compactionActive = false;
@@ -546,6 +540,18 @@ export class PiRpcSession {
         : {}),
     });
     this.#child = child;
+    this.#ownedProcessTree = trackOwnedProcessTree(child, {
+      detached: process.platform !== "win32",
+      closeTimeoutMs: this.#options.closeTimeoutMs,
+      onExitCleanupFailure: (error) =>
+        this.#fail(
+          new PiRpcFaultError(
+            "processExited",
+            `Pi RPC owned process cleanup failed: ${message(error)}`,
+            this.stderrTail,
+          ),
+        ),
+    });
     child.stdout.on("data", (chunk: Buffer) => this.#push(chunk));
     child.stdout.on("end", () => {
       if (this.#buffer.length !== 0) {
@@ -876,14 +882,19 @@ export class PiRpcSession {
   async #stopProcess(): Promise<void> {
     const child = this.#child;
     if (!child) return;
-    if (child.stdin.writable) child.stdin.end();
-    if (await waitForExit(child, this.#options.closeTimeoutMs)) return;
-    signalProcessTree(child, "SIGTERM");
-    if (await waitForExit(child, this.#options.closeTimeoutMs)) return;
-    signalProcessTree(child, "SIGKILL");
-    if (!(await waitForExit(child, this.#options.closeTimeoutMs))) {
-      throw new Error("Pi RPC process tree did not exit within cleanup bounds");
+    const processTree = this.#ownedProcessTree;
+    if (!processTree) {
+      throw new Error("Pi RPC owned process tree is unavailable");
     }
+    if (process.platform === "win32") {
+      await processTree.close();
+      return;
+    }
+    if (child.stdin.writable) child.stdin.end();
+    // A graceful leader exit is only a delay before process-group verification,
+    // never evidence that tool descendants are gone.
+    await waitForLeaderExit(child, this.#options.closeTimeoutMs);
+    await processTree.close();
   }
 
   #push(chunk: Buffer<ArrayBufferLike>): void {

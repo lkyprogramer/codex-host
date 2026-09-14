@@ -240,16 +240,63 @@ describe("CodeBuddy native Adapter", () => {
     ).toBe(false);
   });
 
-  it("uses the native fullAccess mode for unattended execution and refuses invalid refs before opening", async () => {
+  it("maps unattended execution on create and resume, but preserves an explicit permission mode", async () => {
     const { adapter, native } = setup();
-    const opened = await adapter.open({
+    const unattendedCreate = await adapter.open({
       kind: "create",
       cwd: process.cwd(),
       executionPolicy: "unattended-full-access",
     });
-    expect(opened).toMatchObject({
+    expect(unattendedCreate).toMatchObject({
       value: { initialState: { effectivePermissionModeId: "fullAccess" } },
     });
+    const explicitCreate = await adapter.open({
+      kind: "create",
+      cwd: process.cwd(),
+      executionPolicy: "unattended-full-access",
+      permissionModeId: harnessPermissionModeIdSchema.parse("plan"),
+    });
+    expect(explicitCreate).toMatchObject({
+      value: { initialState: { effectivePermissionModeId: "plan" } },
+    });
+
+    const source = await create(adapter);
+    const events = collect(source);
+    await source.execute(turn("resume-source"));
+    await events.completed();
+    const ref = source.initialState.nativeRef;
+    if (!ref) throw Error("Missing source Native Session identity");
+    await adapter.close();
+    await events.closed;
+
+    const unattendedResumeAdapter = new CodeBuddyAdapter({ ...native });
+    adapters.push(unattendedResumeAdapter);
+    const unattendedResume = await unattendedResumeAdapter.open({
+      kind: "resume",
+      cwd: process.cwd(),
+      nativeRef: ref,
+      executionPolicy: "unattended-full-access",
+    });
+    expect(unattendedResume).toMatchObject({
+      value: { initialState: { effectivePermissionModeId: "fullAccess" } },
+    });
+
+    const explicitResumeAdapter = new CodeBuddyAdapter({ ...native });
+    adapters.push(explicitResumeAdapter);
+    const explicitResume = await explicitResumeAdapter.open({
+      kind: "resume",
+      cwd: process.cwd(),
+      nativeRef: ref,
+      executionPolicy: "unattended-full-access",
+      permissionModeId: harnessPermissionModeIdSchema.parse("plan"),
+    });
+    expect(explicitResume).toMatchObject({
+      value: { initialState: { effectivePermissionModeId: "plan" } },
+    });
+  });
+
+  it("refuses invalid refs before opening", async () => {
+    const { adapter, native } = setup();
     const count = native.clients.length;
     expect(
       await adapter.open({
@@ -330,5 +377,20 @@ describe("CodeBuddy native Adapter", () => {
     client.missingHistory = true;
     await session.execute(turn("missing"));
     expect(await events.completed()).toMatchObject([{ event: { outcome: { status: "failed" } } }]);
+  });
+
+  it("keeps a Session owned when native process cleanup rejects", async () => {
+    const { adapter, native } = setup();
+    const session = await create(adapter);
+    const client = native.clients[0];
+    if (!client) throw new Error("Missing native client");
+    client.closeThrows = true;
+
+    try {
+      await expect(session.close()).rejects.toThrow("fixture close failure");
+      await expect(adapter.close()).rejects.toBeInstanceOf(AggregateError);
+    } finally {
+      adapters.splice(adapters.indexOf(adapter), 1);
+    }
   });
 });

@@ -180,11 +180,12 @@ export class CodeBuddySession implements HarnessSession {
       formatVersion: 1,
     });
     this.#apply(configuration(opened.configOptions), false);
-    if (this.input.kind === "create" && this.input.executionPolicy === "unattended-full-access") {
-      // Unlike bypassPermissions, the native fullAccess option also covers HIGH/CRITICAL actions.
-      await this.#configure("mode", "fullAccess");
-    } else if (this.input.permissionModeId)
-      await this.#configure("mode", this.input.permissionModeId);
+    const permissionMode =
+      this.input.permissionModeId ??
+      (this.input.executionPolicy === "unattended-full-access" ? "fullAccess" : undefined);
+    // An explicit native mode is more specific than Host unattended intent. Unlike bypassPermissions,
+    // fullAccess also covers HIGH/CRITICAL native actions and must be confirmed on create and resume.
+    if (permissionMode) await this.#configure("mode", permissionMode);
     if (this.input.model) await this.#configure("model", nativeModel(this.input.model));
     if (this.input.thinkingOptionId)
       await this.#configure("thought_level", this.input.thinkingOptionId);
@@ -468,7 +469,7 @@ export class CodeBuddySession implements HarnessSession {
       await this.#client.close();
     } finally {
       this.#channel.end();
-      this.onClose();
     }
+    this.onClose();
   }
 }

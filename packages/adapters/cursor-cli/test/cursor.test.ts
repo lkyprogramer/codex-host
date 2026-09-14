@@ -1,13 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
+  harnessIdSchema,
   hostTurnIdSchema,
   hostInteractionIdSchema,
   harnessPermissionModeIdSchema,
   harnessInspectionSchema,
+  harnessThinkingOptionIdSchema,
 } from "@codexhost/shared-contracts";
 import type { HarnessOutput } from "@codexhost/harness-adapter";
-import { CursorAdapter, CursorSession } from "../src/adapter.js";
+import { CursorAdapter, CursorSession, cursorError } from "../src/adapter.js";
 import { CursorTransport, type CursorCallbacks } from "../src/transport.js";
 import { cursorModelRef, cursorCatalog, cursorNativeModel } from "../src/models.js";
 import { CursorInteractions } from "../src/interactions.js";
@@ -83,6 +85,169 @@ afterEach(() => {
 });
 
 describe("Cursor native configuration", () => {
+  it("does not misclassify an authenticate-stage network failure as missing credentials", () => {
+    expect(cursorError(new Error("Cursor ACP authenticate: [aborted] socket hang up")).code).toBe(
+      "protocolError",
+    );
+    expect(cursorError(new Error("Cursor ACP authenticate: Authentication required")).code).toBe(
+      "authenticationRequired",
+    );
+  });
+  it("preserves and redacts string details from native internal errors", () => {
+    const error = Object.assign(new Error("Internal error"), {
+      data: { details: "[aborted] socket hang up; access_token=fixture-secret" },
+    });
+    expect(cursorError(error).message).toBe("[aborted] socket hang up; access_token=[redacted]");
+    expect(
+      cursorError(
+        Object.assign(new Error("Internal error"), {
+          data: { details: { credentials: "must not serialize" } },
+        }),
+      ).message,
+    ).toBe("Internal error");
+  });
+  it("preserves native ACP diagnostic messages instead of only Invalid params", () => {
+    const error = Object.assign(new Error("Invalid params"), {
+      data: { message: "No current ACP model found for config option: effort" },
+    });
+    expect(cursorError(error).message).toContain(
+      "No current ACP model found for config option: effort",
+    );
+  });
+  it("requires confirmed current state or an explicit model before exposing a Session", async () => {
+    vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      const modelOption = info.configOptions[0];
+      if (!modelOption) throw new Error("Missing fixture model");
+      return { ...info, configOptions: [{ ...modelOption, currentValue: "" }] };
+    });
+    const configure = vi
+      .spyOn(CursorTransport.prototype, "configure")
+      .mockResolvedValue({ configOptions: info.configOptions });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      expect(await adapter.open({ kind: "create", cwd: process.cwd() })).toMatchObject({
+        ok: false,
+      });
+      const result = await adapter.open({
+        kind: "create",
+        cwd: process.cwd(),
+        model: cursorModelRef("model[effort=high]"),
+      });
+      expect(result).toMatchObject({ ok: true });
+      expect(configure).toHaveBeenCalledWith("model", "model[effort=high]");
+      if (result.ok)
+        expect(result.value.initialState.effectiveModel).toEqual(
+          cursorModelRef("model[effort=high]"),
+        );
+    } finally {
+      await adapter.close();
+    }
+  });
+  it.each(["create", "resume"] as const)("maps unattended %s to native force", async (kind) => {
+    const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const result = await adapter.open({
+        kind,
+        cwd: process.cwd(),
+        executionPolicy: "unattended-full-access",
+        nativeRef: {
+          harnessId: harnessIdSchema.parse("cursor-cli"),
+          nativeSessionId: info.sessionId,
+          formatVersion: 1,
+        },
+      });
+      expect(result.ok).toBe(true);
+      expect((open.mock.instances[0] as CursorTransport).options.force).toBe(true);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("keeps native approvals for default policy and rejects independent thinking", async () => {
+    const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      expect(
+        await adapter.open({ kind: "create", cwd: process.cwd(), executionPolicy: "default" }),
+      ).toMatchObject({ ok: true });
+      expect((open.mock.instances[0] as CursorTransport).options.force).not.toBe(true);
+      expect(
+        await adapter.open({
+          kind: "create",
+          cwd: process.cwd(),
+          thinkingOptionId: harnessThinkingOptionIdSchema.parse("xhigh"),
+        }),
+      ).toMatchObject({ error: { code: "unsupported" } });
+      expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it.each([
+    ["create", "agent", true],
+    ["resume", "agent", true],
+    ["create", "plan", false],
+    ["resume", "plan", false],
+    ["create", "ask", false],
+    ["resume", "ask", false],
+  ] as const)("maps %s mode %s independently from native force (%s)", async (kind, mode, force) => {
+    const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const configure = vi.spyOn(CursorTransport.prototype, "configure").mockResolvedValue({
+      configOptions: [
+        {
+          id: "mode",
+          name: "Mode",
+          type: "select",
+          currentValue: mode,
+          options: [{ value: mode, name: mode }],
+        },
+      ],
+    });
+    const adapter = new CursorAdapter();
+    try {
+      const result = await adapter.open({
+        kind,
+        nativeRef: {
+          harnessId: harnessIdSchema.parse("cursor-cli"),
+          nativeSessionId: info.sessionId,
+          formatVersion: 1,
+        },
+        cwd: process.cwd(),
+        executionPolicy: "unattended-full-access",
+        permissionModeId: harnessPermissionModeIdSchema.parse(mode),
+      });
+      expect(result.ok).toBe(true);
+      expect((open.mock.instances[0] as CursorTransport).options.force).toBe(force);
+      expect(configure).toHaveBeenCalledWith("mode", mode);
+    } finally {
+      await adapter.close();
+    }
+  });
+
   it("starts inspection cache expiry at completion, including slow native startup", async () => {
     const clock = vi.spyOn(Date, "now").mockReturnValue(0),
       gate = Promise.withResolvers<typeof info>();
@@ -179,6 +344,26 @@ describe("Cursor native configuration", () => {
     expect(f.session.initialState.effectivePermissionModeId).toBe("agent");
     await f.session.close();
     await f.done;
+  });
+  it("faults and ends outputs after a parameter configuration retires the transport", async () => {
+    const f = session();
+    vi.spyOn(f.transport, "configure").mockImplementation(async () => {
+      await CursorTransport.prototype.close.call(f.transport);
+      throw new Error("Native parameter rejected after base model changed");
+    });
+    expect(
+      await f.session.execute({
+        type: "model.select",
+        model: cursorModelRef("model[effort=high]"),
+      }),
+    ).toMatchObject({ ok: false });
+    await f.done;
+    expect(
+      f.output.filter(
+        (output) => output.kind === "event" && output.event.type === "session.faulted",
+      ),
+    ).toHaveLength(1);
+    expect(await f.session.execute(start)).toMatchObject({ error: { code: "invalidState" } });
   });
 });
 
@@ -376,5 +561,25 @@ describe("Cursor replay identity", () => {
       cursorSnapshot(info.sessionId, [{ ...identity, text: "other" }], replay),
     ).toThrow();
     expect(() => cursorSnapshot("other", [identity], replay)).toThrow();
+  });
+});
+
+describe("Cursor cleanup ownership", () => {
+  it("keeps a Session owned when native process cleanup rejects", async () => {
+    vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "close").mockRejectedValue(
+      new Error("owned group remains"),
+    );
+    const adapter = new CursorAdapter();
+    const opened = await adapter.open({ kind: "create", cwd: process.cwd() });
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    await expect(opened.value.close()).rejects.toBeInstanceOf(AggregateError);
+    await expect(adapter.close()).rejects.toBeInstanceOf(AggregateError);
   });
 });

@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { HarnessOutput, HostUsage } from "@codexhost/harness-adapter";
+import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import {
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
@@ -25,9 +26,11 @@ import type {
   OmpTurnEvent,
   OmpTurnResult,
 } from "../src/omp-rpc-session.js";
+import { OmpRpcFaultError } from "../src/omp-rpc-session.js";
 import type { OmpNativeModel } from "../src/omp-model-catalog.js";
 
 class FakeOmpTransport implements OmpTurnTransport {
+  readonly subagentSubscription: "events" | "unsupported";
   state: OmpSessionState = {
     sessionId: "omp-parent",
     sessionFile: "/synthetic/omp-parent.jsonl",
@@ -50,6 +53,10 @@ class FakeOmpTransport implements OmpTurnTransport {
   });
   autoCompleteTurn = true;
   #resolveTurn: ((result: OmpTurnResult) => void) | null = null;
+
+  constructor(subagentSubscription: "events" | "unsupported" = "events") {
+    this.subagentSubscription = subagentSubscription;
+  }
 
   async start(): Promise<void> {}
 
@@ -124,17 +131,25 @@ class FakeOmpTransport implements OmpTurnTransport {
   }
 
   succeed(text: string): void {
+    const ordinal =
+      this.history.entries.filter(
+        (entry) =>
+          entry.type === "message" && (entry.message as { role?: unknown }).role === "user",
+      ).length + 1;
+    const userId = `user-${ordinal}`;
+    const assistantId = `assistant-${ordinal}`;
     this.history = {
       entries: [
+        ...this.history.entries,
         {
-          id: "user-1",
-          parentId: null,
+          id: userId,
+          parentId: this.history.leafId,
           type: "message",
           message: { role: "user", content: [{ type: "text", text: "edit" }] },
         },
         {
-          id: "assistant-1",
-          parentId: "user-1",
+          id: assistantId,
+          parentId: userId,
           type: "message",
           message: {
             role: "assistant",
@@ -143,7 +158,7 @@ class FakeOmpTransport implements OmpTurnTransport {
           },
         },
       ],
-      leafId: "assistant-1",
+      leafId: assistantId,
     };
     this.#resolveTurn?.({ text, cancelled: false });
   }
@@ -175,28 +190,7 @@ class FakeOmpTransport implements OmpTurnTransport {
           isError: false,
           resultSummary: "done",
         });
-        this.history = {
-          entries: [
-            {
-              id: "user-1",
-              parentId: null,
-              type: "message",
-              message: { role: "user", content: [{ type: "text", text: "delegate" }] },
-            },
-            {
-              id: "assistant-1",
-              parentId: "user-1",
-              type: "message",
-              message: {
-                role: "assistant",
-                content: [{ type: "text", text: "done" }],
-                stopReason: "stop",
-              },
-            },
-          ],
-          leafId: "assistant-1",
-        };
-        this.#resolveTurn?.({ text: "done", cancelled: false });
+        this.succeed("done");
       });
     });
   }
@@ -247,6 +241,140 @@ function historyTurn(input: {
   ];
 }
 
+describe("OMP Adapter conformance", () => {
+  it("records a controlled native-transport receipt across create, cancellation, and resume", async () => {
+    const transportOptions: OmpRpcSessionOptions[] = [];
+    const closes: Array<() => boolean> = [];
+    let primaryTransport: FakeOmpTransport | undefined;
+    let adapterNumber = 0;
+
+    const createAdapter = (): OmpAdapter => {
+      adapterNumber += 1;
+      return new OmpAdapter(
+        {},
+        {
+          createTransport: (options) => {
+            const scope = options.environment?.CODEXHOST_CONFORMANCE_SCOPE;
+            const transport = new FakeOmpTransport("events");
+            const sessionId =
+              scope === "primary" || scope === "resume"
+                ? "omp-conformance-primary"
+                : scope === "isolated"
+                  ? "omp-conformance-isolated"
+                  : `omp-conformance-inspection-${adapterNumber}`;
+            transport.state = {
+              ...transport.state,
+              sessionId,
+              sessionFile: `/synthetic/${sessionId}.jsonl`,
+            };
+            if (scope === "resume" && primaryTransport) {
+              transport.history = structuredClone(primaryTransport.history);
+            }
+            const nativeRunTurn = transport.runTurn.bind(transport);
+            transport.runTurn = (text, onEvent) => {
+              transport.autoCompleteTurn = text !== "fixture cancellable";
+              return nativeRunTurn(text, onEvent);
+            };
+            const nativeAbort = transport.abort.bind(transport);
+            transport.abort = async () => {
+              const ordinal =
+                transport.history.entries.filter(
+                  (entry) =>
+                    entry.type === "message" &&
+                    (entry.message as { role?: unknown }).role === "user",
+                ).length + 1;
+              const userId = `cancel-user-${ordinal}`;
+              const assistantId = `cancel-assistant-${ordinal}`;
+              transport.history = {
+                entries: [
+                  ...transport.history.entries,
+                  {
+                    id: userId,
+                    parentId: transport.history.leafId,
+                    type: "message",
+                    message: {
+                      role: "user",
+                      content: [{ type: "text", text: "fixture cancellable" }],
+                    },
+                  },
+                  {
+                    id: assistantId,
+                    parentId: userId,
+                    type: "message",
+                    message: {
+                      role: "assistant",
+                      content: [{ type: "text", text: "cancelled" }],
+                      stopReason: "aborted",
+                    },
+                  },
+                ],
+                leafId: assistantId,
+              };
+              await nativeAbort();
+            };
+            if (scope === "primary") primaryTransport = transport;
+            const close = vi.spyOn(transport, "close");
+            closes.push(() => close.mock.calls.length > 0);
+            transportOptions.push(options);
+            return transport;
+          },
+        },
+      );
+    };
+
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd: "/synthetic",
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-transport-fixture",
+      },
+      environment: {
+        primary: { CODEXHOST_CONFORMANCE_SCOPE: "primary" },
+        isolated: { CODEXHOST_CONFORMANCE_SCOPE: "isolated" },
+        resume: { CODEXHOST_CONFORMANCE_SCOPE: "resume" },
+      },
+      prompts: {
+        first: "fixture first",
+        cancellable: "fixture cancellable",
+        followup: "fixture followup",
+      },
+      probes: {
+        assertEnvironmentIsolation: async () => {
+          const scopes = transportOptions
+            .map((options) => options.environment?.CODEXHOST_CONFORMANCE_SCOPE)
+            .filter((scope): scope is string => scope !== undefined);
+          expect(scopes).toEqual(expect.arrayContaining(["primary", "isolated"]));
+        },
+        readCleanup: async () => ({
+          residue: closes.every((closed) => closed()) ? "none" : "present",
+        }),
+      },
+    });
+
+    expect(receipt).toMatchObject({
+      status: "incomplete",
+      harnessId: "omp",
+      scenarios: {
+        inspect: { status: "passed" },
+        create: { status: "passed" },
+        environmentIsolation: { status: "passed" },
+        firstTurn: { status: "passed" },
+        concurrentTurn: { status: "passed" },
+        cancel: { status: "passed" },
+        resume: { status: "passed" },
+        followup: { status: "passed" },
+        cleanup: { status: "passed" },
+      },
+      environment: { nativeActivation: "notRequested", nativeIsolationReadback: "passed" },
+      cleanup: { residue: "none", nativeReadback: "passed" },
+    });
+  });
+});
+
 describe("OMP Adapter Session environment", () => {
   it("uses OMP's native yolo default without changing ordinary create semantics", async () => {
     const transport = new FakeOmpTransport();
@@ -269,7 +397,7 @@ describe("OMP Adapter Session environment", () => {
     await adapter.close();
   });
 
-  it("defers a cold OMP Permission Mode selection until startup", async () => {
+  it("restarts an eagerly initialized OMP Session for a live Permission Mode selection", async () => {
     const transport = new RestartableOmpTransport();
     const createTransport = vi.fn(() => transport);
     const adapter = new OmpAdapter({}, { createTransport });
@@ -286,14 +414,18 @@ describe("OMP Adapter Session environment", () => {
         permissionModeId: harnessPermissionModeIdSchema.parse("write"),
       }),
     ).resolves.toEqual({ ok: true, value: { completed: true } });
-    expect(createTransport).not.toHaveBeenCalled();
+    expect(createTransport).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ permissionMode: "always-ask" }),
+    );
+    expect(createTransport).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ permissionMode: "write" }),
+    );
     await expect(opened.value.readSnapshot()).resolves.toMatchObject({
       ok: true,
       value: { state: { effectivePermissionModeId: "write" } },
     });
-    expect(createTransport).toHaveBeenCalledWith(
-      expect.objectContaining({ permissionMode: "write" }),
-    );
     await adapter.close();
   });
 
@@ -430,6 +562,40 @@ describe("OMP Adapter Session environment", () => {
     );
     await adapter.close();
   });
+
+  it("passes per-Thread environment to the first native resume transport", async () => {
+    const transport = new FakeOmpTransport();
+    transport.state = {
+      ...transport.state,
+      sessionId: "omp-resume",
+      sessionFile: "/synthetic/omp-resume.jsonl",
+    };
+    const createTransport = vi.fn(() => transport);
+    const adapter = new OmpAdapter({}, { createTransport });
+    const nativeRef = nativeSessionRefSchema.parse({
+      harnessId: "omp",
+      nativeSessionId: "omp-resume",
+      locator: { sessionFile: "/synthetic/omp-resume.jsonl" },
+      formatVersion: 1,
+    });
+
+    const opened = await adapter.open({
+      kind: "resume",
+      cwd: "/synthetic",
+      nativeRef,
+      environment: { CODEXHOST_THREAD_ID: "resume-thread" },
+      executionPolicy: "unattended-full-access",
+    });
+
+    expect(opened).toMatchObject({ ok: true });
+    expect(createTransport).toHaveBeenCalledWith(
+      expect.objectContaining({
+        environment: { CODEXHOST_THREAD_ID: "resume-thread" },
+        permissionMode: "yolo",
+      }),
+    );
+    await adapter.close();
+  });
 });
 
 describe("OMP Adapter inspection", () => {
@@ -445,6 +611,89 @@ describe("OMP Adapter inspection", () => {
       status: "notInstalled",
       error: { code: "notInstalled", retryable: false, stage: "startup" },
     });
+    expect(close).toHaveBeenCalledOnce();
+  });
+});
+
+describe("OMP create capability readback", () => {
+  it("derives subagent observation from the create Session's native subscription without inspection", async () => {
+    const createTransport = vi.fn(() => new FakeOmpTransport("events"));
+    const adapter = new OmpAdapter({}, { createTransport });
+
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+
+    expect(opened).toMatchObject({
+      ok: true,
+      value: {
+        capabilities: {
+          subagents: { observe: true, readTranscript: true },
+          autonomousTurns: { observe: true },
+        },
+      },
+    });
+    expect(createTransport).toHaveBeenCalledTimes(1);
+    await adapter.close();
+  });
+
+  it("does not inherit a successful inspection subscription when create reports unsupported", async () => {
+    const inspection = new FakeOmpTransport("events");
+    const create = new FakeOmpTransport("unsupported");
+    const createTransport = vi
+      .fn()
+      .mockImplementationOnce(() => inspection)
+      .mockImplementationOnce(() => create);
+    const adapter = new OmpAdapter({}, { createTransport });
+
+    await expect(adapter.inspect({ cwd: "/synthetic" })).resolves.toMatchObject({
+      status: "ready",
+      capabilities: { subagents: { observe: true, readTranscript: true } },
+    });
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+
+    expect(opened).toMatchObject({
+      ok: true,
+      value: { capabilities: { subagents: { observe: false, readTranscript: true } } },
+    });
+    if (opened.ok) expect(opened.value.capabilities.autonomousTurns).toBeUndefined();
+    await adapter.close();
+  });
+
+  it("keeps Adapter close pending over an eager create startup and never publishes that Session", async () => {
+    const transport = new RestartableOmpTransport();
+    let releaseStart!: () => void;
+    let markStart!: () => void;
+    const startEntered = new Promise<void>((resolve) => {
+      markStart = resolve;
+    });
+    transport.start = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          releaseStart = resolve;
+          markStart();
+        }),
+    );
+    const close = vi.spyOn(transport, "close");
+    const adapter = new OmpAdapter({}, { createTransport: () => transport });
+
+    const opening = adapter.open({ kind: "create", cwd: "/synthetic" });
+    await startEntered;
+    let closeCompleted = false;
+    const closing = adapter.close().then(() => {
+      closeCompleted = true;
+    });
+
+    await Promise.resolve();
+    expect(close).toHaveBeenCalledOnce();
+    expect(closeCompleted).toBe(false);
+
+    releaseStart();
+    await expect(closing).resolves.toBeUndefined();
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalidState" },
+    });
+    expect(close).toHaveBeenCalledOnce();
+    await expect(adapter.close()).resolves.toBeUndefined();
     expect(close).toHaveBeenCalledOnce();
   });
 });
@@ -565,6 +814,10 @@ describe("OMP Adapter Subagents", () => {
       },
     };
     const adapter = new OmpAdapter({}, dependencies);
+    await expect(adapter.inspect({ cwd: "/synthetic" })).resolves.toMatchObject({
+      status: "ready",
+      capabilities: { subagents: { observe: true, readTranscript: true } },
+    });
     const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
     expect(opened.ok).toBe(true);
     if (!opened.ok) return;
@@ -996,5 +1249,38 @@ describe("OMP Adapter Subagents", () => {
     });
     await opened.value.close();
     await adapter.close();
+  });
+
+  it("releases the owned native transport after a Session fault", async () => {
+    const transport = new FakeOmpTransport();
+    const close = vi.spyOn(transport, "close");
+    let onFault: OmpRpcSessionOptions["onFault"];
+    const adapter = new OmpAdapter(
+      {},
+      {
+        createTransport: (options) => {
+          onFault = options.onFault;
+          return transport;
+        },
+      },
+    );
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    await opened.value.readSnapshot();
+    onFault?.(new OmpRpcFaultError("processExited", "synthetic process exit"));
+
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce(), { timeout: 100 });
+    await adapter.close();
+  });
+
+  it("keeps a Session owned when native process cleanup rejects", async () => {
+    const transport = new FakeOmpTransport();
+    vi.spyOn(transport, "close").mockRejectedValue(new Error("owned group remains"));
+    const adapter = new OmpAdapter({}, { createTransport: () => transport });
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+
+    await expect(opened.value.close()).rejects.toThrow("owned group remains");
+    await expect(adapter.close()).rejects.toThrow("owned group remains");
   });
 });

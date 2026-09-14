@@ -49,6 +49,11 @@ export interface OpenCodeTransport {
   updateSessionPermission(sessionID: string, permission: PermissionRuleset): Promise<Session>;
   getMessages(sessionID: string): Promise<OpenCodeMessageWithParts[]>;
   getStatus(sessionID: string): Promise<SessionStatus>;
+  /**
+   * Reads the complete native Server status map. A single Session being idle
+   * does not prove that a dedicated Server has no autonomous native work.
+   */
+  getStatuses(): Promise<Record<string, SessionStatus>>;
   getDiff(sessionID: string, messageID?: string): Promise<SnapshotFileDiff[]>;
   forkSession(sessionID: string, messageID?: string): Promise<Session>;
   revertSession(sessionID: string, messageID: string): Promise<Session>;

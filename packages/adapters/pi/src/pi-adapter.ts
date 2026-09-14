@@ -819,7 +819,7 @@ class PiHarnessSession implements HarnessSession {
 
   close(): Promise<void> {
     if (!this.#closePromise) {
-      this.#closePromise = this.#close().finally(this.#onClosed);
+      this.#closePromise = this.#close().then(() => this.#onClosed());
     }
     return this.#closePromise;
   }
@@ -1038,7 +1038,6 @@ class PiHarnessSession implements HarnessSession {
       const normalized = normalizedError(error, "nativeFailure");
       if (this.#active === active) {
         this.#fault(new PiAdapterFaultError(normalized));
-        void transport.close().catch(() => undefined);
       }
       return { ok: false, error: normalized };
     }
@@ -1817,6 +1816,7 @@ class PiHarnessSession implements HarnessSession {
     this.#phase = "faulted";
     this.#event({ type: "session.faulted", error: normalized });
     this.#channel.end();
+    void this.close().catch(() => undefined);
   }
 
   async #close(): Promise<void> {
@@ -1894,6 +1894,7 @@ export class PiAdapter implements HarnessAdapter {
   readonly #inspectionCache = new Map<string, Extract<HarnessInspection, { status: "ready" }>>();
   readonly #inspectionInFlight = new Map<string, Promise<HarnessInspection>>();
   readonly #inspections = new Set<PiTurnTransport>();
+  readonly #openingTransports = new Set<PiTurnTransport>();
   readonly #sessions = new Set<PiHarnessSession>();
   readonly #toolOutputLimit: number;
   #closePromise: Promise<void> | null = null;
@@ -1965,6 +1966,7 @@ export class PiAdapter implements HarnessAdapter {
     const startedAt = Date.now();
     let stage = "spawn";
     const transport = this.#createTransport({ cwd, onFault: () => undefined });
+    let closed = false;
     this.#inspections.add(transport);
     try {
       stage = "startup";
@@ -1981,6 +1983,7 @@ export class PiAdapter implements HarnessAdapter {
         transport.state.thinkingLevel,
       );
       await transport.close();
+      closed = true;
       return {
         status: "ready",
         catalog,
@@ -1996,8 +1999,14 @@ export class PiAdapter implements HarnessAdapter {
         },
       };
     } catch (error) {
-      await transport.close().catch(() => undefined);
-      const normalized = normalizedError(error, "unavailable");
+      let cleanupError: unknown;
+      try {
+        await transport.close();
+        closed = true;
+      } catch (closeError) {
+        cleanupError = closeError;
+      }
+      const normalized = normalizedError(cleanupError ?? error, "unavailable");
       return {
         status: normalized.code === "notInstalled" ? "notInstalled" : "error",
         error: {
@@ -2010,7 +2019,7 @@ export class PiAdapter implements HarnessAdapter {
         },
       };
     } finally {
-      this.#inspections.delete(transport);
+      if (closed) this.#inspections.delete(transport);
     }
   }
 
@@ -2113,6 +2122,7 @@ export class PiAdapter implements HarnessAdapter {
           : { forkSessionFile: sourceSessionFile }),
         onFault: (error) => session?.handleTransportFault(error),
       });
+      this.#openingTransports.add(transport);
       await transport.start();
 
       if (input.kind === "resume") {
@@ -2180,6 +2190,7 @@ export class PiAdapter implements HarnessAdapter {
           // Pi defers writing an empty fork until its first Assistant message. Stop this writer
           // before publishing native history, then resume so Pi observes the already flushed file.
           await transport.close();
+          this.#openingTransports.delete(transport);
           await persistEmptyPiSession({
             state,
             history,
@@ -2197,6 +2208,7 @@ export class PiAdapter implements HarnessAdapter {
             emptySessionConfiguration: configuration,
             onFault: (error) => session?.handleTransportFault(error),
           });
+          this.#openingTransports.add(transport);
           await transport.start();
           if (transport.state.sessionId !== state.sessionId) {
             throw new Error("Pi empty fork resumed with a different identity");
@@ -2228,9 +2240,15 @@ export class PiAdapter implements HarnessAdapter {
         initialUsage,
         supportsThinkingSelection: startedThinkingLevels !== null,
       });
+      this.#openingTransports.delete(transport);
       return { ok: true, value: session };
     } catch (error) {
-      await transport?.close().catch(() => undefined);
+      try {
+        await transport?.close();
+        if (transport) this.#openingTransports.delete(transport);
+      } catch (cleanupError) {
+        return { ok: false, error: normalizedError(cleanupError, "nativeFailure") };
+      }
       return { ok: false, error: normalizedError(error, "nativeFailure") };
     }
   }
@@ -2280,6 +2298,7 @@ export class PiAdapter implements HarnessAdapter {
       this.#closePromise = Promise.all([
         ...this.#importRequests,
         ...[...this.#inspections].map((transport) => transport.close()),
+        ...[...this.#openingTransports].map((transport) => transport.close()),
         ...[...this.#sessions].map((session) => session.close()),
       ]).then(() => undefined);
     }

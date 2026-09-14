@@ -52,6 +52,7 @@ export class CodeBuddyAdapter implements HarnessAdapter {
   readonly #factory: CodeBuddyClientFactory;
   readonly #sessions = new Set<CodeBuddySession>();
   readonly #inspections = new Set<CodeBuddyClient>();
+  #closePromise: Promise<void> | null = null;
   readonly #cache = new Map<string, Promise<HarnessInspection>>();
   #closed = false;
   constructor(readonly options: CodeBuddyAdapterOptions = {}) {
@@ -106,7 +107,7 @@ export class CodeBuddyAdapter implements HarnessAdapter {
       };
     } finally {
       if (client) {
-        await client.close().catch(() => {});
+        await client.close();
         this.#inspections.delete(client);
       }
     }
@@ -140,8 +141,11 @@ export class CodeBuddyAdapter implements HarnessAdapter {
       return { ok: true, value: session };
     } catch (error) {
       if (session) {
-        await session.close().catch(() => {});
-        this.#sessions.delete(session);
+        try {
+          await session.close();
+        } catch (cleanupError) {
+          return { ok: false, error: nativeError(cleanupError) };
+        }
       }
       const issue =
         record(error).code === "ENOENT"
@@ -151,13 +155,22 @@ export class CodeBuddyAdapter implements HarnessAdapter {
     }
   }
 
-  async close() {
+  close(): Promise<void> {
     this.#closed = true;
-    const results = await Promise.allSettled(
-      [...this.#sessions, ...this.#inspections].map((resource) => resource.close()),
-    );
-    this.#sessions.clear();
-    this.#inspections.clear();
+    this.#closePromise ??= this.#close();
+    return this.#closePromise;
+  }
+
+  async #close(): Promise<void> {
+    const resources = [...this.#sessions, ...this.#inspections];
+    const results = await Promise.allSettled(resources.map((resource) => resource.close()));
+    for (const [index, result] of results.entries()) {
+      if (result.status !== "fulfilled") continue;
+      const resource = resources[index];
+      if (resource && this.#inspections.has(resource as CodeBuddyClient)) {
+        this.#inspections.delete(resource as CodeBuddyClient);
+      }
+    }
     this.#cache.clear();
     const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],

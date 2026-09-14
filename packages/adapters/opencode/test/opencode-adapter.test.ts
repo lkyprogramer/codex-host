@@ -15,6 +15,7 @@ import type {
   UserMessage,
 } from "@opencode-ai/sdk/v2";
 import type { HarnessOutput, HarnessSession } from "@codexhost/harness-adapter";
+import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import {
   hostTurnIdSchema,
   nativeCheckpointRefSchema,
@@ -159,6 +160,7 @@ class FakeOpenCodeTransport implements OpenCodeTransport {
   questions: QuestionRequest[] = [];
   permissions: PermissionRequest[] = [];
   status: SessionStatus = { type: "idle" };
+  statuses: Record<string, SessionStatus> | undefined;
   listener: OpenCodeTransportListener | null = null;
   closed = 0;
   aborts = 0;
@@ -236,6 +238,13 @@ class FakeOpenCodeTransport implements OpenCodeTransport {
 
   async getStatus() {
     return this.status;
+  }
+
+  async getStatuses() {
+    return (
+      this.statuses ??
+      Object.fromEntries([...this.sessions.keys()].map((sessionID) => [sessionID, this.status]))
+    );
   }
 
   async getDiff(sessionID: string, messageID?: string) {
@@ -467,6 +476,127 @@ async function completeAfterBusy(transport: FakeOpenCodeTransport): Promise<void
   await flush();
 }
 
+describe("OpenCode Adapter conformance", () => {
+  it("records a controlled SDK-transport receipt across create, cancellation, and resume", async () => {
+    const transports: FakeOpenCodeTransport[] = [];
+    const connections: Array<{ closed: boolean }> = [];
+    const serverOptions: OpenCodeServerOptions[] = [];
+    let primaryTransport: FakeOpenCodeTransport | undefined;
+
+    const createAdapter = (): OpenCodeAdapter => {
+      let uuid = 0;
+      return new OpenCodeAdapter(
+        {},
+        {
+          createConnection: (options) => {
+            serverOptions.push(options);
+            const connection = {
+              stderrTail: "",
+              closed: false,
+              client: async () => {
+                throw new Error("Synthetic conformance connection client must not be used");
+              },
+              close: async () => {
+                connection.closed = true;
+              },
+            };
+            connections.push(connection);
+            return connection;
+          },
+          createTransport: (_connection, _cwd, options) => {
+            const transport = new FakeOpenCodeTransport();
+            const scope = options.environment?.CODEXHOST_CONFORMANCE_SCOPE;
+            if (scope === "resume" && primaryTransport) {
+              transport.messages.set(
+                "session-1",
+                structuredClone(primaryTransport.messages.get("session-1") ?? []),
+              );
+              transport.nativeMessageOrdinal = primaryTransport.nativeMessageOrdinal;
+            }
+            const nativePrompt = transport.promptAsync.bind(transport);
+            transport.promptAsync = async (input) => {
+              await nativePrompt(input);
+              if (input.text === "fixture cancellable") return;
+              queueMicrotask(() => {
+                appendTerminal(transport);
+                void completeAfterBusy(transport);
+              });
+            };
+            const nativeAbort = transport.abort.bind(transport);
+            transport.abort = async () => {
+              await nativeAbort();
+              appendTerminal(transport, [], {
+                name: "MessageAbortedError",
+                data: { message: "cancelled" },
+              });
+              await completeAfterBusy(transport);
+            };
+            if (scope === "primary") primaryTransport = transport;
+            transports.push(transport);
+            return transport;
+          },
+          randomUUID: () => `opencode-conformance-${++uuid}`,
+        },
+      );
+    };
+
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd,
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-transport-fixture",
+      },
+      environment: {
+        primary: { CODEXHOST_CONFORMANCE_SCOPE: "primary" },
+        isolated: { CODEXHOST_CONFORMANCE_SCOPE: "isolated" },
+        resume: { CODEXHOST_CONFORMANCE_SCOPE: "resume" },
+      },
+      prompts: {
+        first: "fixture first",
+        cancellable: "fixture cancellable",
+        followup: "fixture followup",
+      },
+      probes: {
+        assertEnvironmentIsolation: async () => {
+          const scopes = serverOptions
+            .map((options) => options.environment?.CODEXHOST_CONFORMANCE_SCOPE)
+            .filter((scope): scope is string => scope !== undefined);
+          expect(scopes).toEqual(expect.arrayContaining(["primary", "isolated"]));
+        },
+        readCleanup: async () => ({
+          residue:
+            transports.every((transport) => transport.closed > 0) &&
+            connections.every((connection) => connection.closed)
+              ? "none"
+              : "present",
+        }),
+      },
+    });
+
+    expect(receipt).toMatchObject({
+      status: "incomplete",
+      harnessId: "opencode",
+      scenarios: {
+        inspect: { status: "passed" },
+        create: { status: "passed" },
+        environmentIsolation: { status: "passed" },
+        firstTurn: { status: "passed" },
+        concurrentTurn: { status: "passed" },
+        cancel: { status: "passed" },
+        resume: { status: "passed" },
+        followup: { status: "passed" },
+        cleanup: { status: "passed" },
+      },
+      environment: { nativeActivation: "notRequested", nativeIsolationReadback: "passed" },
+      cleanup: { residue: "none", nativeReadback: "passed" },
+    });
+  });
+});
+
 describe("OpenCode HarnessAdapter", () => {
   it("uses a dedicated connection and preserves per-open environment for unattended delegation", async () => {
     const connectionOptions: OpenCodeServerOptions[] = [];
@@ -520,6 +650,346 @@ describe("OpenCode HarnessAdapter", () => {
     if (opened.ok) await opened.value.close();
     if (second.ok) await second.value.close();
     await adapter.close();
+  });
+
+  it("suspends only after every native Session and interaction is idle, then resumes the same Session", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const connectionOptions: OpenCodeServerOptions[] = [];
+    const connections: Array<{ closed: boolean }> = [];
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: (options) => {
+          connectionOptions.push(options);
+          const connection = {
+            stderrTail: "",
+            closed: false,
+            client: async () => ({}) as never,
+            close: async () => {
+              connection.closed = true;
+            },
+          };
+          connections.push(connection);
+          return connection;
+        },
+        createTransport: () => transport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+    const environment = { PATH: "/session", CODEXHOST_THREAD_ID: "thread-1" };
+    const opened = await adapter.open({ kind: "create", cwd, environment });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const nativeRef = opened.value.initialState.nativeRef;
+    if (!nativeRef) throw new Error("OpenCode Session did not expose a Native Ref");
+    const lifecycle = opened.value.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+
+    transport.statuses = { "session-1": { type: "idle" }, "native-child": { type: "busy" } };
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    await flush();
+    expect(transport.closed).toBe(0);
+
+    transport.statuses = {};
+    transport.questions = [{ id: "question-1" } as QuestionRequest];
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    await flush();
+    expect(transport.closed).toBe(0);
+
+    transport.questions = [];
+    transport.getStatuses = async () => null as never;
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "unknown",
+      reason: "OpenCode native idle state was malformed",
+    });
+    await flush();
+    expect(transport.closed).toBe(0);
+
+    transport.getStatuses = async () => ({});
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "native-session-and-managed-process-group",
+    });
+    expect(transport.closed).toBe(1);
+    expect(connections[0]?.closed).toBe(true);
+    await expect(opened.value.readSnapshot()).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalidState" },
+    });
+
+    const resumed = await adapter.open({ kind: "resume", cwd, nativeRef, environment });
+    if (!resumed.ok) throw new Error(resumed.error.message);
+    await expect(resumed.value.readSnapshot()).resolves.toMatchObject({
+      ok: true,
+      value: { turns: [] },
+    });
+    expect(connectionOptions.map((options) => options.environment)).toEqual([
+      environment,
+      environment,
+    ]);
+    await resumed.value.close();
+    await adapter.close();
+  });
+
+  it("cancels idle suspension before a late native status read can close the Server", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const { adapter, session } = await openFixture(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+    let resolveStatuses: ((value: Record<string, SessionStatus>) => void) | undefined;
+    transport.getStatuses = () =>
+      new Promise<Record<string, SessionStatus>>((resolve) => {
+        resolveStatuses = resolve;
+      });
+    const controller = new AbortController();
+    const suspension = lifecycle.suspend(controller.signal);
+    controller.abort();
+    resolveStatuses?.({ "session-1": { type: "idle" } });
+
+    await expect(suspension).resolves.toEqual({
+      status: "unknown",
+      reason: "Idle suspension was cancelled",
+    });
+    expect(transport.closed).toBe(0);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("rejects a native event or a new Host operation that races idle suspension", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const { adapter, session } = await openFixture(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+    let resolveStatuses: ((value: Record<string, SessionStatus>) => void) | undefined;
+    transport.getStatuses = () =>
+      new Promise<Record<string, SessionStatus>>((resolve) => {
+        resolveStatuses = resolve;
+      });
+    const suspension = lifecycle.suspend(new AbortController().signal);
+    await expect(session.execute(turn("racing-turn"))).resolves.toMatchObject({
+      ok: false,
+      error: { code: "sessionBusy" },
+    });
+    transport.listener?.onEvent({ id: "idle-race", type: "server.connected", properties: {} });
+    resolveStatuses?.({ "session-1": { type: "idle" } });
+
+    await expect(suspension).resolves.toMatchObject({ status: "busy" });
+    expect(transport.closed).toBe(0);
+    expect(transport.promptCalls).toHaveLength(0);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("closes the managed Server when transport cleanup rejects", async () => {
+    const transport = new FakeOpenCodeTransport();
+    let connectionClosed = 0;
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            connectionClosed += 1;
+          },
+        }),
+        createTransport: () => transport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+    const opened = await adapter.open({ kind: "create", cwd });
+    if (!opened.ok) throw new Error(opened.error.message);
+    transport.close = async () => {
+      transport.closed += 1;
+      throw new Error("synthetic transport close failure");
+    };
+
+    await expect(opened.value.close()).rejects.toThrow("OpenCode managed resource cleanup failed");
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+    await expect(adapter.close()).rejects.toThrow("OpenCode Adapter cleanup failed");
+  });
+
+  it("retains failed provisional Open resources for Adapter cleanup", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const cleanupFailure = new Error("synthetic provisional transport cleanup failure");
+    let connectionClosed = 0;
+    transport.providers = async () => {
+      throw new Error("synthetic provider startup failure");
+    };
+    transport.close = async () => {
+      transport.closed += 1;
+      throw cleanupFailure;
+    };
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            connectionClosed += 1;
+          },
+        }),
+        createTransport: () => transport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+
+    await expect(adapter.open({ kind: "create", cwd })).resolves.toMatchObject({
+      ok: false,
+      error: { code: "nativeFailure" },
+    });
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+
+    await expect(adapter.close()).rejects.toThrow("OpenCode Adapter cleanup failed");
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+  });
+
+  it("retains failed inspection resources for Adapter cleanup", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const cleanupFailure = new Error("synthetic inspection transport cleanup failure");
+    let connectionClosed = 0;
+    transport.close = async () => {
+      transport.closed += 1;
+      throw cleanupFailure;
+    };
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            connectionClosed += 1;
+          },
+        }),
+        createTransport: () => transport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+
+    await expect(adapter.inspect({ cwd, refresh: true })).resolves.toMatchObject({
+      status: "error",
+      error: { code: "unavailable", stage: "cleanup" },
+    });
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+
+    await expect(adapter.close()).rejects.toThrow("OpenCode Adapter cleanup failed");
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+  });
+
+  it("releases provisional resources when resume rejects a cross-cwd native Session", async () => {
+    const transport = new FakeOpenCodeTransport();
+    let connectionClosed = 0;
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            connectionClosed += 1;
+          },
+        }),
+        createTransport: () => transport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+    const nativeRef = nativeSessionRefSchema.parse({
+      harnessId: "opencode",
+      nativeSessionId: "session-1",
+      locator: { directory: cwd },
+      formatVersion: 1,
+    });
+
+    await expect(
+      adapter.open({ kind: "resume", cwd: "/synthetic-other", nativeRef }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "unsupported" },
+    });
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+    await adapter.close();
+  });
+
+  it("prevents in-flight Open and Inspect from publishing resources after Adapter close", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const connections: Array<{ closed: boolean }> = [];
+    let resolveProviders: ((value: OpenCodeProviderCatalog) => void) | undefined;
+    const providers = transport.providers.bind(transport);
+    transport.providers = () =>
+      new Promise<OpenCodeProviderCatalog>((resolve) => {
+        resolveProviders = resolve;
+      });
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => {
+          const connection = {
+            stderrTail: "",
+            closed: false,
+            client: async () => ({}) as never,
+            close: async () => {
+              connection.closed = true;
+            },
+          };
+          connections.push(connection);
+          return connection;
+        },
+        createTransport: () => transport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+    const opening = adapter.open({ kind: "create", cwd });
+    const closing = adapter.close();
+    resolveProviders?.(await providers());
+
+    await expect(opening).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalidState" },
+    });
+    await expect(closing).resolves.toBeUndefined();
+    expect(transport.closed).toBe(1);
+    expect(connections[0]?.closed).toBe(true);
+
+    const inspectionTransport = new FakeOpenCodeTransport();
+    let resolveHealth: ((value: { healthy: true; version: string }) => void) | undefined;
+    inspectionTransport.health = () =>
+      new Promise<{ healthy: true; version: string }>((resolve) => {
+        resolveHealth = resolve;
+      });
+    let inspectionConnectionClosed = 0;
+    const inspectionAdapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            inspectionConnectionClosed += 1;
+          },
+        }),
+        createTransport: () => inspectionTransport,
+        randomUUID: () => "uuid-1",
+      },
+    );
+    const inspecting = inspectionAdapter.inspect({ cwd, refresh: true });
+    const inspectClosing = inspectionAdapter.close();
+    resolveHealth?.({ healthy: true, version: "1.18.25" });
+
+    await expect(inspecting).resolves.toMatchObject({ status: "unavailable" });
+    await expect(inspectClosing).resolves.toBeUndefined();
+    expect(inspectionTransport.closed).toBe(1);
+    expect(inspectionConnectionClosed).toBe(1);
   });
 
   it("persists unattended execution policy through resume, fork, and rollback", async () => {
@@ -828,6 +1298,34 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
+  it("reapplies unattended execution policy on resume when the native Session is stricter", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const adapter = adapterFor(transport);
+    const created = await adapter.open({ kind: "create", cwd });
+    if (!created.ok) throw new Error(created.error.message);
+    const nativeRef = created.value.initialState.nativeRef;
+    if (!nativeRef) throw new Error("OpenCode Session did not expose a Native Ref");
+    await created.value.close();
+
+    const resumed = await adapter.open({
+      kind: "resume",
+      cwd,
+      nativeRef,
+      executionPolicy: "unattended-full-access",
+    });
+
+    expect(resumed).toMatchObject({
+      ok: true,
+      value: { initialState: { effectivePermissionModeId: "allow" } },
+    });
+    expect(transport.permissionUpdates.at(-1)).toEqual({
+      sessionID: "session-1",
+      permission: [{ permission: "*", pattern: "*", action: "allow" }],
+    });
+    if (resumed.ok) await resumed.value.close();
+    await adapter.close();
+  });
+
   it("does not publish a Permission Mode when native persistence fails", async () => {
     const { adapter, session, transport } = await openFixture();
     const iterator = session.outputs[Symbol.asyncIterator]();
@@ -842,6 +1340,37 @@ describe("OpenCode HarnessAdapter", () => {
       new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20)),
     ]);
     expect(settled).toBe(false);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("publishes a confirmed mismatched Permission Mode instead of retaining stale state", async () => {
+    const { adapter, session, transport } = await openFixture();
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const update = transport.updateSessionPermission.bind(transport);
+    vi.spyOn(transport, "updateSessionPermission").mockImplementation(
+      async (sessionID, permission) => {
+        const updated = await update(sessionID, permission);
+        updated.permission = [{ permission: "*", pattern: "*", action: "ask" }];
+        return updated;
+      },
+    );
+
+    await expect(
+      session.execute({ type: "permissionMode.select", permissionModeId: "allow" as never }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "protocolError" } });
+    const next = iterator.next();
+    const settled = await Promise.race([
+      next.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 20)),
+    ]);
+    expect(settled).toBe(true);
+    expect(await next).toMatchObject({
+      value: {
+        kind: "event",
+        event: { type: "session.state.changed", state: { effectivePermissionModeId: "ask" } },
+      },
+    });
     await session.close();
     await adapter.close();
   });
@@ -1172,6 +1701,7 @@ describe("OpenCode HarnessAdapter", () => {
     transport.listener?.onFault(new Error("synthetic transport fault") as never);
     await expect(executePromise).resolves.toMatchObject({ ok: false });
     expect(await nextEvent(iterator)).toMatchObject({ type: "session.faulted" });
+    await vi.waitFor(() => expect(transport.closed).toBe(1), { timeout: 100 });
     resolveAdmission?.();
     await expect(iterator.next()).resolves.toMatchObject({ done: true });
     await expect(session.close()).resolves.toBeUndefined();
@@ -1484,6 +2014,30 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
+  it("preserves the observed successful terminal when abort delivery fails", async () => {
+    const { adapter, session, transport } = await openFixture();
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const active = turn("turn-cancel-failure");
+    await session.execute(active);
+    await nextEvent(iterator);
+    vi.spyOn(transport, "abort").mockRejectedValueOnce(new Error("abort response lost"));
+
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: active.turnId }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "nativeFailure" },
+    });
+    appendTerminal(transport);
+    await completeAfterBusy(transport);
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "succeeded" },
+    });
+    await session.close();
+    await adapter.close();
+  });
+
   it("uses exact Fork and persisted rollback transcript boundaries", async () => {
     const sourceMessages = [
       userMessage("user-1", "one"),
@@ -1719,6 +2273,45 @@ describe("OpenCode HarnessAdapter", () => {
     expect(await nextEvent(iterator)).toMatchObject({
       type: "turn.completed",
       outcome: { status: "cancelled" },
+    });
+    await adapter.close();
+  });
+
+  it("faults closed when abort acknowledgement is lost and idle has no authoritative User Message", async () => {
+    const { adapter, session, transport } = await openFixture();
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const active = turn("cancel-unknown-without-user");
+    await session.execute(active);
+    await nextEvent(iterator);
+    vi.spyOn(transport, "abort").mockRejectedValueOnce(new Error("abort response lost"));
+
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: active.turnId }),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "nativeFailure" },
+    });
+    transport.messages.set("session-1", []);
+    transport.emit({
+      id: "idle-without-user",
+      type: "session.idle",
+      properties: { sessionID: "session-1" },
+    });
+
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.completed",
+      turnId: active.turnId,
+      outcome: { status: "failed", error: { code: "processExited" } },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "session.faulted",
+      error: { code: "processExited" },
+    });
+    await flush();
+    expect(transport.closed).toBe(1);
+    await expect(session.execute(turn("after-unknown-cancel"))).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalidState" },
     });
     await adapter.close();
   });

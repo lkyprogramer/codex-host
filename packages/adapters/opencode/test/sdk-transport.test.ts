@@ -1,6 +1,7 @@
+import { spawn as spawnNative, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import path from "node:path";
 import { PassThrough } from "node:stream";
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import type { Event } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
@@ -21,6 +22,29 @@ class FakeChild extends EventEmitter {
   pid = 91_337;
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
+}
+
+function isAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ESRCH") {
+      return false;
+    }
+    throw error;
+  }
+}
+
+function stopOwnedFixtureGroup(child: ChildProcessWithoutNullStreams | undefined): void {
+  if (!child?.pid || process.platform === "win32") return;
+  try {
+    process.kill(-child.pid, "SIGKILL");
+  } catch (error) {
+    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ESRCH")
+      return;
+    throw error;
+  }
 }
 
 function clientWith(overrides: Record<string, unknown> = {}): OpencodeClient {
@@ -159,6 +183,108 @@ describe("OpenCode SDK transport", () => {
     await connection.close();
   });
 
+  it("bounds a stalled Server health check and releases its managed child", async () => {
+    const child = new FakeChild();
+    const connection = new OpenCodeServerConnection(
+      {
+        command: process.execPath,
+        environment: { PATH: process.env.PATH },
+        startupTimeoutMs: 20,
+        closeTimeoutMs: 20,
+      },
+      {
+        createClient: () =>
+          clientWith({ global: { health: async () => await new Promise<never>(() => undefined) } }),
+        randomPassword: () => "synthetic-password",
+        spawn: () => {
+          queueMicrotask(() => {
+            child.stdout.write("opencode server listening on http://127.0.0.1:4011\n");
+          });
+          return child as unknown as ChildProcessWithoutNullStreams;
+        },
+        sleep: async () => undefined,
+      },
+    );
+
+    await expect(connection.client()).rejects.toMatchObject({
+      code: "unavailable",
+      message: expect.stringMatching(/health check timed out/),
+    });
+    await expect(connection.close()).resolves.toBeUndefined();
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "escalates from SIGTERM to SIGKILL until the owned Server process group is gone",
+    async () => {
+      const fixturePath = path.join(import.meta.dirname, "fixtures", "process-group-server.mjs");
+      let server: ChildProcessWithoutNullStreams | undefined;
+      let fixtureChildPid: number | undefined;
+      const connection = new OpenCodeServerConnection(
+        {
+          command: process.execPath,
+          environment: { PATH: process.env.PATH },
+          closeTimeoutMs: 200,
+        },
+        {
+          createClient: () => clientWith(),
+          randomPassword: () => "synthetic-password",
+          spawn: (_command, _args, options) => {
+            server = spawnNative(process.execPath, [fixturePath], options);
+            server.stdout.on("data", (chunk: Buffer | string) => {
+              const match = chunk.toString().match(/fixture-child-pid=(\d+)/u);
+              if (match?.[1]) fixtureChildPid = Number(match[1]);
+            });
+            return server;
+          },
+          sleep: async () => undefined,
+        },
+      );
+
+      try {
+        await connection.client();
+        await vi.waitFor(() => expect(fixtureChildPid).toBeTypeOf("number"));
+        const childPid = fixtureChildPid;
+        if (!childPid) throw new Error("Fixture child process id was not reported");
+        expect(isAlive(childPid)).toBe(true);
+
+        await expect(connection.close()).resolves.toBeUndefined();
+        await vi.waitFor(() => expect(isAlive(childPid)).toBe(false), { timeout: 1_000 });
+      } finally {
+        stopOwnedFixtureGroup(server);
+      }
+    },
+  );
+
+  it("keeps Server admission closed after a failed cleanup without guessing a later pid is owned", async () => {
+    const child = new FakeChild();
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH }, closeTimeoutMs: 20 },
+      {
+        createClient: () => clientWith(),
+        randomPassword: () => "synthetic-password",
+        spawn: () => {
+          queueMicrotask(() => {
+            child.stdout.write("opencode server listening on http://127.0.0.1:4012\n");
+          });
+          return child as unknown as ChildProcessWithoutNullStreams;
+        },
+        sleep: async () => undefined,
+      },
+    );
+    await connection.client();
+    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+      if (pid === -child.pid && signal === 0) return true;
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    });
+    try {
+      await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
+      await expect(connection.client()).rejects.toMatchObject({ code: "unavailable" });
+    } finally {
+      kill.mockRestore();
+    }
+    await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
+  });
+
   it("checks SDK result errors while accepting the prompt_async 204 payload", async () => {
     const promptAsync = vi
       .fn()
@@ -270,5 +396,30 @@ describe("OpenCode SDK transport", () => {
     expect(subscriptions).toBe(2);
     expect(listener.onFault).not.toHaveBeenCalled();
     await transport.close();
+  });
+
+  it("bounds a non-cooperative SSE shutdown, rejects late work, and permits a drain retry", async () => {
+    let releaseSubscription: (() => void) | undefined;
+    const subscribe = vi.fn(
+      () =>
+        new Promise<{ stream: AsyncIterable<Event> }>((resolve) => {
+          releaseSubscription = () => resolve({ stream: (async function* () {})() });
+        }),
+    );
+    const connection = {
+      stderrTail: "",
+      client: async () => clientWith({ event: { subscribe } }),
+      close: async () => undefined,
+    };
+    const transport = new SdkOpenCodeTransport(connection, "/synthetic", { closeTimeoutMs: 20 });
+    await transport.subscribe({ onEvent: vi.fn(), onFault: vi.fn() });
+
+    await expect(transport.close()).rejects.toMatchObject({
+      code: "unavailable",
+      message: expect.stringMatching(/event stream shutdown timed out/),
+    });
+    await expect(transport.health()).rejects.toMatchObject({ code: "invalidState" });
+    releaseSubscription?.();
+    await expect(transport.close()).resolves.toBeUndefined();
   });
 });

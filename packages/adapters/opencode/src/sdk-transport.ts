@@ -21,6 +21,7 @@ export {
 } from "./server-connection.js";
 
 const DEFAULT_COMMAND_TIMEOUT_MS = 15_000;
+const DEFAULT_CLOSE_TIMEOUT_MS = 3_000;
 const DEFAULT_RECONNECT_DELAY_MS = 500;
 const DEFAULT_RECONNECT_ATTEMPTS = 3;
 
@@ -74,14 +75,31 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, operation: st
   });
 }
 
+function waitForAbortableDelay(signal: AbortSignal, milliseconds: number): Promise<void> {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, milliseconds);
+    signal.addEventListener("abort", finish, { once: true });
+  });
+}
+
 export class SdkOpenCodeTransport implements OpenCodeTransport {
   readonly cwd: string;
+  readonly #closeTimeoutMs: number;
   readonly #commandTimeoutMs: number;
   readonly #connection: OpenCodeServerConnectionLike;
   readonly #reconnectAttempts: number;
   readonly #reconnectDelayMs: number;
   #abort: AbortController | null = null;
   #client: Promise<OpencodeClient> | null = null;
+  #closed = false;
+  #closing = false;
+  #closePromise: Promise<void> | null = null;
   #listener: OpenCodeTransportListener | null = null;
   #pump: Promise<void> | null = null;
 
@@ -92,6 +110,7 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
   ) {
     this.#connection = connection;
     this.cwd = cwd;
+    this.#closeTimeoutMs = options.closeTimeoutMs ?? DEFAULT_CLOSE_TIMEOUT_MS;
     this.#commandTimeoutMs = options.commandTimeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS;
     this.#reconnectDelayMs = options.reconnectDelayMs ?? DEFAULT_RECONNECT_DELAY_MS;
     this.#reconnectAttempts = options.reconnectAttempts ?? DEFAULT_RECONNECT_ATTEMPTS;
@@ -215,12 +234,16 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
   }
 
   async getStatus(sessionID: string) {
+    const statuses = await this.getStatuses();
+    return statuses[sessionID] ?? { type: "idle" as const };
+  }
+
+  async getStatuses(): Promise<Record<string, SessionStatus>> {
     const client = await this.#getClient();
-    const statuses = responseData<Record<string, SessionStatus>>(
+    return responseData<Record<string, SessionStatus>>(
       await withTimeout(client.session.status(), this.#commandTimeoutMs, "OpenCode Session status"),
       "Session status",
     );
-    return statuses[sessionID] ?? { type: "idle" as const };
   }
 
   async getDiff(sessionID: string, messageID?: string) {
@@ -372,6 +395,13 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
   }
 
   async subscribe(listener: OpenCodeTransportListener): Promise<void> {
+    this.#assertOpen();
+    if (this.#pump) {
+      throw new OpenCodeTransportError(
+        "invalidState",
+        "OpenCode event subscription is already active",
+      );
+    }
     this.#listener = listener;
     this.#abort = new AbortController();
     this.#pump = this.#pumpEvents(this.#abort.signal);
@@ -379,20 +409,57 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
   }
 
   async close(): Promise<void> {
+    if (this.#closed) return;
+    if (this.#closePromise) return this.#closePromise;
+    this.#closing = true;
+    const closing = this.#performClose();
+    this.#closePromise = closing;
+    void closing.then(
+      () => {
+        if (this.#closePromise === closing) this.#closed = true;
+      },
+      () => {
+        // The abort has already been sent. Keep admissions closed, but retain
+        // the unfinished pump so an owner can retry a bounded drain.
+        if (this.#closePromise === closing) this.#closePromise = null;
+      },
+    );
+    return closing;
+  }
+
+  #assertOpen(): void {
+    if (this.#closing || this.#closed) {
+      throw new OpenCodeTransportError("invalidState", "OpenCode transport is closing");
+    }
+  }
+
+  async #performClose(): Promise<void> {
     this.#abort?.abort();
-    await this.#pump?.catch(() => undefined);
-    this.#abort = null;
-    this.#pump = null;
-    this.#listener = null;
-    this.#client = null;
+    const pump = this.#pump;
+    let drained = false;
+    try {
+      if (pump) {
+        await withTimeout(pump, this.#closeTimeoutMs, "OpenCode event stream shutdown");
+        drained = true;
+      }
+    } finally {
+      this.#listener = null;
+      this.#client = null;
+      if (drained && this.#pump === pump) this.#pump = null;
+      if (drained && this.#abort?.signal.aborted) this.#abort = null;
+    }
   }
 
   async #getClient(): Promise<OpencodeClient> {
+    this.#assertOpen();
     if (!this.#client) this.#client = this.#connection.client(this.cwd);
+    const clientPromise = this.#client;
     try {
-      return await this.#client;
+      const client = await clientPromise;
+      this.#assertOpen();
+      return client;
     } catch (error) {
-      this.#client = null;
+      if (this.#client === clientPromise) this.#client = null;
       throw error;
     }
   }
@@ -402,7 +469,9 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
     while (!signal.aborted) {
       try {
         const client = await this.#getClient();
+        if (signal.aborted) return;
         const events = await client.event.subscribe(undefined, { signal });
+        if (signal.aborted) return;
         let connectedThisAttempt = false;
         for await (const event of events.stream) {
           if (signal.aborted) return;
@@ -434,17 +503,7 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
           return;
         }
         this.#client = null;
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(resolve, this.#reconnectDelayMs);
-          signal.addEventListener(
-            "abort",
-            () => {
-              clearTimeout(timer);
-              resolve();
-            },
-            { once: true },
-          );
-        });
+        await waitForAbortableDelay(signal, this.#reconnectDelayMs);
       }
     }
   }

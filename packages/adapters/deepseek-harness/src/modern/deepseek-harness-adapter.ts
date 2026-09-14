@@ -158,7 +158,9 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
   readonly #dependencies: ModernDeepSeekHarnessAdapterDependencies;
   readonly #options: ModernDeepSeekHarnessAdapterOptions;
   readonly #inflight = new Set<Promise<unknown>>();
-  readonly #sessionIds = new Set<string>();
+  #sessionIds = new Set<string>();
+  readonly #isolatedAdapters = new Set<ModernDeepSeekHarnessAdapter>();
+  #onSessionClosed: (() => void) | undefined;
   readonly #sessions = new Set<ModernHarnessSession>();
   readonly #removeConnectionFaultListener: () => void;
   readonly #lifetime = new AbortController();
@@ -212,7 +214,55 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
     if (!this.#accepting) return Promise.resolve({ ok: false, error: this.#stoppedError() });
     const rejected = validateOpen(input);
     if (rejected) return Promise.resolve({ ok: false, error: rejected });
-    return this.#track(this.#open(input));
+    return this.#track(input.environment ? this.#openIsolated(input) : this.#open(input));
+  }
+
+  async #openIsolated(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>> {
+    // Native tools inherit the managed Web process environment. Sharing that process
+    // would route every Thread's tools through the first Thread's delegation endpoint.
+    const child = new ModernDeepSeekHarnessAdapter(
+      {
+        ...this.#options,
+        environment: { ...(this.#options.environment ?? process.env), ...input.environment },
+      },
+      this.#dependencies,
+    );
+    child.#sessionIds = this.#sessionIds;
+    this.#isolatedAdapters.add(child);
+    child.#onSessionClosed = () => {
+      void child.close().then(
+        () => this.#isolatedAdapters.delete(child),
+        () => undefined,
+      );
+    };
+    try {
+      if (
+        isDeepSeekV015(this.#profile) &&
+        (input.kind === "fork" || input.kind === "rollbackLastTurn")
+      ) {
+        const sourceId = input.sourceRef.nativeSessionId;
+        for (const owner of [this, ...this.#isolatedAdapters]) {
+          if (
+            [...owner.#sessions].some(
+              (session) => session.initialState.nativeRef?.nativeSessionId === sourceId,
+            )
+          ) {
+            await owner.#connection.flushSession(sourceId, this.#lifetime.signal);
+          }
+        }
+      }
+      this.#assertAccepting();
+      const opened = await child.#track(child.#open(input));
+      this.#assertAccepting();
+      if (!opened.ok) {
+        await child.close();
+        this.#isolatedAdapters.delete(child);
+      }
+      return opened;
+    } catch (error) {
+      await child.close().catch(() => undefined);
+      return { ok: false, error: toHarnessError(error, "nativeFailure") };
+    }
   }
 
   close(): Promise<void> {
@@ -324,7 +374,7 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
       this.#assertAccepting();
       const createConfiguration =
         input.kind === "create"
-          ? resolveCreateConfiguration(input, catalog, permissionModes)
+          ? resolveOpenConfiguration(input, catalog, permissionModes)
           : undefined;
       try {
         await this.#control.start();
@@ -450,6 +500,39 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
       }
       this.#control.seed(sessionId, journal.projections);
       this.#assertAccepting();
+      const restoredPermission =
+        input.kind === "create"
+          ? undefined
+          : resolveOpenConfiguration(
+              {
+                ...(input.executionPolicy ? { executionPolicy: input.executionPolicy } : {}),
+                ...("permissionModeId" in input && input.permissionModeId
+                  ? { permissionModeId: input.permissionModeId }
+                  : {}),
+              },
+              catalog,
+              permissionModes,
+            );
+      if (restoredPermission?.permissionModeId) {
+        await selectModernPermissionMode(
+          this.#connection,
+          this.#control,
+          sessionId,
+          permissionModes,
+          restoredPermission.permissionModeId,
+          this.#lifetime.signal,
+          this.#profile,
+        );
+        this.#assertAccepting();
+        // Reopen after the native command so readback includes its persisted permission facts.
+        await journal.close();
+        journal = await openModernJournal(
+          this.#connection,
+          { sessionId, cwd },
+          this.#journalOptions(),
+        );
+        this.#control.seed(sessionId, journal.projections);
+      }
       const openedConfiguration = readModernConfigurationSnapshot({
         control: this.#control,
         sessionId,
@@ -465,7 +548,11 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
         permissionModes,
       });
       verifyCreateConfiguration(createConfiguration, openedConfiguration);
-      if (createConfiguration?.unattended && !delegationPermissionIsApplied(journal.events)) {
+      verifyCreateConfiguration(restoredPermission, openedConfiguration);
+      if (
+        (createConfiguration?.unattended || restoredPermission?.unattended) &&
+        !delegationPermissionIsApplied(journal.events)
+      ) {
         throw new AdapterOperationError({
           code: "nativeFailure",
           message: "DeepSeek Harness did not confirm danger-full-access with approval policy never",
@@ -510,6 +597,7 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
           detachControl = undefined;
           this.#sessionIds.delete(sessionId);
           this.#sessions.delete(openedSession);
+          this.#onSessionClosed?.();
         },
       });
       session = openedSession;
@@ -907,7 +995,10 @@ export class ModernDeepSeekHarnessAdapter implements HarnessAdapter {
       if (failure) session.fault(failure);
       return session.close();
     });
-    const sessionResults = await Promise.allSettled(sessionClosures);
+    const sessionResults = await Promise.allSettled([
+      ...sessionClosures,
+      ...[...this.#isolatedAdapters].map((adapter) => adapter.close()),
+    ]);
     await this.#events.close().catch(() => undefined);
     await this.#control.close().catch(() => undefined);
     const connectionClose = this.#connection.close();
@@ -992,8 +1083,11 @@ function verifyCreateConfiguration(
   }
 }
 
-function resolveCreateConfiguration(
-  input: Extract<OpenSessionInput, { kind: "create" }>,
+function resolveOpenConfiguration(
+  input: Pick<
+    Extract<OpenSessionInput, { kind: "create" }>,
+    "model" | "thinkingOptionId" | "permissionModeId" | "executionPolicy"
+  >,
   modelCatalog: ModernModelCatalogSnapshot,
   permissionModes: HarnessPermissionModeCatalog | null,
 ): ResolvedCreateConfiguration {
@@ -1010,7 +1104,7 @@ function resolveCreateConfiguration(
     model = modernSelectionForModel(modelCatalog, requestedModel, input.thinkingOptionId);
   }
 
-  const unattended = input.executionPolicy === "unattended-full-access";
+  const unattended = input.executionPolicy === "unattended-full-access" && !input.permissionModeId;
   const permissionModeId =
     input.permissionModeId ??
     (unattended ? harnessPermissionModeIdSchema.parse(DELEGATION_PERMISSION_PRESET) : undefined);

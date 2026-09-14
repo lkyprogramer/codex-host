@@ -32,6 +32,7 @@ export function fixture() {
   class FakeClient implements CodeBuddyClient {
     options = configOptions();
     closed = false;
+    closeThrows = false;
     failedConfig = false;
     missingHistory = false;
     cancelPoisoned = false;
@@ -162,6 +163,7 @@ export function fixture() {
       this.closed = true;
       this.pending?.resolve({ stopReason: "cancelled", userMessageId: this.pending.id });
       this.pending = undefined;
+      if (this.closeThrows) throw new Error("fixture close failure");
     }
   }
   return {

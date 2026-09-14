@@ -19,6 +19,10 @@ import type {
   HostUsage,
 } from "@codexhost/harness-adapter";
 import {
+  runAdapterConformance,
+  type ConformanceOutputObserver,
+} from "@codexhost/harness-adapter/conformance";
+import {
   PiAdapter,
   type PiAdapterDependencies,
   type PiAdapterOptions,
@@ -351,6 +355,130 @@ async function nextInteraction(
   }
   return output.interaction;
 }
+
+describe("Pi Adapter conformance", () => {
+  it("records a controlled native-transport receipt across create, cancellation, and resume", async () => {
+    const transports: FakePiTransport[] = [];
+    const transportOptions: PiRpcSessionOptions[] = [];
+    let adapterNumber = 0;
+    let primaryTransport: FakePiTransport | undefined;
+
+    const createAdapter = (): PiAdapter => {
+      adapterNumber += 1;
+      return new PiAdapter(
+        {},
+        {
+          createTransport: (options) => {
+            const transport = new FakePiTransport();
+            const scope = options.environment?.CODEXHOST_CONFORMANCE_SCOPE;
+            const sessionId =
+              scope === "primary" || scope === "resume"
+                ? "pi-conformance-primary"
+                : scope === "isolated"
+                  ? "pi-conformance-isolated"
+                  : `pi-conformance-inspection-${adapterNumber}`;
+            transport.state = {
+              ...transport.state,
+              sessionId,
+              sessionFile: `/synthetic/${sessionId}.jsonl`,
+            };
+            if (scope === "resume" && primaryTransport) {
+              transport.history = structuredClone(primaryTransport.history);
+            }
+            const nativeRunTurn = transport.runTurn.getMockImplementation();
+            transport.runTurn.mockImplementation((text, onEvent) => {
+              const pending = nativeRunTurn?.(text, onEvent);
+              if (!pending) throw new Error("Pi conformance transport cannot start a Turn");
+              if (text === "fixture cancellable") {
+                transport.abort.mockImplementationOnce(async () => {
+                  transport.succeed("cancelled", true);
+                });
+              } else {
+                queueMicrotask(() => transport.succeed(`answer: ${text}`));
+              }
+              return pending;
+            });
+            if (scope === "primary") primaryTransport = transport;
+            transport.options = options;
+            transports.push(transport);
+            transportOptions.push(options);
+            return transport;
+          },
+        },
+      );
+    };
+
+    const activateIsolated = async (
+      session: Omit<HarnessSession, "outputs">,
+      output: ConformanceOutputObserver,
+    ): Promise<void> => {
+      const turnId = hostTurnIdSchema.parse("conformance-isolated-native");
+      const accepted = await session.execute({
+        type: "turn.start",
+        turnId,
+        input: [{ type: "text", text: "fixture isolated activation" }],
+      });
+      if (!accepted.ok) throw new Error(accepted.error.message);
+      const terminal = await output.waitForTerminal(turnId);
+      if (terminal.outcome.status !== "succeeded")
+        throw new Error("isolated Pi fixture Turn did not succeed");
+    };
+
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd: "/synthetic",
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-transport-fixture",
+      },
+      environment: {
+        primary: { CODEXHOST_CONFORMANCE_SCOPE: "primary" },
+        isolated: { CODEXHOST_CONFORMANCE_SCOPE: "isolated" },
+        resume: { CODEXHOST_CONFORMANCE_SCOPE: "resume" },
+      },
+      prompts: {
+        first: "fixture first",
+        cancellable: "fixture cancellable",
+        followup: "fixture followup",
+      },
+      probes: {
+        activateIsolated,
+        assertEnvironmentIsolation: async () => {
+          const scopes = transportOptions
+            .map((options) => options.environment?.CODEXHOST_CONFORMANCE_SCOPE)
+            .filter((scope): scope is string => scope !== undefined);
+          expect(scopes).toEqual(expect.arrayContaining(["primary", "isolated"]));
+        },
+        readCleanup: async () => ({
+          residue: transports.every((transport) => transport.close.mock.calls.length > 0)
+            ? "none"
+            : "present",
+        }),
+      },
+    });
+
+    expect(receipt).toMatchObject({
+      status: "incomplete",
+      harnessId: "pi",
+      scenarios: {
+        inspect: { status: "passed" },
+        create: { status: "passed" },
+        environmentIsolation: { status: "passed" },
+        firstTurn: { status: "passed" },
+        concurrentTurn: { status: "passed" },
+        cancel: { status: "passed" },
+        resume: { status: "passed" },
+        followup: { status: "passed" },
+        cleanup: { status: "passed" },
+      },
+      environment: { nativeActivation: "executed", nativeIsolationReadback: "passed" },
+      cleanup: { residue: "none", nativeReadback: "passed" },
+    });
+  });
+});
 
 describe("Pi HarnessAdapter Session", () => {
   it("reports a missing executable as not installed", async () => {
@@ -2508,6 +2636,7 @@ describe("Pi HarnessAdapter Session", () => {
     expect((await nextEvent(iterator)).type).toBe("turn.completed");
     expect((await nextEvent(iterator)).type).toBe("session.faulted");
     await expect(iterator.next()).resolves.toEqual({ done: true, value: undefined });
+    await vi.waitFor(() => expect(transports[0]?.close).toHaveBeenCalledOnce(), { timeout: 100 });
   });
 
   it("fails an active Turn once when close cannot prove cancellation settlement", async () => {
@@ -2570,5 +2699,17 @@ describe("Pi HarnessAdapter Session", () => {
       undefined,
       undefined,
     ]);
+  });
+
+  it("keeps a Session owned when native process cleanup rejects", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing Pi transport");
+    transport.close.mockRejectedValue(new Error("owned group remains"));
+
+    await expect(session.close()).rejects.toThrow("owned group remains");
+    await expect(adapter.close()).rejects.toThrow("owned group remains");
   });
 });

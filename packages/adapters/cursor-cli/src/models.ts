@@ -3,6 +3,10 @@ import {
   harnessPermissionModeCatalogSchema,
 } from "@codexhost/shared-contracts";
 import type { HarnessModelCatalog, HarnessSessionCapabilities } from "@codexhost/harness-adapter";
+import {
+  formatCursorNativeModelVariant,
+  parseCursorNativeModelVariant,
+} from "./model-parameters.js";
 import type { CursorSessionInfo } from "./transport.js";
 
 export const CURSOR_CAPABILITIES: HarnessSessionCapabilities = {
@@ -39,10 +43,28 @@ export function cursorCatalog(info: CursorSessionInfo): HarnessModelCatalog {
     label: model.name,
   }));
   if (!models.length) throw new Error("Cursor returned no model catalog");
-  return { models, defaultModel: cursorModelRef(native.current), thinkingOptions: [] };
+  return {
+    models,
+    ...(native.current ? { defaultModel: cursorModelRef(native.current) } : {}),
+    thinkingOptions: [],
+  };
 }
 export function cursorNativeModel(info: CursorSessionInfo, ref: string): string {
-  const native = cursorModels(info).models.find((model) => cursorModelRef(model.value).id === ref);
+  const prefix = "cursor.";
+  const encoded = ref.startsWith(prefix) ? ref.slice(prefix.length) : "";
+  let requested: string;
+  try {
+    if (!encoded || !/^[A-Za-z0-9_-]+$/u.test(encoded)) throw new Error();
+    requested = Buffer.from(encoded, "base64url").toString("utf8");
+    if (Buffer.from(requested).toString("base64url") !== encoded) throw new Error();
+    requested = formatCursorNativeModelVariant(parseCursorNativeModelVariant(requested));
+  } catch {
+    throw new Error("Model is not in this Cursor session's native catalog");
+  }
+  const native = cursorModels(info).models.find(
+    (model) =>
+      formatCursorNativeModelVariant(parseCursorNativeModelVariant(model.value)) === requested,
+  );
   if (!native) throw new Error("Model is not in this Cursor session's native catalog");
   return native.value;
 }

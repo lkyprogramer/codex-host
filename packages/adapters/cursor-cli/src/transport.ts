@@ -9,13 +9,22 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
+import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import { cursorDiagnostic } from "./diagnostics.js";
 import { cursorInvocation } from "./command.js";
+import {
+  normalizeCursorAvailableModels,
+  normalizeCursorParameterizedSession,
+  parseCursorNativeModelVariant,
+  type CursorAvailableModels,
+} from "./model-parameters.js";
 
 export interface CursorTransportOptions {
   cwd: string;
   environment: NodeJS.ProcessEnv;
   command?: string;
   timeoutMs?: number;
+  force?: boolean;
 }
 export type CursorSessionInfo = NewSessionResponse | LoadSessionResponse;
 export interface CursorCallbacks {
@@ -24,14 +33,40 @@ export interface CursorCallbacks {
   extension(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>>;
   notification?(method: string, params: Record<string, unknown>): void;
 }
+const CLOSE_TIMEOUT_MS = 2_000;
+
+function waitForLeaderExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("exit", finish);
+  });
+}
+
 export class CursorTransport {
   sessionId = "";
   replay: SessionNotification[] = [];
   #child: ChildProcessWithoutNullStreams | undefined;
+  #ownedProcessTree: OwnedProcessTree | null = null;
+  #closePromise: Promise<void> | undefined;
   #connection: ClientSideConnection | undefined;
   #callbacks: CursorCallbacks | undefined;
   #closed = false;
   #fault: Error | undefined;
+  #modelDirectory: CursorAvailableModels | undefined;
+  #nativeInfo: CursorSessionInfo | undefined;
+  #historyOnly = false;
+  get closed(): boolean {
+    return this.#closed;
+  }
   #rejectFault!: (error: Error) => void;
   readonly #failed = new Promise<never>((_, reject) => {
     this.#rejectFault = reject;
@@ -60,9 +95,19 @@ export class CursorTransport {
     }
   }
 
-  async open(sessionId?: string): Promise<CursorSessionInfo> {
+  async open(
+    sessionId?: string,
+    options: { historyOnly?: boolean } = {},
+  ): Promise<CursorSessionInfo> {
+    if (options.historyOnly && !sessionId)
+      throw new Error("Cursor history replay requires a native session ID");
     if (this.#closed || this.#connection) throw new Error("Cursor transport cannot be reopened");
-    const invocation = cursorInvocation(this.options.environment, this.options.command);
+    this.#historyOnly = options.historyOnly === true;
+    const invocation = cursorInvocation(
+      this.options.environment,
+      this.options.command,
+      this.options.force,
+    );
     const child = spawn(invocation.command, invocation.arguments, {
       cwd: this.options.cwd,
       env: this.options.environment,
@@ -76,6 +121,12 @@ export class CursorTransport {
       this.#fault = new Error(message);
       this.#rejectFault(this.#fault);
     };
+    this.#ownedProcessTree = trackOwnedProcessTree(child, {
+      detached: process.platform !== "win32",
+      closeTimeoutMs: CLOSE_TIMEOUT_MS,
+      onExitCleanupFailure: (error) =>
+        fault(`Cursor ACP owned process cleanup failed: ${String(error)}`),
+    });
     child.on("error", () => fault("Cursor ACP process could not start"));
     child.on("exit", (code) => fault(`Cursor ACP process exited (${code ?? "signal"})`));
     child.stderr.resume(); // Native diagnostics may contain secrets; never copy them to Host events.
@@ -104,18 +155,21 @@ export class CursorTransport {
         Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
       ),
     );
+    let stage = "initialize";
     try {
       const init = await this.#bounded(
         this.#connection.initialize({
           protocolVersion: 1,
-          clientCapabilities: {},
+          clientCapabilities: { _meta: { parameterizedModelPicker: true } },
           clientInfo: { name: "codexhost", version: "0.6.2" },
         }),
       );
       if (init.protocolVersion !== 1 || (sessionId && !init.agentCapabilities?.loadSession))
         throw new Error("Cursor does not support the required ACP session protocol");
-      // This reuses an existing native login. The adapter never launches login or reads credentials.
+      // Authentication is delegated to Cursor; its native login behavior is not emulated.
+      stage = "authenticate";
       await this.#bounded(this.#connection.authenticate({ methodId: "cursor_login" }));
+      stage = sessionId ? "session/load" : "session/new";
       this.sessionId = sessionId ?? "";
       const info = sessionId
         ? await this.#bounded(
@@ -127,21 +181,103 @@ export class CursorTransport {
       if ("sessionId" in info && typeof info.sessionId === "string")
         this.sessionId = info.sessionId;
       if (!this.sessionId) throw new Error("Cursor returned no native session ID");
-      return info;
+      this.#nativeInfo = info;
+      // History consumers validate replay against native turn identities. They do
+      // not select a model and must not depend on the remote model catalog.
+      if (this.#historyOnly) return info;
+      stage = "cursor/list_available_models";
+      try {
+        let directory = await this.#bounded(
+          this.#connection.extMethod("cursor/list_available_models", {}),
+        );
+        // Cursor can return an empty directory after a failed metadata fetch.
+        // Refetch this read-only query once; never retry model/parameter writes.
+        if (Array.isArray(directory.models) && directory.models.length === 0) {
+          directory = await this.#bounded(
+            this.#connection.extMethod("cursor/list_available_models", {}),
+          );
+        }
+        this.#modelDirectory = normalizeCursorAvailableModels(directory);
+      } catch (error) {
+        // Older Cursor releases expose only the original variant catalog.
+        if (!(error && typeof error === "object" && "code" in error && error.code === -32601))
+          throw error;
+      }
+      return this.#modelDirectory
+        ? normalizeCursorParameterizedSession(info, this.#modelDirectory, {
+            allowUnknownCurrent: true,
+          })
+        : info;
     } catch (error) {
       await this.close();
-      throw error;
+      throw new Error(`Cursor ACP ${stage}: ${cursorDiagnostic(error)}`, { cause: error });
     }
   }
 
   async configure(configId: string, value: string) {
+    if (this.#historyOnly) throw new Error("Cursor history replay cannot configure a session");
     if (!this.#connection) throw new Error("Cursor session is not open");
+    if (this.#modelDirectory && this.#nativeInfo) {
+      let stage = configId;
+      try {
+        const selections: Array<[string, string]> =
+          configId === "model"
+            ? (() => {
+                const selected = parseCursorNativeModelVariant(value);
+                const currentModel = this.#nativeInfo?.configOptions?.find(
+                  (option) => option.id === "model",
+                )?.currentValue;
+                const modelSelection: Array<[string, string]> =
+                  currentModel === selected.modelId ? [] : [["model", selected.modelId]];
+                return [...modelSelection, ...Object.entries(selected.parameters)];
+              })()
+            : [[configId, value]];
+        for (const [id, selectedValue] of selections) {
+          // Native readback is authoritative. Rewriting an already selected value
+          // needlessly refetches Cursor's remote catalog and can fail a valid session.
+          if (
+            this.#nativeInfo.configOptions?.some(
+              (option) => option.id === id && option.currentValue === selectedValue,
+            )
+          )
+            continue;
+          stage = id;
+          const result = await this.#bounded(
+            this.#connection.setSessionConfigOption({
+              sessionId: this.sessionId,
+              configId: id,
+              value: selectedValue,
+            }),
+          );
+          if (
+            !result.configOptions.some(
+              (option) => option.id === id && option.currentValue === selectedValue,
+            )
+          )
+            throw new Error("Cursor did not confirm model parameter selection");
+          this.#nativeInfo = { ...this.#nativeInfo, configOptions: result.configOptions };
+        }
+        const normalized = normalizeCursorParameterizedSession(
+          this.#nativeInfo,
+          this.#modelDirectory,
+        );
+        return { configOptions: normalized.configOptions ?? [] };
+      } catch (error) {
+        // A base model or earlier parameter may already have changed. Retire this
+        // transport instead of continuing with stale Host configuration.
+        await this.close();
+        throw new Error(`Cursor ACP config '${stage}': ${cursorDiagnostic(error)}`, {
+          cause: error,
+        });
+      }
+    }
     return this.#bounded(
       this.#connection.setSessionConfigOption({ sessionId: this.sessionId, configId, value }),
     );
   }
 
   async prompt(text: string, callbacks: CursorCallbacks) {
+    if (this.#historyOnly) throw new Error("Cursor history replay cannot prompt a session");
     if (!this.#connection || this.#closed || this.#callbacks)
       throw new Error("Cursor session is closed or busy");
     this.#callbacks = callbacks;
@@ -157,61 +293,38 @@ export class CursorTransport {
   }
 
   async cancel() {
+    if (this.#historyOnly) throw new Error("Cursor history replay cannot cancel a session");
     if (this.#connection && !this.#closed)
       await this.#bounded(this.#connection.cancel({ sessionId: this.sessionId }));
   }
 
-  async close() {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#fault = new Error("Cursor session closed");
-    this.#rejectFault(this.#fault);
+  close(): Promise<void> {
+    if (!this.#closed) {
+      this.#closed = true;
+      this.#fault = new Error("Cursor session closed");
+      this.#rejectFault(this.#fault);
+    }
+    this.#closePromise ??= this.#performClose();
+    return this.#closePromise;
+  }
+
+  async #performClose(): Promise<void> {
     const child = this.#child;
     if (!child) return;
-    child.stdin.end();
-    if (child.exitCode === null && child.signalCode === null) {
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 500);
-        child.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
+    const processTree = this.#ownedProcessTree;
+    if (!processTree) {
+      throw new Error("Cursor ACP owned process tree is unavailable");
     }
-    if (child.exitCode === null && child.signalCode === null) {
-      if (process.platform !== "win32" && child.pid) {
-        try {
-          process.kill(-child.pid, "SIGKILL");
-        } catch {
-          child.kill("SIGKILL");
-        }
-      } else if (child.pid) {
-        // Terminate only this owned CLI tree, including a native tool still running.
-        const killer = spawn("taskkill.exe", ["/PID", String(child.pid), "/T", "/F"], {
-          windowsHide: true,
-          stdio: "ignore",
-        });
-        await new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            killer.kill();
-            resolve();
-          }, 2_000);
-          const finish = () => {
-            clearTimeout(timer);
-            resolve();
-          };
-          killer.once("error", finish);
-          killer.once("exit", finish);
-        });
-        if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-      }
-      await new Promise<void>((resolve) => {
-        const timer = setTimeout(resolve, 2_000);
-        child.once("exit", () => {
-          clearTimeout(timer);
-          resolve();
-        });
-      });
+    if (process.platform === "win32") {
+      // taskkill must run while its root is still addressable; Windows has no
+      // detached POSIX group that can be proven after the root exits.
+      await processTree.close();
+    } else {
+      child.stdin.end();
+      // The native CLI may exit before an MCP/tool descendant. Its leader exit
+      // only bounds graceful shutdown; the tracked group is final authority.
+      await waitForLeaderExit(child, 500);
+      await processTree.close();
     }
     child.stdout.destroy();
     child.stderr.destroy();

@@ -1014,6 +1014,25 @@ describe("DeepSeek Harness Modern Web Remote connection", () => {
     expect(setup.killProcessTree).toHaveBeenCalledOnce();
   });
 
+  it("awaits process-group cleanup and rejects even after the leader has exited", async () => {
+    let rejectCleanup!: (error: Error) => void;
+    const cleanup = new Promise<void>((_resolve, reject) => {
+      rejectCleanup = reject;
+    });
+    const setup = harness(
+      vi.fn(() => Promise.resolve(authResponse())),
+      {
+        killProcessTree: vi.fn(() => cleanup),
+      },
+    );
+    await setup.connection.connect();
+    const closing = setup.connection.close();
+    const rejected = expect(closing).rejects.toThrow("group still alive");
+    await vi.waitFor(() => expect(setup.killProcessTree).toHaveBeenCalledOnce());
+    rejectCleanup(new Error("group still alive"));
+    await rejected;
+  });
+
   it("rejects close when the managed process survives tree termination", async () => {
     const child = fakeChild({ exitOnTerm: false });
     const { connection, killProcessTree } = harness(
