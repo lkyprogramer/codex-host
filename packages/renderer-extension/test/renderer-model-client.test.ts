@@ -599,6 +599,43 @@ describe("Renderer fixed Model request client", () => {
     relay.dispose();
   });
 
+  it("rebinds Usage notifications when the Host client changes and drops late prior-client events", () => {
+    const relay = createThreadUsageSubscriptionRelay();
+    const listener = vi.fn();
+    let notifyA: ((update: ThreadUsageInspection) => void) | undefined;
+    let notifyB: ((update: ThreadUsageInspection) => void) | undefined;
+    const unsubscribeA = vi.fn();
+    const unsubscribeB = vi.fn();
+    const clientA = {
+      subscribeThreadUsage: vi.fn((callback: (update: ThreadUsageInspection) => void) => {
+        notifyA = callback;
+        return unsubscribeA;
+      }),
+    };
+    const clientB = {
+      subscribeThreadUsage: vi.fn((callback: (update: ThreadUsageInspection) => void) => {
+        notifyB = callback;
+        return unsubscribeB;
+      }),
+    };
+
+    const dispose = relay.subscribe(listener);
+    relay.connect(clientA);
+    relay.connect(clientB);
+    expect(unsubscribeA).toHaveBeenCalledOnce();
+    expect(clientB.subscribeThreadUsage).toHaveBeenCalledOnce();
+
+    notifyA?.({ threadId: hostThreadIdSchema.parse("same-thread"), usage: { inputTokens: 1 } });
+    notifyB?.({ threadId: hostThreadIdSchema.parse("same-thread"), usage: { inputTokens: 2 } });
+    expect(listener).toHaveBeenCalledExactlyOnceWith({
+      threadId: "same-thread",
+      usage: { inputTokens: 2 },
+    });
+
+    dispose();
+    expect(unsubscribeB).toHaveBeenCalledOnce();
+  });
+
   it("fails closed when request manager ownership is absent or ambiguous", () => {
     expect(createRendererModelClient([])).toBeNull();
     expect(

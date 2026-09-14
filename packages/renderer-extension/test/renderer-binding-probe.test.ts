@@ -1,10 +1,12 @@
 import {
+  harnessIdSchema,
   harnessModelCatalogSchema,
   harnessModelRefSchema,
   harnessPermissionModeCatalogSchema,
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
   decodeHarnessPluginRoute,
+  encodeHarnessPluginRoute,
 } from "@codexhost/shared-contracts";
 import { describe, expect, it, vi } from "vitest";
 import { modelSelectionForAgent } from "../src/versioned-renderer-adapter.js";
@@ -245,6 +247,15 @@ describe("Renderer Composer DOM behavior", () => {
   });
 
   it("keeps terminal Harness availability stable across passive focus refreshes", () => {
+    const compatibilityAgents = [
+      "pi",
+      "claude-code",
+      "deepseek-harness",
+      "opencode",
+      "grok",
+      "omp",
+      "antigravity",
+    ];
     expect(
       passiveHarnessAvailabilityAgents(
         {
@@ -268,6 +279,7 @@ describe("Renderer Composer DOM behavior", () => {
           codebuddy: undefined,
           "cursor-cli": undefined,
         },
+        compatibilityAgents,
       ),
     ).toEqual(["pi", "claude-code", "deepseek-harness", "opencode", "grok", "omp", "antigravity"]);
 
@@ -298,6 +310,7 @@ describe("Renderer Composer DOM behavior", () => {
           codebuddy: undefined,
           "cursor-cli": undefined,
         },
+        compatibilityAgents,
       ),
     ).toEqual([]);
 
@@ -328,6 +341,7 @@ describe("Renderer Composer DOM behavior", () => {
           codebuddy: undefined,
           "cursor-cli": undefined,
         },
+        compatibilityAgents,
       ),
     ).toEqual(["deepseek-harness"]);
   });
@@ -973,6 +987,17 @@ describe("Renderer Composer DOM behavior", () => {
     expect(
       restoredThreadOwnership({
         owner: "external",
+        harnessId: "future-harness",
+        transportModelId: encodeHarnessPluginRoute({
+          harnessId: harnessIdSchema.parse("future-harness"),
+        }),
+        history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
+        locked: true,
+      }),
+    ).toEqual({ agent: "future-harness" });
+    expect(
+      restoredThreadOwnership({
+        owner: "external",
         harnessId: "claude-code",
         transportModelId: "codexhost/claude-code-native@claude-model-v1.c29ubmV0@acceptEdits@high",
         history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: false },
@@ -1269,12 +1294,9 @@ describe("Renderer Composer DOM behavior", () => {
     expect(isComposerModelWriteAllowed(null)).toBe(false);
   });
 
-  it("does not emit a base external carrier before its concrete configuration loads", () => {
-    expect(shouldApplyDraftAgentCarrier("codex", undefined)).toBe(true);
-    expect(shouldApplyDraftAgentCarrier("grok", undefined)).toBe(false);
-    expect(
-      shouldApplyDraftAgentCarrier("grok", harnessModelRefSchema.parse({ id: "grok-4.6" })),
-    ).toBe(true);
+  it("emits a shared external carrier even when a fixed Model has no catalog entry", () => {
+    expect(shouldApplyDraftAgentCarrier("codex")).toBe(true);
+    expect(shouldApplyDraftAgentCarrier("grok")).toBe(true);
   });
 
   it("never writes the native Model while repeatedly switching existing conversations", () => {

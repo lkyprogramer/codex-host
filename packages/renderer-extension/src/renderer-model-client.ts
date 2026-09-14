@@ -205,30 +205,46 @@ export function createThreadUsageSubscriptionRelay(): {
 } {
   const listeners = new Set<(update: ThreadUsageInspection) => void>();
   let removeNotificationCallback: (() => void) | null = null;
+  let connectedClient: Pick<RendererModelClient, "subscribeThreadUsage"> | null = null;
+  let connectionGeneration = 0;
+  const connect = (client: Pick<RendererModelClient, "subscribeThreadUsage">): void => {
+    if (connectedClient === client && removeNotificationCallback !== null) return;
+    removeNotificationCallback?.();
+    removeNotificationCallback = null;
+    connectedClient = client;
+    const generation = ++connectionGeneration;
+    if (listeners.size === 0) return;
+    try {
+      removeNotificationCallback =
+        client.subscribeThreadUsage?.((update) => {
+          if (generation !== connectionGeneration || connectedClient !== client) return;
+          for (const listener of listeners) listener(update);
+        }) ?? null;
+    } catch {
+      removeNotificationCallback = null;
+    }
+  };
   return {
     connect(client) {
-      if (removeNotificationCallback || listeners.size === 0) return;
-      try {
-        removeNotificationCallback =
-          client.subscribeThreadUsage?.((update) => {
-            for (const listener of listeners) listener(update);
-          }) ?? null;
-      } catch {
-        removeNotificationCallback = null;
-      }
+      connect(client);
     },
     subscribe(listener) {
       listeners.add(listener);
+      if (connectedClient && removeNotificationCallback === null) connect(connectedClient);
       return () => {
         listeners.delete(listener);
         if (listeners.size > 0) return;
         removeNotificationCallback?.();
         removeNotificationCallback = null;
+        connectedClient = null;
+        connectionGeneration += 1;
       };
     },
     dispose() {
       removeNotificationCallback?.();
       removeNotificationCallback = null;
+      connectedClient = null;
+      connectionGeneration += 1;
       listeners.clear();
     },
   };

@@ -16,6 +16,7 @@ import {
   renderRendererAgentPicker,
   type RendererAgentPickerControl,
 } from "./renderer-agent-picker.js";
+import type { RendererAgentPresentation } from "./renderer-agent-icon.js";
 import {
   mountRendererModelPicker,
   renderRendererModelPicker,
@@ -610,6 +611,7 @@ export function mountComposerAgentControl(
   onSelectThinking: (thinkingOptionId: string) => void,
   onSelectPermissionMode: (permissionModeId: string) => void,
   onSelectCommand: (command: HarnessCommandDescriptor) => void,
+  presentations: ReadonlyMap<RendererAgent, RendererAgentPresentation> = new Map(),
 ): ComposerAgentControl {
   const nativeModelControl = captureNativeControl(nativeModelControlForComposer(composer));
   const nativeContextUsageControl = captureNativeControl(
@@ -628,6 +630,8 @@ export function mountComposerAgentControl(
     onDownload,
     onSelectCodexAccount,
     onOpenProviderPicker,
+    undefined,
+    presentations,
   );
   const modelPicker = mountRendererModelPicker(composerId, onSelectModel, onSelectThinking);
   const permissionModePicker = mountRendererPermissionModePicker(
@@ -674,6 +678,34 @@ export function mountComposerAgentControl(
   return control;
 }
 
+/** Rebuild only the Agent picker when the target Host directory changes. */
+export function replaceComposerAgentPicker(
+  control: ComposerAgentControl,
+  enabledAgents: readonly RendererAgent[],
+  onSelect: (agent: RendererAgent) => void,
+  onDownload: (agent: ExternalRendererAgent) => void,
+  onSelectCodexAccount: (accountId: string) => Promise<void> | void,
+  onOpenProviderPicker: () => void,
+  presentations: ReadonlyMap<RendererAgent, RendererAgentPresentation> = new Map(),
+): void {
+  const previous = control.picker;
+  const next = mountRendererAgentPicker(
+    control.composerId,
+    enabledAgents,
+    onSelect,
+    onDownload,
+    onSelectCodexAccount,
+    onOpenProviderPicker,
+    undefined,
+    presentations,
+  );
+  previous.root.replaceWith(next.root);
+  previous.dispose();
+  control.picker = next;
+  control.root = next.root;
+  refreshTrailingClusterPlacement(control);
+}
+
 export function renderComposerAgentControl(
   control: ComposerAgentControl,
   state: { agent: RendererAgent; phase: ComposerAgentPhase },
@@ -703,7 +735,9 @@ export function renderComposerAgentControl(
   const thinkingReady =
     availableThinkingOptions.length === 0 ||
     availableThinkingOptions.some(({ id }) => id === modelView.selectedThinkingOptionId);
-  const modelReady = selectedModel !== undefined && selectedCatalogModel !== undefined;
+  const modelReady =
+    modelView.status === "empty" ||
+    (selectedModel !== undefined && selectedCatalogModel !== undefined);
   const modelBlocked =
     state.agent !== "codex" && (modelView.status === "selecting" || !modelReady || !thinkingReady);
   const permissionModeBlocked =

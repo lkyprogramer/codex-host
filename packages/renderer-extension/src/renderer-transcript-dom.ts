@@ -5,13 +5,23 @@ export const TRANSCRIPT_ITEM_IDS_ATTRIBUTE = "data-local-conversation-item-targe
 export const TRANSCRIPT_TEXT_BODY_SELECTOR = '[data-testid="exec-shell-body"]';
 export const REASONING_SOFT_WRAP_STORAGE_KEY = "codexhost.reasoning-soft-wrap.v1";
 export const REASONING_SOFT_WRAP_CHANGE_EVENT = "codexhost:reasoning-soft-wrap-changed";
+const reasoningSoftWrapFallback = new WeakMap<Window, boolean>();
 
 export function readReasoningTranscriptSoftWrap(ownerWindow: Window): boolean {
-  return ownerWindow.localStorage.getItem(REASONING_SOFT_WRAP_STORAGE_KEY) === "true";
+  try {
+    return ownerWindow.localStorage.getItem(REASONING_SOFT_WRAP_STORAGE_KEY) === "true";
+  } catch {
+    return reasoningSoftWrapFallback.get(ownerWindow) === true;
+  }
 }
 
 export function setReasoningTranscriptSoftWrap(ownerWindow: Window, enabled: boolean): void {
-  ownerWindow.localStorage.setItem(REASONING_SOFT_WRAP_STORAGE_KEY, String(enabled));
+  reasoningSoftWrapFallback.set(ownerWindow, enabled);
+  try {
+    ownerWindow.localStorage.setItem(REASONING_SOFT_WRAP_STORAGE_KEY, String(enabled));
+  } catch {
+    // Keep the session preference usable when storage is unavailable.
+  }
   ownerWindow.dispatchEvent(new Event(REASONING_SOFT_WRAP_CHANGE_EVENT));
 }
 

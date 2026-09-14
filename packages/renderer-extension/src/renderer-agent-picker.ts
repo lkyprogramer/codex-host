@@ -14,7 +14,11 @@ import {
   type RendererCodexAccountGroupControl,
   type RendererCodexAccountOptionControl,
 } from "./renderer-codex-account-options.js";
-import { createRendererAgentIcon, RENDERER_AGENT_LABELS } from "./renderer-agent-icon.js";
+import {
+  createRendererAgentIcon,
+  rendererAgentLabel,
+  type RendererAgentPresentation,
+} from "./renderer-agent-icon.js";
 import { requestConnectionsPageFocus } from "./settings/connections-page.js";
 import {
   rendererSettingsMessages,
@@ -68,7 +72,7 @@ function openConnectionsSettings(opener?: HTMLElement): void {
   openSettingsPage("connections", opener);
 }
 
-export const RENDERER_AGENT_INSTALL_URLS: Readonly<Record<ExternalRendererAgent, string>> = {
+export const RENDERER_AGENT_INSTALL_URLS: Readonly<Record<string, string>> = {
   pi: "https://pi.dev/",
   "claude-code": "https://code.claude.com/docs/en/quickstart",
   "deepseek-harness": "https://github.com/deepseek-ai/deepseek-harness",
@@ -93,6 +97,7 @@ interface AgentOptionControl {
   row: HTMLElement;
   button: HTMLButtonElement;
   check: HTMLElement;
+  label: HTMLElement;
   // Shared 24x24 slot: renders as an Install ("+") action when the Agent is
   // not installed, or a red error ("!") action once it has failed — the two
   // are mutually exclusive since `RendererAgentAvailability` is a single
@@ -110,6 +115,7 @@ export interface RendererAgentPickerControl {
   ownershipError: HTMLElement;
   menu: HTMLElement;
   agents: readonly RendererAgent[];
+  presentations: ReadonlyMap<RendererAgent, RendererAgentPresentation>;
   options: Partial<Record<RendererAgent, AgentOptionControl>>;
   codexAccounts: readonly CodexAccountSummary[];
   codexAccountOptions: Map<string, RendererCodexAccountOptionControl>;
@@ -151,12 +157,13 @@ export function rendererAgentMenuPlacement(
 export function rendererAgentPickerTooltip(
   state: { agent: RendererAgent; phase: ComposerAgentPhase },
   activeAccount: CodexAccountSummary | undefined,
+  presentation?: RendererAgentPresentation,
 ): string {
   const account =
     state.agent === "codex" && activeAccount
       ? ` · ${activeAccount.email ?? activeAccount.label}`
       : "";
-  return `Agent: ${RENDERER_AGENT_LABELS[state.agent]}${account}${state.phase === "locked" ? " (locked)" : ""}`;
+  return `Agent: ${rendererAgentLabel(state.agent, presentation)}${account}${state.phase === "locked" ? " (locked)" : ""}`;
 }
 
 export function rendererAgentPickerView(
@@ -166,6 +173,7 @@ export function rendererAgentPickerView(
   agents: readonly RendererAgent[],
   availability: AgentAvailability = {},
   codexAccountCount = 0,
+  presentation?: RendererAgentPresentation,
 ): RendererAgentPickerView {
   const optionDisabled = Object.fromEntries(
     agents.map((agent) => [
@@ -186,7 +194,7 @@ export function rendererAgentPickerView(
       .map((agent) => [agent, availability[agent] === "error"]),
   ) as Partial<Record<ExternalRendererAgent, boolean>>;
   return {
-    label: RENDERER_AGENT_LABELS[state.agent],
+    label: rendererAgentLabel(state.agent, presentation),
     triggerDisabled:
       switching || state.phase === "locked" || (agents.length < 2 && codexAccountCount < 2),
     nativeModelHidden: switching || state.agent !== "codex",
@@ -226,6 +234,7 @@ export function mountRendererAgentPicker(
   onSelectCodexAccount: (accountId: string) => void,
   onOpen?: () => void,
   groupPreference: AgentGroupPreferenceStore = getSharedAgentGroupPreferenceStore(),
+  presentations: ReadonlyMap<RendererAgent, RendererAgentPresentation> = new Map(),
 ): RendererAgentPickerControl {
   const root = document.createElement("div");
   root.setAttribute(CONTROL_ATTRIBUTE, composerId);
@@ -398,13 +407,16 @@ export function mountRendererAgentPicker(
     check.style.visibility = "hidden";
 
     const label = document.createElement("span");
-    label.textContent = RENDERER_AGENT_LABELS[agent];
+    label.textContent = rendererAgentLabel(agent, presentations.get(agent));
     label.style.minWidth = "0";
     label.style.flex = "1 1 auto";
     label.style.overflow = "hidden";
     label.style.textOverflow = "ellipsis";
     label.style.whiteSpace = "nowrap";
-    button.append(createRendererAgentIcon(agent), label);
+    const optionIcon = document.createElement("span");
+    optionIcon.style.display = "inline-flex";
+    optionIcon.append(createRendererAgentIcon(agent, 20, document, presentations.get(agent)));
+    button.append(optionIcon, label);
     button.addEventListener("click", () => {
       const selected = button.getAttribute("aria-pressed") === "true";
       close();
@@ -469,7 +481,7 @@ export function mountRendererAgentPicker(
     actionSlot.append(check);
     if (action) actionSlot.append(action);
     row.append(button, actionSlot);
-    options[agent] = { row, button, check, action };
+    options[agent] = { row, button, check, label, action };
     rowsByAgent.set(agent, row);
   }
 
@@ -688,6 +700,7 @@ export function mountRendererAgentPicker(
     ownershipError,
     menu,
     agents: [...enabledAgents],
+    presentations,
     options,
     codexAccounts: [],
     codexAccountOptions,
@@ -729,9 +742,12 @@ export function renderRendererAgentPicker(
     control.agents,
     availability,
     codexAccounts.length,
+    control.presentations.get(state.agent),
   );
   if (control.iconSlot.dataset.agent !== state.agent) {
-    control.iconSlot.replaceChildren(createRendererAgentIcon(state.agent));
+    control.iconSlot.replaceChildren(
+      createRendererAgentIcon(state.agent, 20, document, control.presentations.get(state.agent)),
+    );
     control.iconSlot.dataset.agent = state.agent;
   }
   control.trigger.disabled = view.triggerDisabled || ownershipError;
@@ -753,7 +769,7 @@ export function renderRendererAgentPicker(
   });
   control.trigger.title = ownershipError
     ? pickerGroupMessages().ownershipErrorLabel
-    : rendererAgentPickerTooltip(state, activeAccount);
+    : rendererAgentPickerTooltip(state, activeAccount, control.presentations.get(state.agent));
   control.trigger.style.cursor = control.trigger.disabled ? "not-allowed" : "pointer";
   control.trigger.style.opacity = control.trigger.disabled && !switching ? "0.72" : "1";
   control.iconSlot.style.display = switching || ownershipError ? "none" : "inline-flex";
@@ -765,6 +781,10 @@ export function renderRendererAgentPicker(
     const option = control.options[agent];
     if (!option) continue;
     const selected = agent === state.agent;
+    const presentation = control.presentations.get(agent);
+    option.label.textContent = rendererAgentLabel(agent, presentation);
+    const optionIcon = option.button.firstElementChild;
+    optionIcon?.replaceChildren(createRendererAgentIcon(agent, 20, document, presentation));
     option.button.disabled = view.optionDisabled[agent] ?? true;
     option.button.setAttribute("aria-checked", String(selected));
     option.button.setAttribute("aria-pressed", String(selected));
@@ -788,7 +808,7 @@ export function renderRendererAgentPicker(
         option.action.style.color = "#f87171";
         option.action.style.font = "800 13px/1 system-ui, sans-serif";
         option.action.style.opacity = "1";
-        const label = `${RENDERER_AGENT_LABELS[agent]} connection error — open Settings for details`;
+        const label = `${rendererAgentLabel(agent, control.presentations.get(agent))} connection error — open Settings for details`;
         option.action.setAttribute("aria-label", label);
         option.action.title = label;
       } else {
@@ -797,7 +817,7 @@ export function renderRendererAgentPicker(
         option.action.style.color = "inherit";
         option.action.style.font = "600 18px/1 system-ui, sans-serif";
         option.action.style.opacity = "0.72";
-        const label = `Install ${RENDERER_AGENT_LABELS[agent]}`;
+        const label = `Install ${rendererAgentLabel(agent, control.presentations.get(agent))}`;
         option.action.setAttribute("aria-label", label);
         option.action.title = label;
       }

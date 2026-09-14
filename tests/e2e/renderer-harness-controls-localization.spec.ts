@@ -103,6 +103,7 @@ const { outputFiles } = await build({
   format: "iife",
   platform: "browser",
   target: "es2024",
+  loader: { ".svg": "dataurl" },
   write: false,
 });
 

@@ -141,19 +141,7 @@ describe("production Desktop Controller", () => {
       rendererCdpEndpoint: "http://127.0.0.1:43123",
       rendererSource:
         'globalThis.__zod_globalConfig ??= {}; globalThis.__zod_globalConfig.jitless = true;\nObject.defineProperty(window, "__codexhostProductionConfigV1", { configurable: true, value: { defaultAgent: "pi" } });\nproduction renderer',
-      enabledAgents: [
-        "codex",
-        "pi",
-        "claude-code",
-        "deepseek-harness",
-        "opencode",
-        "grok",
-        "omp",
-        "antigravity",
-        "kiro-cli",
-        "codebuddy",
-        "cursor-cli",
-      ],
+      enabledAgents: ["codex"],
       timeoutMs: 90_000,
     });
     expect(startAttachmentServer).toHaveBeenCalledWith({

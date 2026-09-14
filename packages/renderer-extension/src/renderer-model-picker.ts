@@ -474,7 +474,10 @@ export function mountRendererModelPicker(
         ? event.target.closest<HTMLButtonElement>("button[data-model-id]")
         : null;
     if (!target?.dataset.modelId) return;
-    close();
+    // Keep the parent menu available while the Model update is in flight so a
+    // user can immediately see the refreshed Thinking options. A standalone
+    // Model menu (no Thinking capability) still closes normally.
+    closeModelMenu();
     trigger.focus();
     onSelectModel(target.dataset.modelId);
   };
@@ -676,7 +679,11 @@ export function renderRendererModelPicker(
     String(view.status === "loading" || view.status === "selecting"),
   );
   control.trigger.disabled = isRendererModelPickerDisabled(view);
-  if (shouldCloseRendererModelPicker(view) && !keepOpenMenu) control.close();
+  // Once a selected Model has no usable Thinking choice, the parent menu only
+  // duplicates the standalone Model menu. Close it so the next trigger opens
+  // the direct Model menu; keep it open when refreshed Thinking choices exist.
+  if ((shouldCloseRendererModelPicker(view) || !presentation.showThinkingSection) && !keepOpenMenu)
+    control.close();
   control.modelButton.disabled = control.trigger.disabled;
   // The search input must not mirror the trigger's disabled state: disabling a
   // focused element blurs it, which would drop the cursor out of the box during

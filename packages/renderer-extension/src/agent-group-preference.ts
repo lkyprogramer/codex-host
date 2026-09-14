@@ -31,6 +31,7 @@ export interface AgentGroupPreferenceStore {
     section: AgentGroupSection,
     beforeAgent?: ExternalRendererAgent | null,
   ): void;
+  ensureAgents(agents: readonly ExternalRendererAgent[]): void;
   resetToDefault(): void;
   subscribe(listener: () => void): () => void;
 }
@@ -38,8 +39,8 @@ export interface AgentGroupPreferenceStore {
 export const AGENT_GROUP_PREFERENCE_STORAGE_KEY = "codexhost.agentGroupPreference.v1";
 
 const EXTERNAL_AGENTS: readonly ExternalRendererAgent[] = KNOWN_RENDERER_AGENTS.filter(
-  (agent): agent is ExternalRendererAgent => agent !== "codex",
-);
+  (agent) => agent !== "codex",
+) as ExternalRendererAgent[];
 
 interface StoredEntry {
   readonly agent: string;
@@ -47,7 +48,7 @@ interface StoredEntry {
 }
 
 function isKnownExternalAgent(value: unknown): value is ExternalRendererAgent {
-  return typeof value === "string" && (EXTERNAL_AGENTS as readonly string[]).includes(value);
+  return typeof value === "string" && value.length > 0 && value !== "codex";
 }
 
 function isStoredEntry(value: unknown): value is StoredEntry {
@@ -143,12 +144,24 @@ export function createAgentGroupPreferenceStore(
       return sections.get(agent) ?? "main";
     },
     moveAgent(agent, section, beforeAgent = null) {
-      if (!EXTERNAL_AGENTS.includes(agent)) return;
+      if (!isKnownExternalAgent(agent)) return;
       order = order.filter((candidate) => candidate !== agent);
       const insertAt = beforeAgent && beforeAgent !== agent ? order.indexOf(beforeAgent) : -1;
       if (insertAt >= 0) order.splice(insertAt, 0, agent);
       else order.push(agent);
       sections.set(agent, section);
+      persist();
+      notify();
+    },
+    ensureAgents(agents) {
+      let changed = false;
+      for (const agent of agents) {
+        if (!isKnownExternalAgent(agent) || order.includes(agent)) continue;
+        order.push(agent);
+        sections.set(agent, "main");
+        changed = true;
+      }
+      if (!changed) return;
       persist();
       notify();
     },

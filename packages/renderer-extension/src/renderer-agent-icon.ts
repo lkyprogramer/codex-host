@@ -6,9 +6,13 @@ import codeBuddyAgentIconUrl from "./assets/codebuddy-agent.svg";
 import cursorAgentIconUrl from "./assets/cursor-agent.svg";
 import ompAgentIconUrl from "./assets/omp-agent.svg";
 import openCodeAgentIconUrl from "./assets/opencode-agent.png";
+import type { HarnessPluginDescriptor } from "@codexhost/shared-contracts";
+
 import type { RendererAgent } from "./agent-selection-state.js";
 
-export const RENDERER_AGENT_LABELS: Record<RendererAgent, string> = {
+export type RendererAgentPresentation = Pick<HarnessPluginDescriptor, "name" | "icon" | "links">;
+
+export const RENDERER_AGENT_LABELS: Readonly<Record<string, string>> = {
   codex: "Codex",
   pi: "Pi",
   "claude-code": "Claude Code",
@@ -21,6 +25,41 @@ export const RENDERER_AGENT_LABELS: Record<RendererAgent, string> = {
   codebuddy: "CodeBuddy",
   "cursor-cli": "Cursor CLI (Experimental)",
 };
+
+export function rendererAgentLabel(
+  agent: RendererAgent,
+  presentation?: RendererAgentPresentation,
+): string {
+  return presentation?.name ?? RENDERER_AGENT_LABELS[agent] ?? agent;
+}
+
+function createImageIcon(src: string, size: number, ownerDocument: Document): HTMLImageElement {
+  const image = ownerDocument.createElement("img");
+  image.src = src;
+  image.alt = "";
+  image.draggable = false;
+  image.style.width = `${size}px`;
+  image.style.height = `${size}px`;
+  image.style.objectFit = "contain";
+  image.style.flex = "none";
+  return image;
+}
+
+function createUnknownAgentIcon(size: number, ownerDocument: Document): HTMLElement {
+  const mark = ownerDocument.createElement("span");
+  mark.textContent = "?";
+  mark.setAttribute("aria-hidden", "true");
+  mark.style.display = "inline-flex";
+  mark.style.alignItems = "center";
+  mark.style.justifyContent = "center";
+  mark.style.width = `${size}px`;
+  mark.style.height = `${size}px`;
+  mark.style.borderRadius = "50%";
+  mark.style.background = "rgba(127, 127, 127, 0.2)";
+  mark.style.font = `600 ${Math.max(10, Math.round(size * 0.6))}px/1 system-ui, sans-serif`;
+  mark.style.flex = "none";
+  return mark;
+}
 
 const PI_PATHS = [
   {
@@ -67,17 +106,11 @@ export function createRendererAgentIcon(
   agent: RendererAgent,
   size = 20,
   ownerDocument: Document = document,
+  presentation?: RendererAgentPresentation,
 ): Element {
+  if (presentation?.icon) return createImageIcon(presentation.icon, size, ownerDocument);
   if (agent === "codex") {
-    const image = ownerDocument.createElement("img");
-    image.src = codexAgentIconUrl;
-    image.alt = "";
-    image.draggable = false;
-    image.style.width = `${size}px`;
-    image.style.height = `${size}px`;
-    image.style.objectFit = "contain";
-    image.style.flex = "none";
-    return image;
+    return createImageIcon(codexAgentIconUrl, size, ownerDocument);
   }
   if (agent === "pi") return createSvgIcon(PI_PATHS, "currentColor", size, ownerDocument);
   if (agent === "claude-code") {
@@ -93,26 +126,11 @@ export function createRendererAgentIcon(
     );
   }
   if (agent === "opencode") {
-    const image = ownerDocument.createElement("img");
-    image.src = openCodeAgentIconUrl;
-    image.alt = "";
-    image.draggable = false;
-    image.style.width = `${size}px`;
-    image.style.height = `${size}px`;
-    image.style.objectFit = "contain";
-    image.style.flex = "none";
-    return image;
+    return createImageIcon(openCodeAgentIconUrl, size, ownerDocument);
   }
   if (agent === "omp") {
-    const image = ownerDocument.createElement("img");
-    image.src = ompAgentIconUrl;
-    image.alt = "";
-    image.draggable = false;
-    image.style.width = `${size}px`;
-    image.style.height = `${size}px`;
-    image.style.objectFit = "contain";
+    const image = createImageIcon(ompAgentIconUrl, size, ownerDocument);
     image.style.borderRadius = "22.37%";
-    image.style.flex = "none";
     return image;
   }
   if (
@@ -121,31 +139,23 @@ export function createRendererAgentIcon(
     agent === "codebuddy" ||
     agent === "cursor-cli"
   ) {
-    const image = ownerDocument.createElement("img");
-    image.src =
+    const image = createImageIcon(
       agent === "codebuddy"
         ? codeBuddyAgentIconUrl
         : agent === "cursor-cli"
           ? cursorAgentIconUrl
           : agent === "kiro-cli"
             ? kiroAgentIconUrl
-            : antigravityAgentIconUrl;
-    image.alt = "";
-    image.draggable = false;
-    image.style.width = `${size}px`;
-    image.style.height = `${size}px`;
-    image.style.objectFit = "contain";
-    image.style.flex = "none";
+            : antigravityAgentIconUrl,
+      size,
+      ownerDocument,
+    );
     return image;
   }
-  const mark = ownerDocument.createElement("img");
-  mark.src = grokAgentIconUrl;
-  mark.alt = "";
-  mark.draggable = false;
-  mark.style.width = `${size}px`;
-  mark.style.height = `${size}px`;
-  mark.style.objectFit = "contain";
-  mark.style.borderRadius = "22.37%";
-  mark.style.flex = "none";
-  return mark;
+  if (agent === "grok") {
+    const image = createImageIcon(grokAgentIconUrl, size, ownerDocument);
+    image.style.borderRadius = "22.37%";
+    return image;
+  }
+  return createUnknownAgentIcon(size, ownerDocument);
 }

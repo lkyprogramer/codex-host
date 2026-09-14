@@ -6,7 +6,7 @@ import {
   type AgentGroupSection,
 } from "../agent-group-preference.js";
 import type { ExternalRendererAgent, RendererAgentAvailability } from "../agent-selection-state.js";
-import { createRendererAgentIcon, RENDERER_AGENT_LABELS } from "../renderer-agent-icon.js";
+import { createRendererAgentIcon, rendererAgentLabel } from "../renderer-agent-icon.js";
 import type { RendererAdapterStatus } from "../versioned-renderer-adapter.js";
 import type { RendererSettingsPageDefinition, RendererSettingsPageMountContext } from "./core.js";
 import { createRendererSettingsIcon } from "./icons.js";
@@ -30,6 +30,9 @@ const HARNESS_INSTALL_URLS: Readonly<Record<ExternalRendererAgent, string>> = Ob
 
 export interface RendererConnectionAgentSnapshot {
   readonly agent: ExternalRendererAgent;
+  readonly name?: string;
+  readonly icon?: string;
+  readonly installationUrl?: string;
   readonly availability: RendererAgentAvailability;
   readonly error: CodexhostError | null;
   readonly webUiAvailable?: true;
@@ -255,7 +258,16 @@ function createConnectionIdentityIcon(
     : "settings-connection-row__mark";
   container.setAttribute("aria-hidden", "true");
   if (item.agentSnapshot) {
-    container.append(createRendererAgentIcon(item.agentSnapshot.agent, size, document));
+    container.append(
+      createRendererAgentIcon(
+        item.agentSnapshot.agent,
+        size,
+        document,
+        item.agentSnapshot.name
+          ? { name: item.agentSnapshot.name, icon: item.agentSnapshot.icon }
+          : undefined,
+      ),
+    );
   } else {
     container.textContent = "CH";
   }
@@ -316,7 +328,8 @@ function createConnectionRow(
   if (item.agentSnapshot?.availability === "notInstalled") {
     const install = document.createElement("a");
     install.className = "settings-connection-install-link";
-    install.href = HARNESS_INSTALL_URLS[item.agentSnapshot.agent];
+    install.href =
+      item.agentSnapshot.installationUrl ?? HARNESS_INSTALL_URLS[item.agentSnapshot.agent] ?? "#";
     install.target = "_blank";
     install.rel = "noopener noreferrer";
     install.setAttribute("aria-label", `${messages.connectionOpenInstallation}: ${item.name}`);
@@ -419,7 +432,8 @@ function renderConnectionInspector(
     callout.append(icon, copy);
     const install = document.createElement("a");
     install.className = "settings-command-button settings-connection-install-button";
-    install.href = HARNESS_INSTALL_URLS[item.agentSnapshot.agent];
+    install.href =
+      item.agentSnapshot.installationUrl ?? HARNESS_INSTALL_URLS[item.agentSnapshot.agent] ?? "#";
     install.target = "_blank";
     install.rel = "noopener noreferrer";
     install.append(
@@ -537,7 +551,10 @@ function connectionItems(
     },
     ...host.agents.map((agent): ConnectionListItem => ({
       key: agent.agent,
-      name: RENDERER_AGENT_LABELS[agent.agent],
+      name: rendererAgentLabel(
+        agent.agent,
+        agent.name ? { name: agent.name, icon: agent.icon } : undefined,
+      ),
       availability: agent.availability,
       error: agent.availability === "notInstalled" ? null : agent.error,
       agentSnapshot: agent,
@@ -819,6 +836,7 @@ export function createConnectionsSettingsPage(
           (item): item is ConnectionListItem & { agentSnapshot: RendererConnectionAgentSnapshot } =>
             item.agentSnapshot !== undefined,
         );
+        groupPreference.ensureAgents(groupableItems.map((item) => item.agentSnapshot.agent));
         const agentByKey = new Map(groupableItems.map((item) => [item.key, item]));
         const preferenceOrder = groupPreference
           .list()

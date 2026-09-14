@@ -2,6 +2,7 @@ import {
   harnessModelRefSchema,
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
+  harnessPluginIdSchema,
   type HarnessModelCatalog,
   type HarnessModelRef,
   type HarnessPermissionModeCatalog,
@@ -9,16 +10,12 @@ import {
   type HarnessThinkingOptionId,
 } from "@codexhost/shared-contracts";
 
-import {
-  KNOWN_RENDERER_AGENTS,
-  type ExternalRendererAgent,
-  type RendererAgent,
-} from "./agent-selection-state.js";
+import type { ExternalRendererAgent, RendererAgent } from "./agent-selection-state.js";
 
 export const RENDERER_NEW_THREAD_PREFERENCE_KEY = "codexhost.new-thread-preference.v1";
 
 interface ExternalConfigurationPreference {
-  model: HarnessModelRef;
+  model?: HarnessModelRef;
   thinkingOptionId?: HarnessThinkingOptionId;
   permissionModeId?: HarnessPermissionModeId;
 }
@@ -52,11 +49,12 @@ function parseExternalConfiguration(value: unknown): ExternalConfigurationPrefer
   if (!model.success) return undefined;
   const thinkingOptionId = harnessThinkingOptionIdSchema.safeParse(value.thinkingOptionId);
   const permissionModeId = harnessPermissionModeIdSchema.safeParse(value.permissionModeId);
-  return {
-    model: model.data,
+  const configuration = {
+    ...(model.success ? { model: model.data } : {}),
     ...(thinkingOptionId.success ? { thinkingOptionId: thinkingOptionId.data } : {}),
     ...(permissionModeId.success ? { permissionModeId: permissionModeId.data } : {}),
   };
+  return Object.keys(configuration).length > 0 ? configuration : undefined;
 }
 
 function readPreference(storage: PreferenceStorage | null): NewThreadPreference | undefined {
@@ -66,19 +64,23 @@ function readPreference(storage: PreferenceStorage | null): NewThreadPreference 
     if (!raw) return undefined;
     const parsed: unknown = JSON.parse(raw);
     if (!isRecord(parsed) || parsed.version !== 1) return undefined;
-    if (!KNOWN_RENDERER_AGENTS.some((agent) => agent === parsed.lastAgent)) return undefined;
+    if (
+      typeof parsed.lastAgent !== "string" ||
+      (parsed.lastAgent !== "codex" && !harnessPluginIdSchema.safeParse(parsed.lastAgent).success)
+    ) {
+      return undefined;
+    }
     const externalByAgent = isRecord(parsed.externalByAgent) ? parsed.externalByAgent : {};
     const parsedExternal = Object.fromEntries(
-      KNOWN_RENDERER_AGENTS.filter(
-        (agent): agent is ExternalRendererAgent => agent !== "codex",
-      ).flatMap((agent) => {
-        const configuration = parseExternalConfiguration(externalByAgent[agent]);
+      Object.entries(externalByAgent).flatMap(([agent, value]) => {
+        if (!harnessPluginIdSchema.safeParse(agent).success) return [];
+        const configuration = parseExternalConfiguration(value);
         return configuration ? [[agent, configuration]] : [];
       }),
     ) as NewThreadPreference["externalByAgent"];
     return {
       version: 1,
-      lastAgent: parsed.lastAgent as RendererAgent,
+      lastAgent: parsed.lastAgent,
       externalByAgent: parsedExternal,
     };
   } catch {
@@ -111,11 +113,13 @@ export function readNewThreadExternalConfigurationPreference(
 ): ExternalConfigurationPreference | undefined {
   const preference = readPreference(storage)?.externalByAgent[agent];
   if (!preference) return undefined;
-  const catalogModel = catalog.models.find(({ ref }) => ref.id === preference.model.id);
-  if (!catalogModel) return undefined;
+  const catalogModel = preference.model
+    ? catalog.models.find(({ ref }) => ref.id === preference.model?.id)
+    : undefined;
+  if (preference.model && !catalogModel) return undefined;
   const thinkingOptionId =
     preference.thinkingOptionId &&
-    catalogModel.supportedThinkingOptionIds?.includes(preference.thinkingOptionId)
+    catalogModel?.supportedThinkingOptionIds?.includes(preference.thinkingOptionId)
       ? preference.thinkingOptionId
       : undefined;
   const permissionModeId =
@@ -124,7 +128,7 @@ export function readNewThreadExternalConfigurationPreference(
       ? preference.permissionModeId
       : undefined;
   return {
-    model: catalogModel.ref,
+    ...(catalogModel ? { model: catalogModel.ref } : {}),
     ...(thinkingOptionId ? { thinkingOptionId } : {}),
     ...(permissionModeId ? { permissionModeId } : {}),
   };
@@ -147,7 +151,7 @@ export function writeNewThreadAgentPreference(
 
 export function writeNewThreadExternalConfigurationPreference(
   agent: ExternalRendererAgent,
-  model: HarnessModelRef,
+  model: HarnessModelRef | undefined,
   thinkingOptionId?: HarnessThinkingOptionId,
   permissionModeId?: HarnessPermissionModeId,
   storage: PreferenceStorage | null = rendererStorage(),
@@ -160,7 +164,7 @@ export function writeNewThreadExternalConfigurationPreference(
       externalByAgent: {
         ...current?.externalByAgent,
         [agent]: {
-          model: harnessModelRefSchema.parse(model),
+          ...(model ? { model: harnessModelRefSchema.parse(model) } : {}),
           ...(thinkingOptionId
             ? { thinkingOptionId: harnessThinkingOptionIdSchema.parse(thinkingOptionId) }
             : {}),

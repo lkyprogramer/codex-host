@@ -4,7 +4,11 @@ import type {
   HarnessThinkingOptionId,
 } from "@codexhost/shared-contracts";
 
-export const KNOWN_RENDERER_AGENTS = [
+/**
+ * Compatibility fallback for Hosts that do not expose the plugin directory.
+ * Product identity is supplied by `codexhost/harness/plugins/list` at runtime.
+ */
+export const LEGACY_RENDERER_AGENTS = [
   "codex",
   "pi",
   "claude-code",
@@ -17,37 +21,36 @@ export const KNOWN_RENDERER_AGENTS = [
   "codebuddy",
   "cursor-cli",
 ] as const;
-export const DEFAULT_RENDERER_AGENTS = KNOWN_RENDERER_AGENTS;
-export type RendererAgent = (typeof KNOWN_RENDERER_AGENTS)[number];
-export type ExternalRendererAgent = Exclude<RendererAgent, "codex">;
+/** @deprecated Use the target Host plugin directory for product identity. */
+export const KNOWN_RENDERER_AGENTS = LEGACY_RENDERER_AGENTS;
+export const DEFAULT_RENDERER_AGENTS = LEGACY_RENDERER_AGENTS;
+/** A Harness ID from the target Host, or the isolated official `codex` route. */
+export type RendererAgent = string;
+export type ExternalRendererAgent = string;
 export type RendererAgentAvailability =
   "checking" | "ready" | "notInstalled" | "unavailable" | "error";
 export type ComposerAgentPhase = "draft" | "locked";
+
+export interface ExternalComposerConfiguration {
+  model?: HarnessModelRef;
+  thinkingOptionId?: HarnessThinkingOptionId;
+  permissionModeId?: HarnessPermissionModeId;
+}
+
+type ExternalComposerConfigurationUpdate = {
+  model?: HarnessModelRef | undefined;
+  thinkingOptionId?: HarnessThinkingOptionId | undefined;
+  permissionModeId?: HarnessPermissionModeId | undefined;
+};
 
 export interface DraftComposerState {
   agent: RendererAgent;
   phase: ComposerAgentPhase;
   composerId: string;
   codexAccountId?: string;
-  piModel?: HarnessModelRef;
-  piThinkingOptionId?: HarnessThinkingOptionId;
-  claudeModel?: HarnessModelRef;
-  claudeThinkingOptionId?: HarnessThinkingOptionId;
-  deepSeekHarnessModel?: HarnessModelRef;
-  openCodeModel?: HarnessModelRef;
-  openCodeThinkingOptionId?: HarnessThinkingOptionId;
-  grokModel?: HarnessModelRef;
-  grokThinkingOptionId?: HarnessThinkingOptionId;
-  ompModel?: HarnessModelRef;
-  ompThinkingOptionId?: HarnessThinkingOptionId;
-  antigravityModel?: HarnessModelRef;
-  antigravityThinkingOptionId?: HarnessThinkingOptionId;
-  kiroCliModel?: HarnessModelRef;
-  kiroCliThinkingOptionId?: HarnessThinkingOptionId;
-  codeBuddyModel?: HarnessModelRef;
-  codeBuddyThinkingOptionId?: HarnessThinkingOptionId;
-  cursorCliModel?: HarnessModelRef;
-  permissionModeByAgent?: Partial<Record<ExternalRendererAgent, HarnessPermissionModeId>>;
+  externalConfigurationByAgent?: Readonly<
+    Record<ExternalRendererAgent, ExternalComposerConfiguration>
+  >;
 }
 
 type MutableComposerState = DraftComposerState;
@@ -87,7 +90,7 @@ function sameTarget(left: readonly unknown[], right: readonly unknown[]): boolea
 export class DraftAgentController<Composer extends object> {
   readonly #idFactory: (sequence: number) => string;
   readonly #defaultAgent: RendererAgent;
-  readonly #enabledAgents: ReadonlySet<RendererAgent>;
+  readonly #enabledAgents: Set<RendererAgent>;
   readonly #conversationStates: ConversationState[] = [];
   readonly #modelRequestGenerations = new WeakMap<MutableComposerState, number>();
   readonly #ownershipRequestGenerations = new WeakMap<MutableComposerState, number>();
@@ -114,6 +117,14 @@ export class DraftAgentController<Composer extends object> {
 
   get(composer: Composer): Readonly<DraftComposerState> {
     return this.#state(composer);
+  }
+
+  setEnabledAgents(agents: readonly RendererAgent[]): void {
+    const next = new Set(agents);
+    if (!next.has("codex")) throw new Error("Renderer enabled Agents must include Codex");
+    this.#enabledAgents.clear();
+    for (const agent of next) this.#enabledAgents.add(agent);
+    if (!this.#enabledAgents.has(this.#lastSubmittedAgent)) this.#lastSubmittedAgent = "codex";
   }
 
   mount(
@@ -207,110 +218,32 @@ export class DraftAgentController<Composer extends object> {
     state.phase = "locked";
     if (agent === "codex" && codexAccountId) state.codexAccountId = codexAccountId;
     else delete state.codexAccountId;
-    if (agent === "pi" && model) state.piModel = model;
-    else if (agent === "pi") delete state.piModel;
-    if (agent === "claude-code" && model) state.claudeModel = model;
-    else if (agent === "claude-code") delete state.claudeModel;
-    if (agent === "deepseek-harness" && model) state.deepSeekHarnessModel = model;
-    else if (agent === "deepseek-harness") delete state.deepSeekHarnessModel;
-    if (agent === "opencode" && model) state.openCodeModel = model;
-    else if (agent === "opencode") delete state.openCodeModel;
-    if (agent === "grok" && model) state.grokModel = model;
-    else if (agent === "grok") delete state.grokModel;
-    if (agent === "omp" && model) state.ompModel = model;
-    else if (agent === "omp") delete state.ompModel;
-    if (agent === "antigravity" && model) state.antigravityModel = model;
-    else if (agent === "antigravity") delete state.antigravityModel;
-    if (agent === "kiro-cli" && model) state.kiroCliModel = model;
-    else if (agent === "kiro-cli") delete state.kiroCliModel;
-    if (agent === "codebuddy" && model) state.codeBuddyModel = model;
-    else if (agent === "codebuddy") delete state.codeBuddyModel;
-    if (agent === "cursor-cli" && model) state.cursorCliModel = model;
-    else if (agent === "cursor-cli") delete state.cursorCliModel;
-    if (agent === "pi" && thinkingOptionId) state.piThinkingOptionId = thinkingOptionId;
-    else if (agent === "pi") delete state.piThinkingOptionId;
-    if (agent === "claude-code" && thinkingOptionId) {
-      state.claudeThinkingOptionId = thinkingOptionId;
-    } else if (agent === "claude-code") delete state.claudeThinkingOptionId;
-    if (agent === "grok" && thinkingOptionId) state.grokThinkingOptionId = thinkingOptionId;
-    else if (agent === "grok") delete state.grokThinkingOptionId;
-    if (agent === "opencode" && thinkingOptionId) {
-      state.openCodeThinkingOptionId = thinkingOptionId;
-    } else if (agent === "opencode") delete state.openCodeThinkingOptionId;
-    if (agent === "omp" && thinkingOptionId) state.ompThinkingOptionId = thinkingOptionId;
-    else if (agent === "omp") delete state.ompThinkingOptionId;
-    if (agent === "antigravity" && thinkingOptionId) {
-      state.antigravityThinkingOptionId = thinkingOptionId;
-    } else if (agent === "antigravity") delete state.antigravityThinkingOptionId;
-    if (agent === "kiro-cli" && thinkingOptionId) {
-      state.kiroCliThinkingOptionId = thinkingOptionId;
-    } else if (agent === "kiro-cli") delete state.kiroCliThinkingOptionId;
-    if (agent === "codebuddy" && thinkingOptionId) {
-      state.codeBuddyThinkingOptionId = thinkingOptionId;
-    } else if (agent === "codebuddy") delete state.codeBuddyThinkingOptionId;
     if (agent !== "codex") {
-      const permissionModeByAgent: NonNullable<DraftComposerState["permissionModeByAgent"]> = {};
-      for (const candidate of [
-        "pi",
-        "claude-code",
-        "deepseek-harness",
-        "opencode",
-        "grok",
-        "omp",
-        "antigravity",
-        "kiro-cli",
-        "codebuddy",
-        "cursor-cli",
-      ] as const) {
-        const current = state.permissionModeByAgent?.[candidate];
-        if (candidate !== agent && current) permissionModeByAgent[candidate] = current;
-      }
-      if (permissionModeId) permissionModeByAgent[agent] = permissionModeId;
-      if (Object.keys(permissionModeByAgent).length > 0) {
-        state.permissionModeByAgent = permissionModeByAgent;
-      } else {
-        delete state.permissionModeByAgent;
-      }
+      this.#setExternalConfiguration(state, agent, {
+        model,
+        thinkingOptionId,
+        permissionModeId,
+      });
     }
     return state;
   }
 
   modelForAgent(composer: Composer, agent: RendererAgent): HarnessModelRef | undefined {
-    const state = this.#state(composer);
-    if (agent === "pi") return state.piModel;
-    if (agent === "claude-code") return state.claudeModel;
-    if (agent === "deepseek-harness") return state.deepSeekHarnessModel;
-    if (agent === "opencode") return state.openCodeModel;
-    if (agent === "grok") return state.grokModel;
-    if (agent === "omp") return state.ompModel;
-    if (agent === "antigravity") return state.antigravityModel;
-    if (agent === "kiro-cli") return state.kiroCliModel;
-    if (agent === "codebuddy") return state.codeBuddyModel;
-    if (agent === "cursor-cli") return state.cursorCliModel;
-    return undefined;
+    return this.#state(composer).externalConfigurationByAgent?.[agent]?.model;
   }
 
   thinkingOptionForAgent(
     composer: Composer,
     agent: ExternalRendererAgent,
   ): HarnessThinkingOptionId | undefined {
-    const state = this.#state(composer);
-    if (agent === "pi") return state.piThinkingOptionId;
-    if (agent === "claude-code") return state.claudeThinkingOptionId;
-    if (agent === "grok") return state.grokThinkingOptionId;
-    if (agent === "opencode") return state.openCodeThinkingOptionId;
-    if (agent === "omp") return state.ompThinkingOptionId;
-    if (agent === "antigravity") return state.antigravityThinkingOptionId;
-    if (agent === "kiro-cli") return state.kiroCliThinkingOptionId;
-    if (agent === "codebuddy") return state.codeBuddyThinkingOptionId;
-    return undefined;
+    return this.#state(composer).externalConfigurationByAgent?.[agent]?.thinkingOptionId;
   }
 
   permissionModeForAgent(
     composer: Composer,
     agent: ExternalRendererAgent,
   ): HarnessPermissionModeId | undefined {
-    return this.#state(composer).permissionModeByAgent?.[agent];
+    return this.#state(composer).externalConfigurationByAgent?.[agent]?.permissionModeId;
   }
 
   setExternalPermissionMode(
@@ -319,10 +252,7 @@ export class DraftAgentController<Composer extends object> {
     permissionModeId: HarnessPermissionModeId,
   ): Readonly<DraftComposerState> {
     const state = this.#state(composer);
-    state.permissionModeByAgent = {
-      ...state.permissionModeByAgent,
-      [agent]: permissionModeId,
-    };
+    this.#setExternalConfiguration(state, agent, { permissionModeId });
     return state;
   }
 
@@ -332,33 +262,8 @@ export class DraftAgentController<Composer extends object> {
     model: HarnessModelRef,
   ): Readonly<DraftComposerState> {
     const state = this.#state(composer);
-    if (agent === "pi") state.piModel = model;
-    else if (agent === "claude-code") state.claudeModel = model;
-    else if (agent === "deepseek-harness") state.deepSeekHarnessModel = model;
-    else if (agent === "opencode") state.openCodeModel = model;
-    else if (agent === "grok") state.grokModel = model;
-    else if (agent === "omp") state.ompModel = model;
-    else if (agent === "antigravity") state.antigravityModel = model;
-    else if (agent === "kiro-cli") state.kiroCliModel = model;
-    else if (agent === "codebuddy") state.codeBuddyModel = model;
-    else if (agent === "cursor-cli") state.cursorCliModel = model;
+    this.#setExternalConfiguration(state, agent, { model });
     return state;
-  }
-
-  setPiConfiguration(
-    composer: Composer,
-    model: HarnessModelRef,
-    thinkingOptionId?: HarnessThinkingOptionId,
-  ): Readonly<DraftComposerState> {
-    const state = this.#state(composer);
-    state.piModel = model;
-    if (thinkingOptionId) state.piThinkingOptionId = thinkingOptionId;
-    else delete state.piThinkingOptionId;
-    return state;
-  }
-
-  setPiModel(composer: Composer, model: HarnessModelRef): Readonly<DraftComposerState> {
-    return this.setExternalModel(composer, "pi", model);
   }
 
   setExternalThinkingOption(
@@ -367,45 +272,8 @@ export class DraftAgentController<Composer extends object> {
     thinkingOptionId?: HarnessThinkingOptionId,
   ): Readonly<DraftComposerState> {
     const state = this.#state(composer);
-    if (agent === "pi" && thinkingOptionId) state.piThinkingOptionId = thinkingOptionId;
-    else if (agent === "pi") delete state.piThinkingOptionId;
-    else if (agent === "claude-code" && thinkingOptionId) {
-      state.claudeThinkingOptionId = thinkingOptionId;
-    } else if (agent === "claude-code") {
-      delete state.claudeThinkingOptionId;
-    } else if (agent === "grok" && thinkingOptionId) {
-      state.grokThinkingOptionId = thinkingOptionId;
-    } else if (agent === "grok") {
-      delete state.grokThinkingOptionId;
-    } else if (agent === "opencode" && thinkingOptionId) {
-      state.openCodeThinkingOptionId = thinkingOptionId;
-    } else if (agent === "opencode") {
-      delete state.openCodeThinkingOptionId;
-    } else if (agent === "omp" && thinkingOptionId) {
-      state.ompThinkingOptionId = thinkingOptionId;
-    } else if (agent === "omp") {
-      delete state.ompThinkingOptionId;
-    } else if (agent === "antigravity" && thinkingOptionId) {
-      state.antigravityThinkingOptionId = thinkingOptionId;
-    } else if (agent === "antigravity") {
-      delete state.antigravityThinkingOptionId;
-    } else if (agent === "kiro-cli" && thinkingOptionId) {
-      state.kiroCliThinkingOptionId = thinkingOptionId;
-    } else if (agent === "kiro-cli") {
-      delete state.kiroCliThinkingOptionId;
-    } else if (agent === "codebuddy" && thinkingOptionId) {
-      state.codeBuddyThinkingOptionId = thinkingOptionId;
-    } else if (agent === "codebuddy") {
-      delete state.codeBuddyThinkingOptionId;
-    }
+    this.#setExternalConfiguration(state, agent, { thinkingOptionId });
     return state;
-  }
-
-  setPiThinkingOption(
-    composer: Composer,
-    thinkingOptionId: HarnessThinkingOptionId,
-  ): Readonly<DraftComposerState> {
-    return this.setExternalThinkingOption(composer, "pi", thinkingOptionId);
   }
 
   lock(composer: Composer): Readonly<DraftComposerState> {
@@ -505,6 +373,39 @@ export class DraftAgentController<Composer extends object> {
       this.#conversationStates.find((candidate) => sameTarget(candidate.target, target))?.state ??
       null
     );
+  }
+
+  #setExternalConfiguration(
+    state: MutableComposerState,
+    agent: ExternalRendererAgent,
+    update: ExternalComposerConfigurationUpdate,
+  ): void {
+    const current = state.externalConfigurationByAgent?.[agent] ?? {};
+    const next: ExternalComposerConfiguration = { ...current };
+    if (update.model !== undefined) next.model = update.model;
+    if (update.thinkingOptionId !== undefined) next.thinkingOptionId = update.thinkingOptionId;
+    if (update.permissionModeId !== undefined) next.permissionModeId = update.permissionModeId;
+    if ("model" in update && update.model === undefined) delete next.model;
+    if ("thinkingOptionId" in update && update.thinkingOptionId === undefined) {
+      delete next.thinkingOptionId;
+    }
+    if ("permissionModeId" in update && update.permissionModeId === undefined) {
+      delete next.permissionModeId;
+    }
+    if (Object.keys(next).length === 0) {
+      const remaining = Object.fromEntries(
+        Object.entries(state.externalConfigurationByAgent ?? {}).filter(
+          ([candidate]) => candidate !== agent,
+        ),
+      ) as Record<ExternalRendererAgent, ExternalComposerConfiguration>;
+      if (Object.keys(remaining).length === 0) delete state.externalConfigurationByAgent;
+      else state.externalConfigurationByAgent = remaining;
+      return;
+    }
+    state.externalConfigurationByAgent = {
+      ...state.externalConfigurationByAgent,
+      [agent]: next,
+    };
   }
 
   #state(composer: Composer, initialAgent?: RendererAgent): MutableComposerState {

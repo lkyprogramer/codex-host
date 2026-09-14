@@ -5,7 +5,11 @@ import {
 } from "@codexhost/shared-contracts";
 
 import type { RendererAgent } from "./agent-selection-state.js";
-import { createRendererAgentIcon, RENDERER_AGENT_LABELS } from "./renderer-agent-icon.js";
+import {
+  createRendererAgentIcon,
+  rendererAgentLabel,
+  type RendererAgentPresentation,
+} from "./renderer-agent-icon.js";
 import type { RendererModelClient } from "./renderer-model-client.js";
 import { RendererMethodUnavailableError } from "./renderer-request-sender.js";
 
@@ -14,6 +18,7 @@ export const SIDEBAR_THREAD_ROW_SELECTOR = `[${SIDEBAR_THREAD_ROW_ATTRIBUTE}]`;
 export const SIDEBAR_THREAD_ID_ATTRIBUTE = "data-app-action-sidebar-thread-id";
 export const SIDEBAR_THREAD_HOST_ID_ATTRIBUTE = "data-app-action-sidebar-thread-host-id";
 export const SIDEBAR_AGENT_ICON_ATTRIBUTE = "data-codexhost-sidebar-agent-icon";
+const SIDEBAR_AGENT_PRESENTATION_ATTRIBUTE = "data-codexhost-sidebar-agent-presentation";
 
 export interface RendererSidebarContractInspection {
   rowCount: number;
@@ -26,6 +31,24 @@ const OWNERSHIP_RETRY_DELAYS_MS = [100, 300, 800, 1_500, 3_000] as const;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function sidebarPresentationFingerprint(presentation?: RendererAgentPresentation): string {
+  return JSON.stringify([presentation?.name ?? null, presentation?.icon ?? null]);
+}
+
+export function shouldReuseSidebarAgentMarker(
+  marker: Pick<HTMLElement, "parentElement" | "getAttribute"> | undefined,
+  titleTrigger: HTMLElement,
+  agent: Exclude<RendererAgent, "codex">,
+  presentation?: RendererAgentPresentation,
+): boolean {
+  return (
+    marker?.parentElement === titleTrigger &&
+    marker.getAttribute(SIDEBAR_AGENT_ICON_ATTRIBUTE) === agent &&
+    marker.getAttribute(SIDEBAR_AGENT_PRESENTATION_ATTRIBUTE) ===
+      sidebarPresentationFingerprint(presentation)
+  );
 }
 
 function sidebarThreadAttributes(element: HTMLElement): {
@@ -113,7 +136,7 @@ export interface SidebarAgentIconRow {
   hostId(): string | null;
   threadId(): string | null;
   draftId(): string | null;
-  render(agent: Exclude<RendererAgent, "codex">): void;
+  render(agent: Exclude<RendererAgent, "codex">, presentation?: RendererAgentPresentation): void;
   clear(): void;
 }
 
@@ -132,17 +155,7 @@ export function rendererAgentForThreadOwnership(
   ownership: ThreadOwnership,
 ): Exclude<RendererAgent, "codex"> | null {
   if (ownership.owner === "codex") return null;
-  if (ownership.harnessId === "pi") return "pi";
-  if (ownership.harnessId === "claude-code") return "claude-code";
-  if (ownership.harnessId === "deepseek-harness") return "deepseek-harness";
-  if (ownership.harnessId === "opencode") return "opencode";
-  if (ownership.harnessId === "grok") return "grok";
-  if (ownership.harnessId === "omp") return "omp";
-  if (ownership.harnessId === "antigravity") return "antigravity";
-  if (ownership.harnessId === "kiro-cli") return "kiro-cli";
-  if (ownership.harnessId === "codebuddy") return "codebuddy";
-  if (ownership.harnessId === "cursor-cli") return "cursor-cli";
-  return null;
+  return ownership.harnessId;
 }
 
 class BrowserSidebarAgentIconRow implements SidebarAgentIconRow {
@@ -164,7 +177,7 @@ class BrowserSidebarAgentIconRow implements SidebarAgentIconRow {
     return draftIdFromSidebarRowElement(this.element);
   }
 
-  render(agent: Exclude<RendererAgent, "codex">): void {
+  render(agent: Exclude<RendererAgent, "codex">, presentation?: RendererAgentPresentation): void {
     const titleTrigger = this.element.querySelector<HTMLElement>("[data-thread-title-trigger]");
     const title = titleTrigger?.querySelector<HTMLElement>("[data-thread-title]");
     if (!titleTrigger || !title) {
@@ -176,16 +189,17 @@ class BrowserSidebarAgentIconRow implements SidebarAgentIconRow {
     ];
     if (
       icons.length === 1 &&
-      icons[0]?.parentElement === titleTrigger &&
-      icons[0].getAttribute(SIDEBAR_AGENT_ICON_ATTRIBUTE) === agent
+      shouldReuseSidebarAgentMarker(icons[0], titleTrigger, agent, presentation)
     ) {
       return;
     }
     this.clear();
 
-    const label = `${RENDERER_AGENT_LABELS[agent]} Agent`;
+    const label = `${rendererAgentLabel(agent, presentation)} Agent`;
+    const presentationFingerprint = sidebarPresentationFingerprint(presentation);
     const marker = this.element.ownerDocument.createElement("span");
     marker.setAttribute(SIDEBAR_AGENT_ICON_ATTRIBUTE, agent);
+    marker.setAttribute(SIDEBAR_AGENT_PRESENTATION_ATTRIBUTE, presentationFingerprint);
     marker.setAttribute("role", "img");
     marker.setAttribute("aria-label", label);
     marker.title = label;
@@ -196,7 +210,7 @@ class BrowserSidebarAgentIconRow implements SidebarAgentIconRow {
     marker.style.height = "14px";
     marker.style.flex = "none";
     marker.style.pointerEvents = "none";
-    marker.append(createRendererAgentIcon(agent, 14, this.element.ownerDocument));
+    marker.append(createRendererAgentIcon(agent, 14, this.element.ownerDocument, presentation));
     titleTrigger.insertBefore(marker, title);
   }
 
@@ -254,6 +268,10 @@ export function installRendererSidebarAgentIcons(options: {
     threadId: string | null;
     draftId: string | null;
   }): RendererAgent | null;
+  getPresentation?(
+    hostId: string,
+    agent: Exclude<RendererAgent, "codex">,
+  ): RendererAgentPresentation | undefined;
   dom?: SidebarAgentIconDom;
 }): RendererSidebarAgentIcons {
   const dom = options.dom ?? new BrowserSidebarAgentIconDom(document);
@@ -374,7 +392,7 @@ export function installRendererSidebarAgentIcons(options: {
           clearOwnershipRetry(key);
         }
         if (localAgent === "codex") row.clear();
-        else row.render(localAgent);
+        else row.render(localAgent, options.getPresentation?.(hostId, localAgent));
         continue;
       }
       if (!threadId.success) {
@@ -384,7 +402,7 @@ export function installRendererSidebarAgentIcons(options: {
       const key = ownershipKey(hostId, threadId.data);
       if (ownershipByThread.has(key)) {
         const agent = ownershipByThread.get(key);
-        if (agent) row.render(agent);
+        if (agent) row.render(agent, options.getPresentation?.(hostId, agent));
         else row.clear();
         continue;
       }

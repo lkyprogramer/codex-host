@@ -28,7 +28,14 @@ describe("Cursor and Kiro selection in one Desktop", () => {
     expect(controller.modelForAgent(composer, "kiro-cli")).toEqual(kiro);
     expect(controller.thinkingOptionForAgent(composer, "cursor-cli")).toBeUndefined();
     expect(controller.thinkingOptionForAgent(composer, "kiro-cli")).toBe(high);
-    const selection = modelSelectionForAgent(null, null, "cursor-cli", cursor, high, mode);
+    const selection = modelSelectionForAgent(
+      null,
+      null,
+      "cursor-cli",
+      cursor,
+      controller.thinkingOptionForAgent(composer, "cursor-cli"),
+      mode,
+    );
     if (typeof selection?.model !== "string") throw Error("Missing Cursor carrier");
     expect(decodeHarnessPluginRoute(selection.model)).toMatchObject({
       harnessId: "cursor-cli",

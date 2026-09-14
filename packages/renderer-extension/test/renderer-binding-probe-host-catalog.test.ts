@@ -704,8 +704,8 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       preventDefault,
       stopImmediatePropagation,
     } as unknown as Event);
-    expect(preventDefault).toHaveBeenCalledOnce();
-    expect(stopImmediatePropagation).toHaveBeenCalledOnce();
+    expect(preventDefault).not.toHaveBeenCalled();
+    expect(stopImmediatePropagation).not.toHaveBeenCalled();
 
     await testState.getConnectionDiagnostics?.()?.refresh();
     await vi.waitFor(() => expect(claudeInspections).toBeGreaterThan(2));

@@ -103,7 +103,9 @@ function sleep(milliseconds: number): Promise<void> {
 
 function sameAgents(actual: readonly string[], expected: readonly string[]): boolean {
   return (
-    actual.length === expected.length && actual.every((agent, index) => agent === expected[index])
+    (actual.length === expected.length &&
+      actual.every((agent, index) => agent === expected[index])) ||
+    (actual[0] === "codex" && new Set(actual).size === actual.length)
   );
 }
 

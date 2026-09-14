@@ -181,6 +181,60 @@ describe("external direction changes use normal Desktop start presentation", () 
   });
 
   it.each([
+    { code: -32601, message: "Method not found" },
+    {
+      code: -32600,
+      message: "Invalid request: unknown variant `codexhost/thread/ownership/list`",
+    },
+  ])("keeps stock Codex steering native when ownership RPC is unavailable: %o", async (error) => {
+    const f = fixture("codex");
+    const original = f.rpc.getMockImplementation();
+    f.rpc.mockImplementation(async (method, params, options) => {
+      if (method === "codexhost/thread/ownership/list")
+        throw Object.assign(new Error(error.message), error);
+      if (method === "thread/read") {
+        return {
+          thread: {
+            id: "thread",
+            modelProvider: "openai",
+            cliVersion: "1.0.0",
+          },
+        };
+      }
+      return original?.(method, params, options);
+    });
+
+    await expect(f.manager.steerTurn(...f.args)).resolves.toEqual({ turnId: "official" });
+    expect(f.originalSteer).toHaveBeenCalledWith(...f.args);
+    expect(f.manager.startTurn).not.toHaveBeenCalled();
+    expect(f.rpc.mock.calls.map(([method]) => method)).toEqual([
+      "codexhost/thread/ownership/list",
+      "thread/read",
+    ]);
+    f.dispose();
+  });
+
+  it("fails closed when an unavailable ownership RPC cannot verify native Codex ownership", async () => {
+    const f = fixture("codex");
+    f.rpc.mockImplementation(async (method) => {
+      if (method === "codexhost/thread/ownership/list") {
+        throw Object.assign(new Error("Method not found"), { code: -32601 });
+      }
+      if (method === "thread/read") {
+        return { thread: { id: "thread", modelProvider: "codexhost", cliVersion: "host" } };
+      }
+      return {};
+    });
+
+    await expect(f.manager.steerTurn(...f.args)).rejects.toThrow(
+      "cannot establish Codex ownership",
+    );
+    expect(f.originalSteer).not.toHaveBeenCalled();
+    expect(f.manager.startTurn).not.toHaveBeenCalled();
+    f.dispose();
+  });
+
+  it.each([
     { input: [] },
     { input: [{ type: "text", text: " " }] },
     { input: [{ type: "image", url: "image" }] },
