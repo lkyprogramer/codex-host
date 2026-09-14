@@ -500,6 +500,15 @@ export function encodeExternalTransportSelection(
   harnessId: ExternalHarnessId,
   selection: ExternalConfigurationSelection,
 ): string {
+  // Legacy Harness-specific carriers require a Model token. The generic route
+  // is the backwards-readable carrier for a real no-model Session that still
+  // exposes permission or thinking configuration.
+  if (!selection.model && (selection.permissionModeId || selection.thinkingOptionId)) {
+    return encodeHarnessPluginRoute({
+      harnessId: harnessPluginIdSchema.parse(harnessId),
+      ...selection,
+    });
+  }
   switch (harnessId) {
     case "pi":
       return encodePiTransportModel(selection.model, selection.thinkingOptionId);

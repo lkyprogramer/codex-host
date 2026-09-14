@@ -253,6 +253,7 @@ export class MappingStore {
       const names = (await readdir(this.#threadsDirectory)).filter((name) =>
         name.endsWith(".json"),
       );
+      const uncommittedThreadIds: HostThreadId[] = [];
       for (const name of names) {
         const primary = path.join(this.#threadsDirectory, name);
         const backup = path.join(this.#backupsDirectory, name);
@@ -275,9 +276,10 @@ export class MappingStore {
           }
         }
         if (record.state === "creating" && !record.nativeSessionRef) {
-          await rm(primary, { force: true });
-          await rm(backup, { force: true });
-          continue;
+          // A delegated create may already have reached the native Harness before its
+          // identity was durably committed. Keep it until the paired delegation is
+          // known so a retry cannot silently replay an outcome-unknown request.
+          uncommittedThreadIds.push(record.hostThreadId);
         }
         this.#records.set(record.hostThreadId, record);
       }
@@ -299,6 +301,13 @@ export class MappingStore {
           );
           await rename(file, quarantine).catch(() => undefined);
         }
+      }
+      for (const hostThreadId of uncommittedThreadIds) {
+        const paired = [...this.#delegations.values()].some(
+          (delegation) => delegation.childHostThreadId === hostThreadId,
+        );
+        if (paired) continue;
+        await this.#remove(hostThreadId);
       }
       this.#rebuildIndexes();
       this.#initialized = true;
@@ -1114,6 +1123,7 @@ export class MappingStore {
       transportModelId: input.transportModelId,
       ephemeral: input.ephemeral,
       historyMode: input.historyMode,
+      ...(input.executionPolicy ? { executionPolicy: input.executionPolicy } : {}),
       ...(input.forkSource ? { forkSource: input.forkSource } : {}),
       ...(input.subagent ? { subagent: input.subagent } : {}),
       turnMappings: [],

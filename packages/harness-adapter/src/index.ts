@@ -5,6 +5,7 @@ export { validateHostInteractionResponse } from "./interaction.js";
 export { HarnessOutputChannel } from "./output-channel.js";
 export { sanitizeDiagnosticTail } from "./diagnostics.js";
 export { validateHostQuestionResponse } from "./question.js";
+export { validateHarnessSession } from "./session-validation.js";
 export { parseHostUsage } from "./usage.js";
 export type { HostUsage } from "./usage.js";
 export type {
@@ -28,6 +29,9 @@ export type {
   HarnessOutput,
   HarnessResult,
   HarnessSession,
+  HarnessIdleSuspendResult,
+  HarnessIdleSuspendSignal,
+  HarnessResourceLifecycle,
   HarnessSessionCapabilities,
   HarnessSteeringControl,
   HarnessWorkMode,

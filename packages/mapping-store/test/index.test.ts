@@ -1230,4 +1230,51 @@ describe("mapping-store package", () => {
     expect(created.delegation.status).toBe("creating");
     await store.close();
   });
+
+  it("retains a paired provisional delegation after restart without replaying its request", async () => {
+    const directory = await temporaryStoreDirectory();
+    const childHostThreadId = hostThreadIdSchema.parse("outcome-unknown-child");
+    const delegationId = hostThreadIdSchema.parse("outcome-unknown-delegation");
+    const input = {
+      thread: {
+        hostThreadId: childHostThreadId,
+        createRequestId: "delegation:outcome-unknown",
+        harnessId,
+        cwd: "/synthetic",
+        title: "outcome unknown",
+        transportModelId: "codexhost/pi-native",
+        ephemeral: false,
+        historyMode: "paginated" as const,
+        executionPolicy: "unattended-full-access" as const,
+      },
+      delegation: {
+        delegationId,
+        parentHostThreadId: hostThreadIdSchema.parse("outcome-unknown-parent"),
+        childHostThreadId,
+        sourceHarnessId: harnessIdSchema.parse("codex"),
+        targetHarnessId: harnessId,
+        status: "creating" as const,
+        requestId: "outcome-unknown",
+        taskDigest: "d".repeat(64),
+      },
+    };
+    const initial = new MappingStore({ directory });
+    await initial.initialize();
+    await initial.createDelegatedThread(input);
+    await initial.close();
+
+    const recovered = new MappingStore({ directory });
+    await recovered.initialize();
+    await expect(recovered.getThread(childHostThreadId)).resolves.toMatchObject({
+      state: "creating",
+      executionPolicy: "unattended-full-access",
+    });
+    await expect(recovered.findDelegationByRequest("outcome-unknown")).resolves.toMatchObject({
+      delegationId,
+      childHostThreadId,
+      status: "creating",
+    });
+    await expect(recovered.createDelegatedThread(input)).resolves.toMatchObject({ reused: true });
+    await recovered.close();
+  });
 });

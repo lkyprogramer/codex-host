@@ -48,6 +48,7 @@ export const storedThreadRecordV1Schema = z
     transportModelId: nonBlankTextSchema.max(1_024),
     ephemeral: z.boolean(),
     historyMode: z.enum(["legacy", "paginated"]),
+    executionPolicy: z.enum(["default", "unattended-full-access"]).optional(),
     forkSource: z
       .object({
         hostThreadId: hostThreadIdSchema,
@@ -194,6 +195,8 @@ export interface CreateProvisionalThreadInput {
   transportModelId: string;
   ephemeral: boolean;
   historyMode: "legacy" | "paginated";
+  /** The requested execution intent, retained across Host restart without inferring legacy records. */
+  executionPolicy?: "default" | "unattended-full-access";
   forkSource?: { hostThreadId: HostThreadId; hostTurnId: HostTurnId };
   subagent?: {
     parentHostThreadId: HostThreadId;

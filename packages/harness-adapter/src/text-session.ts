@@ -80,6 +80,7 @@ export interface CreateSessionInput {
 }
 
 export interface ResumeSessionInput {
+  executionPolicy?: HarnessExecutionPolicy;
   /** Saved selection hints for Harnesses that initialize configuration lazily. */
   model?: HarnessModelRef;
   thinkingOptionId?: HarnessThinkingOptionId;
@@ -92,6 +93,7 @@ export interface ResumeSessionInput {
 }
 
 export interface ForkSessionInput {
+  executionPolicy?: HarnessExecutionPolicy;
   kind: "fork";
   sourceRef: NativeSessionRef;
   checkpoint: NativeCheckpointRef;
@@ -101,6 +103,7 @@ export interface ForkSessionInput {
 }
 
 export interface RollbackLastTurnSessionInput {
+  executionPolicy?: HarnessExecutionPolicy;
   /** Current settings required by a derived Session before it can start native work. */
   model?: HarnessModelRef;
   thinkingOptionId?: HarnessThinkingOptionId;
@@ -521,6 +524,27 @@ export type HostEvent =
 export type HarnessOutput =
   { kind: "event"; event: HostEvent } | { kind: "interaction"; interaction: HostInteraction };
 
+/** Outcome of an atomic, non-destructive idle suspension attempt. */
+export type HarnessIdleSuspendResult =
+  | { status: "suspended"; scope: string }
+  | { status: "busy" | "unknown" | "unsupported"; reason?: string };
+
+/** Structural cancellation view: usable without Node.js or DOM library dependencies. */
+export interface HarnessIdleSuspendSignal {
+  readonly aborted: boolean;
+}
+
+/** Optional native resource lifecycle. Absence means automatic suspension is unsupported.
+ * The adapter must atomically check native work/interaction state and release its owned
+ * resources. Never stop active work to satisfy an idle request. Successful suspension
+ * preserves resumable native identity, configuration and history, and ends outputs.
+ * The Host serializes its commands; adapters still own native autonomous-work races.
+ * An abort must prevent a late successful suspension from racing a new operation.
+ */
+export interface HarnessResourceLifecycle {
+  suspend(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult>;
+}
+
 export interface HarnessSession {
   readonly harnessId: HarnessId;
   readonly capabilities: HarnessSessionCapabilities;
@@ -530,6 +554,7 @@ export interface HarnessSession {
   readonly commands?: HarnessCommandCapability;
   readonly workMode?: HarnessWorkModeControl;
   readonly steering?: HarnessSteeringControl;
+  readonly resourceLifecycle?: HarnessResourceLifecycle;
 
   refreshUsage?(): Promise<void>;
   readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>>;

@@ -1,5 +1,6 @@
 import { copyFile, mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { createHash } from "node:crypto";
 
 import { build } from "esbuild";
 import { harnessPluginManifestSchema } from "@codexhost/shared-contracts";
@@ -49,6 +50,9 @@ export async function buildHarnessPlugin({ pluginRoot, outputRoot, allowedRuntim
   });
   const inputs = Object.keys(result.metafile.inputs);
   const runtimePackages = new Set();
+  const runtimeVersions = new Map();
+  const runtimeLicenses = new Map();
+  const metadataByPackageRoot = new Map();
   for (const input of inputs) {
     const normalized = `/${input.replaceAll("\\", "/")}/`;
     if (
@@ -64,6 +68,23 @@ export async function buildHarnessPlugin({ pluginRoot, outputRoot, allowedRuntim
     if (!allowedRuntimePackages.has(packageName))
       throw new Error(`Plugin Bundle contains unreviewed runtime package: ${packageName}`);
     runtimePackages.add(packageName);
+    const absoluteInput = path.resolve(root, input).replaceAll("\\", "/");
+    const packageRoot =
+      absoluteInput.slice(
+        0,
+        absoluteInput.lastIndexOf("/node_modules/") + "/node_modules/".length,
+      ) + packageName;
+    if (!metadataByPackageRoot.has(packageRoot)) {
+      metadataByPackageRoot.set(
+        packageRoot,
+        JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8")),
+      );
+    }
+    const { version, license } = metadataByPackageRoot.get(packageRoot);
+    const versions = runtimeVersions.get(packageName) ?? new Set();
+    versions.add(version);
+    runtimeVersions.set(packageName, versions);
+    runtimeLicenses.set(`${packageName}@${version}`, typeof license === "string" ? license : null);
   }
   const source = await readFile(outputPath, "utf8");
   if (source.includes("sourceMappingURL="))
@@ -78,5 +99,26 @@ export async function buildHarnessPlugin({ pluginRoot, outputRoot, allowedRuntim
     path.join(outputRoot, "manifest.json"),
     `${JSON.stringify({ ...manifest, entry: "plugin.mjs" }, null, 2)}\n`,
   );
-  return { id: manifest.id, inputs, runtimePackages: [...runtimePackages].sort() };
+  const receipt = {
+    formatVersion: 1,
+    harnessId: manifest.id,
+    adapterApiVersion: manifest.adapterApiVersion,
+    pluginVersion: manifest.version,
+    runtimeTarget: "node22",
+    bundleSha256: createHash("sha256").update(source).digest("hex"),
+    runtimePackages: Object.fromEntries(
+      [...runtimeVersions]
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, versions]) => [name, [...versions].sort()]),
+    ),
+    nativeVersion: null,
+    runtimeLicenses: Object.fromEntries(
+      [...runtimeLicenses].sort(([a], [b]) => a.localeCompare(b)),
+    ),
+  };
+  await writeFile(
+    path.join(outputRoot, "build-receipt.json"),
+    `${JSON.stringify(receipt, null, 2)}\n`,
+  );
+  return { id: manifest.id, inputs, runtimePackages: [...runtimePackages].sort(), receipt };
 }

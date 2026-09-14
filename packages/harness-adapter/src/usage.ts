@@ -24,7 +24,6 @@ const tokenFields = [
   "cachedInputTokens",
   "cacheWriteInputTokens",
   "outputTokens",
-  "outputTokensPerSecond",
   "reasoningOutputTokens",
   "totalTokens",
   "contextWindowTokens",
@@ -43,6 +42,7 @@ const percentFields = [
 ] as const satisfies ReadonlyArray<keyof HostUsage>;
 
 const usageFields = new Set<keyof HostUsage>([
+  "outputTokensPerSecond",
   ...tokenFields,
   ...safeIntegerFields,
   ...percentFields,

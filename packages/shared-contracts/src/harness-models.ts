@@ -156,6 +156,23 @@ export function permissionModeFixedAtCreate(configuration: {
   return configuration.permissionModeScope === "atCreate";
 }
 
+export const harnessTurnControlCapabilitiesSchema = z
+  .object({
+    steering: z.enum(["native", "restart"]),
+    workModes: z.array(z.enum(["default", "plan"])).min(1),
+  })
+  .strict()
+  .refine(
+    ({ workModes }) =>
+      workModes.includes("default") && new Set(workModes).size === workModes.length,
+    {
+      path: ["workModes"],
+      message: "Work modes must be unique and include default",
+    },
+  );
+
+export type HarnessTurnControlCapabilities = z.infer<typeof harnessTurnControlCapabilitiesSchema>;
+
 export const harnessSessionCapabilitiesSchema = z
   .object({
     configuration: z
@@ -167,6 +184,7 @@ export const harnessSessionCapabilitiesSchema = z
       })
       .strict(),
     history: harnessHistoryCapabilitiesSchema,
+    turnControl: harnessTurnControlCapabilitiesSchema.optional(),
     subagents: z
       .object({
         observe: z.boolean(),
@@ -318,6 +336,7 @@ const externalThreadInspectionSchema = z
     owner: z.literal("external"),
     harnessId: nonBlankTextSchema.max(256),
     transportModelId: nonBlankTextSchema.max(1_024),
+    turnControl: harnessTurnControlCapabilitiesSchema.optional(),
     effectiveModel: harnessModelRefSchema.optional(),
     resolvedModelLabel: harnessResolvedModelLabelSchema.optional(),
     effectiveThinkingOptionId: harnessThinkingOptionIdSchema.optional(),
