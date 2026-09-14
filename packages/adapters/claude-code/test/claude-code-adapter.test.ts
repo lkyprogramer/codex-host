@@ -10,6 +10,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import type { HarnessOutput, HarnessSession } from "@codexhost/harness-adapter";
+import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from "../src/index.js";
 import { projectClaudePlanLimitToCredits } from "../src/claude-code-adapter.js";
 import { ClaudeCodeExecutableError } from "../src/command.js";
@@ -35,6 +36,9 @@ class FakeClaudeTransport implements ClaudeTurnTransport {
   idleHandler: ClaudeIdleTurnHandler | null = null;
   threadHandler: ((event: ClaudeTurnEvent) => void) | null = null;
   idleLive = false;
+  autoCompleteTurn:
+    | ((input: { text: string; userMessageId: string; transport: FakeClaudeTransport }) => void)
+    | null = null;
   setAutonomousTurnHandler(handler: (turn: ClaudeAutonomousTurn) => void): void {
     this.autonomousTurnHandler = handler;
   }
@@ -145,9 +149,11 @@ class FakeClaudeTransport implements ClaudeTurnTransport {
   ): Promise<ClaudeTransportTurnResult> {
     this.turns.push({ text, userMessageId });
     this.#assistantMessageId = null;
-    return new Promise((resolve, reject) => {
+    const pending = new Promise<ClaudeTransportTurnResult>((resolve, reject) => {
       this.#active = { onEvent, resolve, reject };
     });
+    this.autoCompleteTurn?.({ text, userMessageId, transport: this });
+    return pending;
   }
 
   event(event: ClaudeTurnEvent): void {
@@ -383,6 +389,171 @@ describe("Claude Code HarnessAdapter", () => {
     );
     await adapter.close();
   });
+
+  it("records a lazy SDK native-fixture conformance receipt", async () => {
+    const histories = new Map<string, unknown[]>();
+    const fixtures: Array<ReturnType<typeof fixture>> = [];
+    const createAdapter = (): ClaudeCodeAdapter => {
+      const value = fixture();
+      fixtures.push(value);
+      vi.mocked(value.dependencies.readSessionMessages).mockImplementation(async ({ sessionId }) =>
+        structuredClone(histories.get(sessionId) ?? []),
+      );
+      vi.mocked(value.dependencies.createTransport).mockImplementation((input) => {
+        const transport = new FakeClaudeTransport(
+          input.sessionId,
+          input.permissionMode,
+          input.onPermissionModeChanged,
+          input.onPlanLimit,
+        );
+        transport.abort.mockImplementation(async () => {
+          const cancelled = transport.turns.at(-1);
+          if (!cancelled) throw new Error("fixture cancellation has no Native Turn");
+          const history = histories.get(transport.sessionId) ?? [];
+          history.push(
+            {
+              type: "user",
+              uuid: cancelled.userMessageId,
+              session_id: transport.sessionId,
+              promptId: cancelled.userMessageId,
+              promptSource: "sdk",
+              message: { role: "user", content: cancelled.text },
+            },
+            {
+              type: "user",
+              uuid: `${cancelled.userMessageId}-interrupted`,
+              session_id: transport.sessionId,
+              promptId: cancelled.userMessageId,
+              message: {
+                role: "user",
+                content: [{ type: "text", text: "[Request interrupted by user]" }],
+              },
+            },
+          );
+          histories.set(transport.sessionId, history);
+          transport.finish({ status: "cancelled", reason: "fixture cancellation" });
+        });
+        transport.autoCompleteTurn = ({ text, userMessageId }) => {
+          if (text === "fixture cancellable") return;
+          queueMicrotask(() => {
+            const assistantId = `assistant-${userMessageId}`;
+            const history = histories.get(transport.sessionId) ?? [];
+            history.push(
+              {
+                type: "user",
+                uuid: userMessageId,
+                session_id: transport.sessionId,
+                message: { role: "user", content: text },
+              },
+              {
+                type: "assistant",
+                uuid: assistantId,
+                session_id: transport.sessionId,
+                message: {
+                  role: "assistant",
+                  content: [{ type: "text", text: `fixture ${text}` }],
+                  stop_reason: "end_turn",
+                },
+              },
+            );
+            histories.set(transport.sessionId, history);
+            transport.delta(`fixture ${text}`, assistantId);
+            transport.finish({ status: "succeeded" });
+          });
+        };
+        value.transports.push(transport);
+        return transport;
+      });
+      return value.adapter;
+    };
+
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd: "/synthetic",
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-sdk-transport-fixture",
+      },
+      environment: {
+        primary: { CODEXHOST_CONFORMANCE_ENV: "primary" },
+        isolated: { CODEXHOST_CONFORMANCE_ENV: "isolated" },
+        resume: { CODEXHOST_CONFORMANCE_ENV: "resume" },
+      },
+      prompts: {
+        first: "fixture first",
+        cancellable: "fixture cancellable",
+        followup: "fixture followup",
+      },
+      probes: {
+        activateIsolated: async (session, output) => {
+          const turnId = hostTurnIdSchema.parse("conformance-isolated");
+          const started = await session.execute({
+            type: "turn.start",
+            turnId,
+            input: [{ type: "text", text: "fixture isolated" }],
+          });
+          if (!started.ok) throw new Error(started.error.message);
+          const terminal = await output.waitForTerminal(turnId);
+          if (terminal.outcome.status !== "succeeded")
+            throw new Error("isolated SDK fixture Turn did not succeed");
+        },
+        assertEnvironmentIsolation: async () => {
+          const inputs = fixtures.flatMap((value) =>
+            vi.mocked(value.dependencies.createTransport).mock.calls.map(([input]) => input),
+          );
+          const primary = inputs.find(
+            (input) => input.environment?.CODEXHOST_CONFORMANCE_ENV === "primary",
+          );
+          const isolated = inputs.find(
+            (input) => input.environment?.CODEXHOST_CONFORMANCE_ENV === "isolated",
+          );
+          expect(primary).toBeDefined();
+          expect(isolated).toBeDefined();
+          expect(primary?.sessionId).not.toBe(isolated?.sessionId);
+          expect(primary?.environment?.CODEXHOST_CONFORMANCE_ENV).toBe("primary");
+          expect(isolated?.environment?.CODEXHOST_CONFORMANCE_ENV).toBe("isolated");
+        },
+        readCleanup: async () => ({
+          residue: fixtures.every((value) =>
+            value.transports.every((transport) => transport.close.mock.calls.length === 1),
+          )
+            ? "none"
+            : "present",
+        }),
+      },
+    });
+
+    expect(receipt.status).toBe("incomplete");
+    expect(receipt.environment).toMatchObject({
+      nativeActivation: "executed",
+      nativeIsolationReadback: "passed",
+    });
+    expect(receipt.cleanup).toMatchObject({
+      sessionClose: "passed",
+      adapterClose: "passed",
+      outputTermination: "passed",
+      nativeReadback: "passed",
+      residue: "none",
+    });
+    expect(receipt.scenarios).toMatchObject({
+      inspect: { status: "passed" },
+      create: { status: "passed" },
+      environmentIsolation: { status: "passed" },
+      firstTurn: { status: "passed" },
+      concurrentTurn: { status: "passed" },
+      cancel: { status: "passed" },
+      identityReadback: { status: "passed" },
+      resume: { status: "passed" },
+      followup: { status: "passed" },
+      fork: { status: "notCovered" },
+      rollback: { status: "notCovered" },
+      subagents: { status: "notCovered" },
+    });
+  });
+
   it("opens and closes unused Sessions without creating a Transport", async () => {
     const { adapter, dependencies } = fixture();
     const session = await openSession(adapter);
@@ -390,6 +561,89 @@ describe("Claude Code HarnessAdapter", () => {
     expect(dependencies.createTransport).not.toHaveBeenCalled();
     await session.close();
     expect(dependencies.createTransport).not.toHaveBeenCalled();
+  });
+
+  it("suspends only an idle Claude Session and preserves its resumable identity", async () => {
+    const { adapter, transports } = fixture();
+    const nativeRef = nativeSessionRefSchema.parse({
+      harnessId: "claude-code",
+      nativeSessionId: "idle-native-session",
+      formatVersion: 1,
+    });
+    const opened = await adapter.open({ kind: "resume", cwd: "/synthetic", nativeRef });
+    if (!opened.ok || !opened.value.resourceLifecycle) throw new Error("Missing idle lifecycle");
+    const session = opened.value;
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+
+    await session.execute(textTurn("idle-turn"));
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.delta("done", "idle-assistant");
+    transport.event({
+      type: "message.completed",
+      messageId: "idle-assistant",
+      checkpointId: "idle-checkpoint",
+    });
+    transport.finish({ status: "succeeded" });
+    while ((await nextEvent(iterator)).type !== "turn.completed") {
+      // Drain the completed Turn before asking the Adapter to suspend it.
+    }
+
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "claude-sdk-session",
+    });
+    expect(transport.close).toHaveBeenCalledOnce();
+    expect(session.initialState.nativeRef).toEqual(nativeRef);
+
+    const resumed = await adapter.open({ kind: "resume", cwd: "/synthetic", nativeRef });
+    if (!resumed.ok) throw new Error(resumed.error.message);
+    expect(resumed.value.initialState.nativeRef).toEqual(nativeRef);
+    await resumed.value.close();
+    await adapter.close();
+  });
+
+  it("refuses Claude idle suspension while active and honors a pre-aborted request", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(lifecycle.suspend(aborted.signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+
+    await session.execute(textTurn("still-active"));
+    await expect(
+      lifecycle.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "busy" });
+    expect(transports[0]?.close).not.toHaveBeenCalled();
+    await session.close();
+    await adapter.close();
+  });
+
+  it("does not report Claude suspension when native process cleanup fails", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute(textTurn("cleanup-failure"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.finish({ status: "succeeded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    transport.close.mockRejectedValueOnce(new Error("process group is still alive"));
+
+    await expect(lifecycle.suspend(new AbortController().signal)).rejects.toThrow(
+      "could not stop safely",
+    );
+    await expect(adapter.close()).rejects.toThrow("could not stop safely");
+    expect(transport.close).toHaveBeenCalledOnce();
   });
 
   it("rolls back the last Turn through Claude's Native Fork", async () => {
@@ -540,6 +794,7 @@ describe("Claude Code HarnessAdapter", () => {
         permissionModeScope: "live",
       },
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
+      turnControl: { steering: "restart", workModes: ["default"] },
       subagents: { observe: true, readTranscript: true },
     });
     const iterator = session.outputs[Symbol.asyncIterator]();
@@ -2020,6 +2275,12 @@ describe("Claude Code HarnessAdapter", () => {
       ok: false,
       error: { code: "sessionBusy" },
     });
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await expect(
+      lifecycle.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "busy" });
+    expect(transport.close).not.toHaveBeenCalled();
     transport.autonomousTurnHandler?.({
       nativeTurnKey: "task-notification-1",
       events: [
@@ -3321,6 +3582,41 @@ describe("Claude Code HarnessAdapter", () => {
       expect.objectContaining({ permissionMode: "auto" }),
     );
     await opened.value.close();
+  });
+
+  it("restores unattended execution policy on resume while preserving explicit permission priority", async () => {
+    const { adapter, dependencies } = fixture();
+    const sourceRef = nativeSessionRefSchema.parse({
+      harnessId: adapter.harnessId,
+      nativeSessionId: "unattended-resume",
+      formatVersion: 1,
+    });
+    const unattended = await adapter.open({
+      kind: "resume",
+      cwd: "/synthetic",
+      nativeRef: sourceRef,
+      executionPolicy: "unattended-full-access",
+    });
+    if (!unattended.ok) throw new Error(unattended.error.message);
+    await unattended.value.execute(textTurn("resume unattended"));
+    expect(dependencies.createTransport).toHaveBeenLastCalledWith(
+      expect.objectContaining({ permissionMode: "auto" }),
+    );
+    await unattended.value.close();
+
+    const explicit = await adapter.open({
+      kind: "resume",
+      cwd: "/synthetic",
+      nativeRef: sourceRef,
+      executionPolicy: "unattended-full-access",
+      permissionModeId: harnessPermissionModeIdSchema.parse("plan"),
+    });
+    if (!explicit.ok) throw new Error(explicit.error.message);
+    await explicit.value.execute(textTurn("resume explicit"));
+    expect(dependencies.createTransport).toHaveBeenLastCalledWith(
+      expect.objectContaining({ permissionMode: "plan" }),
+    );
+    await explicit.value.close();
   });
 
   it("defers cold Permission Mode selection and dynamically switches a started Query", async () => {

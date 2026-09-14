@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -14,7 +14,15 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { AntigravityAdapter } from "../src/index.js";
-import { copyNativeConversationDbIfExists, nativeConversationDbPath } from "../src/fork.js";
+import {
+  cloneNativeConversationDb,
+  cloneNativeDerivedSessionArtifacts,
+  copyNativeConversationDbIfExists,
+  forkAntigravitySession,
+  nativeBrainDirPath,
+  nativeConversationDbPath,
+  removeNativeDerivedSessionArtifacts,
+} from "../src/fork.js";
 import { AntigravityHistory } from "../src/history.js";
 
 const antigravityHarnessId = harnessIdSchema.parse("antigravity");
@@ -376,7 +384,7 @@ describe("Antigravity Fork Session Branching", () => {
     }
   });
 
-  it("copies native conversation sqlite db file if present", async () => {
+  it("rejects an invalid native sqlite clone and removes its partial target", async () => {
     const fakeHome = await mkdtemp(path.join(os.tmpdir(), "codexhost-fakehome-"));
     try {
       const sourceDb = nativeConversationDbPath("source-conv-id", fakeHome);
@@ -388,13 +396,313 @@ describe("Antigravity Fork Session Branching", () => {
         "derived-conv-id",
         fakeHome,
       );
-      expect(copied).toBe(true);
+      expect(copied).toBe(false);
 
       const derivedDb = nativeConversationDbPath("derived-conv-id", fakeHome);
-      const content = await import("node:fs/promises").then((fs) => fs.readFile(derivedDb, "utf8"));
-      expect(content).toBe("SQLite format 3\0test-data");
+      await expect(import("node:fs/promises").then((fs) => fs.access(derivedDb))).rejects.toThrow();
     } finally {
       await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed for a brain-only native source without changing the source brain", async () => {
+    const fakeHome = await mkdtemp(path.join(os.tmpdir(), "codexhost-brain-only-"));
+    try {
+      const sourceBrain = nativeBrainDirPath("source-brain-only", fakeHome);
+      await mkdir(sourceBrain, { recursive: true });
+      await writeFile(path.join(sourceBrain, "context.md"), "source native context");
+
+      await expect(
+        cloneNativeDerivedSessionArtifacts({
+          sourceSessionId: "source-brain-only",
+          derivedSessionId: "derived-brain-only",
+          retainedTurnsCount: 1,
+          homedir: fakeHome,
+        }),
+      ).resolves.toBe(false);
+      await expect(
+        import("node:fs/promises").then((fs) =>
+          fs.readFile(path.join(sourceBrain, "context.md"), "utf8"),
+        ),
+      ).resolves.toBe("source native context");
+      await expect(
+        import("node:fs/promises").then((fs) =>
+          fs.access(nativeBrainDirPath("derived-brain-only", fakeHome)),
+        ),
+      ).rejects.toThrow();
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a typed fork failure when a malformed summary schema prevents cleanup", async () => {
+    const fakeHome = await mkdtemp(path.join(os.tmpdir(), "codexhost-summary-schema-"));
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "codexhost-summary-schema-data-"));
+    const sourceId = "source-malformed-summary";
+    try {
+      const { DatabaseSync } = await import("node:sqlite");
+      const sourceDb = nativeConversationDbPath(sourceId, fakeHome);
+      await mkdir(path.dirname(sourceDb), { recursive: true });
+      const db = new DatabaseSync(sourceDb);
+      try {
+        db.exec(`
+          CREATE TABLE trajectory_meta (trajectory_id text primary key, cascade_id text);
+          INSERT INTO trajectory_meta VALUES ('trajectory-source', '${sourceId}');
+          CREATE TABLE steps (idx integer primary key, step_type integer);
+          INSERT INTO steps VALUES (0, 14), (1, 15), (2, 14), (3, 15);
+        `);
+      } finally {
+        db.close();
+      }
+      const summaryDb = new DatabaseSync(
+        path.join(fakeHome, ".gemini", "antigravity-cli", "conversation_summaries.db"),
+      );
+      try {
+        summaryDb.exec("CREATE TABLE incompatible_summary_catalog (id text primary key);");
+      } finally {
+        summaryDb.close();
+      }
+
+      const sourceEnvironment = {
+        CODEXHOST_DATA_DIR: dataDir,
+        CODEXHOST_THREAD_ID: "source-summary-thread",
+        HOME: fakeHome,
+      };
+      const sourceHistory = await AntigravityHistory.open({
+        environment: sourceEnvironment,
+        nativeSessionId: sourceId,
+      });
+      sourceHistory.append({
+        nativeTurnRef: {
+          harnessId: antigravityHarnessId,
+          nativeSessionId: sourceId,
+          nativeTurnKey: "source-turn-1",
+          formatVersion: 1,
+        },
+        checkpoint: {
+          harnessId: antigravityHarnessId,
+          nativeSessionId: sourceId,
+          checkpointId: "source-turn-1",
+          formatVersion: 1,
+        },
+        turnInput: [{ type: "text", text: "source prompt" }],
+        items: [],
+        outcome: { status: "succeeded" },
+      });
+      await sourceHistory.flush();
+
+      const result = await forkAntigravitySession({
+        harnessId: antigravityHarnessId,
+        input: {
+          kind: "fork",
+          cwd: "/synthetic",
+          sourceRef: {
+            harnessId: antigravityHarnessId,
+            nativeSessionId: sourceId,
+            formatVersion: 1,
+          },
+          checkpoint: {
+            harnessId: antigravityHarnessId,
+            nativeSessionId: sourceId,
+            checkpointId: "source-turn-1",
+            formatVersion: 1,
+          },
+          environment: {
+            CODEXHOST_DATA_DIR: dataDir,
+            CODEXHOST_THREAD_ID: "derived-summary-thread",
+            HOME: fakeHome,
+          },
+        },
+        adapterEnvironment: { HOME: fakeHome },
+        sourceSession: {
+          history: sourceHistory,
+          permissionMode: "dangerously-skip-permissions",
+          isActive: false,
+        },
+        createSession: () => {
+          throw new Error("derived Session must not be created after native clone failure");
+        },
+      });
+      expect(result).toMatchObject({
+        ok: false,
+        error: {
+          code: "nativeFailure",
+          message: expect.stringContaining("no such table: conversation_summaries"),
+        },
+      });
+
+      const sourceCheck = new DatabaseSync(sourceDb);
+      try {
+        expect(sourceCheck.prepare("SELECT cascade_id FROM trajectory_meta").get()).toEqual({
+          cascade_id: sourceId,
+        });
+      } finally {
+        sourceCheck.close();
+      }
+      expect(await readdir(path.dirname(sourceDb))).toEqual([`${sourceId}.db`]);
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("verifies a derived native summary and removes it with failed derived resources", async () => {
+    const fakeHome = await mkdtemp(path.join(os.tmpdir(), "codexhost-native-summary-"));
+    try {
+      const { DatabaseSync } = await import("node:sqlite");
+      const sourceId = "source-summary-session";
+      const derivedId = "derived-summary-session";
+      const sourceDb = nativeConversationDbPath(sourceId, fakeHome);
+      await mkdir(path.dirname(sourceDb), { recursive: true });
+      const db = new DatabaseSync(sourceDb);
+      try {
+        db.exec(`
+          CREATE TABLE trajectory_meta (trajectory_id text primary key, cascade_id text);
+          INSERT INTO trajectory_meta VALUES ('trajectory-source', '${sourceId}');
+          CREATE TABLE steps (idx integer primary key, step_type integer);
+          INSERT INTO steps VALUES (0, 14), (1, 15), (2, 14), (3, 15);
+        `);
+      } finally {
+        db.close();
+      }
+
+      const summaryDbPath = path.join(
+        fakeHome,
+        ".gemini",
+        "antigravity-cli",
+        "conversation_summaries.db",
+      );
+      const summaryDb = new DatabaseSync(summaryDbPath);
+      try {
+        summaryDb.exec(`
+          CREATE TABLE conversation_summaries (
+            conversation_id text primary key,
+            step_count integer,
+            title text,
+            last_modified_time text
+          );
+          INSERT INTO conversation_summaries VALUES ('${sourceId}', 4, 'source', '2026-09-12T00:00:00.000Z');
+        `);
+      } finally {
+        summaryDb.close();
+      }
+
+      await expect(cloneNativeConversationDb(sourceId, derivedId, 1, fakeHome)).resolves.toBe(true);
+
+      const derivedSummary = new DatabaseSync(summaryDbPath);
+      try {
+        expect(
+          derivedSummary
+            .prepare(
+              "SELECT conversation_id, step_count FROM conversation_summaries WHERE conversation_id = ?",
+            )
+            .get(derivedId),
+        ).toEqual({ conversation_id: derivedId, step_count: 2 });
+      } finally {
+        derivedSummary.close();
+      }
+
+      await removeNativeDerivedSessionArtifacts(derivedId, fakeHome);
+      await expect(
+        import("node:fs/promises").then((fs) =>
+          fs.access(nativeConversationDbPath(derivedId, fakeHome)),
+        ),
+      ).rejects.toThrow();
+      const cleanedSummary = new DatabaseSync(summaryDbPath);
+      try {
+        expect(
+          cleanedSummary
+            .prepare("SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ?")
+            .get(derivedId),
+        ).toBeUndefined();
+        expect(
+          cleanedSummary
+            .prepare("SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ?")
+            .get(sourceId),
+        ).toEqual({ conversation_id: sourceId });
+      } finally {
+        cleanedSummary.close();
+      }
+    } finally {
+      await rm(fakeHome, { recursive: true, force: true });
+    }
+  });
+
+  it("removes the derived sidecar when opening the derived Session fails", async () => {
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "codexhost-derived-sidecar-"));
+    const sourceEnvironment = {
+      CODEXHOST_DATA_DIR: dataDir,
+      CODEXHOST_THREAD_ID: "source-thread",
+    };
+    try {
+      const sourceHistory = await AntigravityHistory.open({
+        environment: sourceEnvironment,
+        nativeSessionId: "source-sidecar-session",
+      });
+      sourceHistory.append({
+        nativeTurnRef: {
+          harnessId: antigravityHarnessId,
+          nativeSessionId: "source-sidecar-session",
+          nativeTurnKey: "source-turn-1",
+          formatVersion: 1,
+        },
+        checkpoint: {
+          harnessId: antigravityHarnessId,
+          nativeSessionId: "source-sidecar-session",
+          checkpointId: "source-turn-1",
+          formatVersion: 1,
+        },
+        turnInput: [{ type: "text", text: "source" }],
+        items: [],
+        outcome: { status: "succeeded" },
+      });
+      await sourceHistory.flush();
+
+      const result = await forkAntigravitySession({
+        harnessId: antigravityHarnessId,
+        input: {
+          kind: "fork",
+          cwd: "/synthetic",
+          sourceRef: {
+            harnessId: antigravityHarnessId,
+            nativeSessionId: "source-sidecar-session",
+            formatVersion: 1,
+          },
+          checkpoint: {
+            harnessId: antigravityHarnessId,
+            nativeSessionId: "source-sidecar-session",
+            checkpointId: "source-turn-1",
+            formatVersion: 1,
+          },
+          environment: {
+            CODEXHOST_DATA_DIR: dataDir,
+            CODEXHOST_THREAD_ID: "derived-thread",
+          },
+        },
+        adapterEnvironment: {},
+        sourceSession: {
+          history: sourceHistory,
+          permissionMode: "dangerously-skip-permissions",
+          isActive: false,
+        },
+        createSession: () => {
+          throw new Error("fixture Session construction failure");
+        },
+      });
+
+      expect(result).toMatchObject({ ok: false, error: { code: "nativeFailure" } });
+      await expect(
+        import("node:fs/promises").then((fs) =>
+          fs.access(path.join(dataDir, "antigravity-history", "derived-thread.json")),
+        ),
+      ).rejects.toThrow();
+      await expect(
+        import("node:fs/promises").then((fs) =>
+          fs.access(path.join(dataDir, "antigravity-history", "source-thread.json")),
+        ),
+      ).resolves.toBeUndefined();
+    } finally {
+      await rm(dataDir, { recursive: true, force: true });
     }
   });
 

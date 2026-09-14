@@ -49,7 +49,11 @@ import {
   type TurnStartAccepted,
   type TurnStartCommand,
 } from "@codexhost/harness-adapter";
-import { commandInvocation } from "@codexhost/harness-discovery";
+import {
+  commandInvocation,
+  trackOwnedProcessTree,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 import {
   harnessIdSchema,
   harnessModelRefSchema,
@@ -119,6 +123,7 @@ export interface AntigravityAdapterOptions {
 interface ActiveTurn {
   command: TurnStartCommand;
   process: ChildProcessByStdio<Writable, Readable, Readable>;
+  processTree: OwnedProcessTree | null;
   exited: Promise<void>;
   questions: AntigravityQuestionBridge;
   subagents: AntigravitySubagents;
@@ -226,6 +231,7 @@ const CAPABILITIES: HarnessSessionCapabilities = {
     permissionModeScope: "live",
   },
   history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
+  turnControl: { steering: "restart", workModes: ["default"] },
   subagents: { observe: true, readTranscript: true },
 };
 
@@ -494,6 +500,7 @@ class AntigravitySession implements HarnessSession {
   #active: ActiveTurn | null = null;
   #preparingQuestions: Promise<AntigravityQuestionBridge> | null = null;
   #questionCleanup: Promise<void> = Promise.resolve();
+  #closeTask: Promise<void> | null = null;
   #closed = false;
   #model: HarnessModelRef | undefined;
   #nativeRef: NativeSessionRef | undefined;
@@ -697,6 +704,7 @@ class AntigravitySession implements HarnessSession {
       child = spawn(invocation.command, invocation.arguments, {
         cwd: this.#cwd,
         env: environment,
+        detached: process.platform !== "win32",
         windowsHide: true,
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
         stdio: ["pipe", "pipe", "pipe"],
@@ -711,6 +719,15 @@ class AntigravitySession implements HarnessSession {
     const active: ActiveTurn = {
       command,
       process: child,
+      // A self-exiting Windows Turn needs a Job Object to retain descendant
+      // ownership after exit. Do not turn its normal exit into a false fault.
+      processTree:
+        process.platform === "win32"
+          ? null
+          : trackOwnedProcessTree(child, {
+              detached: true,
+              closeTimeoutMs: 2_000,
+            }),
       exited: new Promise<void>((resolve) => child.once("close", () => resolve())),
       questions,
       subagents: new AntigravitySubagents({
@@ -803,11 +820,24 @@ class AntigravitySession implements HarnessSession {
         );
       }
     } catch (error) {
-      child.kill();
+      const stopping = this.#stopProcess(active);
       this.#completeTurn(active, {
         status: "failed",
         error: { code: "nativeFailure", message: errorMessage(error), retryable: true },
       });
+      try {
+        await stopping;
+      } catch (cleanupError) {
+        this.#closed = true;
+        return {
+          ok: false,
+          error: {
+            code: "nativeFailure",
+            message: `Antigravity prompt and cleanup failed: ${errorMessage(error)}; ${errorMessage(cleanupError)}`,
+            retryable: false,
+          },
+        };
+      }
       return {
         ok: false,
         error: { code: "nativeFailure", message: errorMessage(error), retryable: true },
@@ -817,8 +847,12 @@ class AntigravitySession implements HarnessSession {
     return { ok: true, value: { turnId: command.turnId } };
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
+  close(): Promise<void> {
+    this.#closeTask ??= this.#close();
+    return this.#closeTask;
+  }
+
+  async #close(): Promise<void> {
     this.#closed = true;
     const preparing = await this.#preparingQuestions?.catch(() => undefined);
     await preparing?.dispose();
@@ -826,8 +860,9 @@ class AntigravitySession implements HarnessSession {
       const active = this.#active;
       active.cancellationRequested = true;
       await active.subagents.cancel();
-      active.process.kill();
+      const stopping = this.#stopProcess(active);
       this.#completeTurn(active, { status: "cancelled", reason: "Session closed" });
+      await stopping;
     }
     await Promise.all([...this.#subagentObservers].map((observer) => observer.cancel()));
     await this.#questionCleanup;
@@ -864,7 +899,7 @@ class AntigravitySession implements HarnessSession {
             retryable: false,
           },
         });
-        active.process.kill();
+        void this.#stopProcess(active).catch(() => undefined);
         return;
       }
       this.#nativeRef = nativeSessionRefSchema.parse({
@@ -1168,17 +1203,35 @@ class AntigravitySession implements HarnessSession {
   #completeTurn(active: ActiveTurn, outcome: TurnOutcome, nativeTurnRef?: NativeTurnRef): void {
     if (this.#active !== active) return;
     active.questions.stop();
-    this.#questionCleanup = this.#questionCleanup
-      .then(async () => {
-        if (outcome.status !== "succeeded") await active.subagents.cancel();
-        await active.subagents.settled;
-        if (active.process.stdin.writable) active.process.stdin.end();
-        const timer = setTimeout(() => active.process.kill(), 2_000);
-        await active.exited.finally(() => clearTimeout(timer));
-        await active.questions.dispose();
-        this.#subagentObservers.delete(active.subagents);
-      })
-      .catch(() => undefined);
+    this.#questionCleanup = this.#questionCleanup.then(async () => {
+      if (outcome.status !== "succeeded") await active.subagents.cancel();
+      await active.subagents.settled;
+      if (active.process.stdin.writable) active.process.stdin.end();
+      let timer: NodeJS.Timeout | undefined;
+      await Promise.race([
+        active.exited,
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, 2_000);
+        }),
+      ]).finally(() => {
+        if (timer) clearTimeout(timer);
+      });
+      await this.#stopProcess(active);
+      await active.questions.dispose();
+      this.#subagentObservers.delete(active.subagents);
+    });
+    void this.#questionCleanup.catch((error: unknown) => {
+      this.#closed = true;
+      this.#event({
+        type: "session.faulted",
+        error: {
+          code: "nativeFailure",
+          message: `Antigravity resource cleanup failed: ${errorMessage(error)}`,
+          retryable: false,
+        },
+      });
+      this.#channel.end();
+    });
     this.#active = null;
     const itemOutcome: HostItemOutcome =
       outcome.status === "failed"
@@ -1276,8 +1329,27 @@ class AntigravitySession implements HarnessSession {
     active.cancellationRequested = true;
     active.questions.stop();
     await active.subagents.cancel();
-    active.process.kill();
+    try {
+      await this.#stopProcess(active);
+    } catch (error) {
+      this.#closed = true;
+      return {
+        ok: false,
+        error: {
+          code: "nativeFailure",
+          message: `Antigravity cancellation cleanup failed: ${errorMessage(error)}`,
+          retryable: false,
+        },
+      };
+    }
     return { ok: true, value: { cancellationRequested: true } };
+  }
+
+  #stopProcess(active: ActiveTurn): Promise<void> {
+    if (active.processTree) return active.processTree.close();
+    if (active.process.exitCode === null && active.process.signalCode === null)
+      active.process.kill();
+    return Promise.resolve();
   }
 
   #selectModel(command: ModelSelectCommand): HarnessResult<ModelSelectCompleted> {
@@ -1444,6 +1516,7 @@ export class AntigravityAdapter implements HarnessAdapter {
   readonly #sessions = new Set<AntigravitySession>();
   readonly #toolOutputLimit: number;
   #closed = false;
+  #closeTask: Promise<void> | null = null;
   #quota: AntigravityQuotaSnapshot | null = null;
   #quotaCwd: string | null = null;
   #quotaRefresh: Promise<AntigravityQuotaSnapshot | null> | null = null;
@@ -1761,13 +1834,25 @@ export class AntigravityAdapter implements HarnessAdapter {
     return { ok: true, value: session };
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
+  close(): Promise<void> {
+    if (this.#closeTask) return this.#closeTask;
     this.#closed = true;
     this.#inspectionCache.clear();
     this.#quota = null;
     this.#quotaCwd = null;
     this.#quotaAbort.abort();
-    await Promise.all([...this.#sessions].map((session) => session.close()));
+    this.#closeTask = Promise.allSettled(
+      [...this.#sessions].map((session) => session.close()),
+    ).then((results) => {
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (failures.length)
+        throw new AggregateError(
+          failures.map((result) => result.reason),
+          "Antigravity resource cleanup failed",
+        );
+    });
+    return this.#closeTask;
   }
 }

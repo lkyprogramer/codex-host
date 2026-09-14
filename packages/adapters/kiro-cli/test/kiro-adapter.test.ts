@@ -6,7 +6,9 @@ import type {
   HarnessPermissionModeId,
   HarnessThinkingOptionId,
   HostInteraction,
+  HostThreadSnapshot,
 } from "@codexhost/harness-adapter";
+import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import {
   harnessIdSchema,
   hostItemIdSchema,
@@ -81,6 +83,8 @@ class FakeKiroTransport implements KiroAcpTransportLike {
   blockRunTurn = false;
   configResult: unknown;
   runError?: Error;
+  cancelError?: Error;
+  closeError?: Error;
   stopReason = "end_turn";
   extensionResult: unknown = { summary: "VISIBLE_QUERY_RESULT" };
   confirmOpen = true;
@@ -146,6 +150,7 @@ class FakeKiroTransport implements KiroAcpTransportLike {
   }
 
   async cancel(): Promise<void> {
+    if (this.cancelError) throw this.cancelError;
     this.cancelled = true;
   }
 
@@ -161,6 +166,7 @@ class FakeKiroTransport implements KiroAcpTransportLike {
 
   async close(): Promise<void> {
     this.closed = true;
+    if (this.closeError) throw this.closeError;
   }
 }
 
@@ -235,6 +241,120 @@ describe("Kiro regression lifecycle", () => {
     ];
     return fake;
   }
+
+  it("suspends a persisted idle Session and resumes the same native identity", async () => {
+    const transports: FakeKiroTransport[] = [];
+    const adapter = new KiroAdapter(
+      {},
+      {
+        createTransport: () => {
+          const transport = new FakeKiroTransport();
+          transports.push(transport);
+          return transport;
+        },
+        locateSession: async () => null,
+      },
+    );
+    const opened = await adapter.open({ kind: "create", cwd: "/workspace" });
+    if (!opened.ok || !opened.value.resourceLifecycle) throw new Error("Missing idle lifecycle");
+    const session = opened.value;
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const turnId = hostTurnIdSchema.parse("kiro-idle-turn");
+    const terminal = new Promise<void>((resolve) => {
+      void (async () => {
+        for await (const output of session.outputs) {
+          if (
+            output.kind === "event" &&
+            output.event.type === "turn.completed" &&
+            output.event.turnId === turnId
+          ) {
+            resolve();
+          }
+        }
+      })();
+    });
+    await session.execute({
+      type: "turn.start",
+      turnId,
+      input: [{ type: "text", text: "persist me" }],
+    });
+    await terminal;
+    await session.refreshUsage?.();
+
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "kiro-acp-session",
+    });
+    expect(transports[0]?.closed).toBe(true);
+    const nativeRef = session.initialState.nativeRef;
+    if (!nativeRef) throw new Error("Missing Kiro native identity");
+
+    const resumed = await adapter.open({ kind: "resume", cwd: "/workspace", nativeRef });
+    if (!resumed.ok) throw new Error(resumed.error.message);
+    expect(resumed.value.initialState.nativeRef).toEqual(nativeRef);
+    expect(transports[1]?.openCalls[0]).toMatchObject({
+      kind: "resume",
+      sessionId: nativeRef.nativeSessionId,
+    });
+    await resumed.value.close();
+    await adapter.close();
+  });
+
+  it("refuses Kiro suspension before persistence, while active, and after abort", async () => {
+    const fake = new FakeKiroTransport();
+    const adapter = new KiroAdapter({}, { createTransport: () => fake });
+    const opened = await adapter.open({ kind: "create", cwd: "/workspace" });
+    if (!opened.ok || !opened.value.resourceLifecycle) throw new Error("Missing idle lifecycle");
+    const session = opened.value;
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(lifecycle.suspend(aborted.signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+
+    fake.blockRunTurn = true;
+    await session.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("kiro-active-idle-guard"),
+      input: [{ type: "text", text: "still running" }],
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    expect(fake.closed).toBe(false);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("does not report Kiro suspension when ACP cleanup fails", async () => {
+    const fake = new FakeKiroTransport();
+    const adapter = new KiroAdapter({}, { createTransport: () => fake });
+    const opened = await adapter.open({ kind: "create", cwd: "/workspace" });
+    if (!opened.ok || !opened.value.resourceLifecycle) throw new Error("Missing idle lifecycle");
+    const session = opened.value;
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("kiro-cleanup-failure"),
+      input: [{ type: "text", text: "persist me" }],
+    });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await session.refreshUsage?.();
+    fake.closeError = new Error("ACP process group is still alive");
+
+    await expect(lifecycle.suspend(new AbortController().signal)).rejects.toThrow(
+      "ACP process group is still alive",
+    );
+    delete fake.closeError;
+    await expect(adapter.close()).rejects.toThrow("ACP process group is still alive");
+  });
 
   it("selects effort through the picker without a command Turn, and clears it for fixed models", async () => {
     const fake = effortTransport();
@@ -636,6 +756,7 @@ describe("Kiro regression lifecycle", () => {
       const adapter = new KiroAdapter(
         {},
         {
+          inspectInstallation: () => undefined,
           createTransport: (options) => {
             idleUsage = options.onUsage;
             return fake;
@@ -1314,6 +1435,144 @@ describe("Kiro regression lifecycle", () => {
   });
 });
 
+describe("Kiro Adapter conformance", () => {
+  it("records a controlled ACP fixture receipt across create, cancellation, and resume", async () => {
+    const transportOptions: Array<{
+      environment?: NodeJS.ProcessEnv | undefined;
+      cwd: string;
+    }> = [];
+    const transports: FakeKiroTransport[] = [];
+    const snapshots = new Map<string, HostThreadSnapshot>();
+    let adapterNumber = 0;
+
+    const createAdapter = (): KiroAdapter => {
+      adapterNumber += 1;
+      let transportNumber = 0;
+      return new KiroAdapter(
+        { command: "/fake/bin/kiro-cli" },
+        {
+          inspectInstallation: () => undefined,
+          createTransport: (options) => {
+            transportNumber += 1;
+            const fake = new FakeKiroTransport();
+            const nativeSessionId =
+              adapterNumber === 1 && transportNumber === 2
+                ? "kiro-conformance-primary"
+                : `kiro-conformance-${adapterNumber}-${transportNumber}`;
+            fake.sessionId = nativeSessionId;
+            fake.openResult = {
+              ...fake.openResult,
+              sessionId: nativeSessionId,
+              session: { sessionId: nativeSessionId },
+            };
+            let cancelTurn: (() => void) | undefined;
+            let turnOrdinal = 0;
+            fake.runTurn = async (text, onEvent) => {
+              if (text === "fixture cancellable") {
+                await new Promise<void>((resolve) => {
+                  cancelTurn = resolve;
+                });
+                return { stopReason: "cancelled" };
+              }
+              const sessionId = fake.openResult.sessionId;
+              const nativeTurnKey = `${sessionId}-turn-${++turnOrdinal}`;
+              onEvent({
+                type: "usage",
+                update: { sessionUpdate: "session_info_update" },
+                metadata: {
+                  kiro: { kind: "user_message_id_assigned", userMessageId: nativeTurnKey },
+                },
+              });
+              const current = snapshots.get(sessionId) ?? { turns: [] };
+              snapshots.set(sessionId, {
+                ...current,
+                turns: [
+                  ...current.turns,
+                  {
+                    nativeTurnRef: {
+                      harnessId: harnessIdSchema.parse("kiro-cli"),
+                      nativeSessionId: sessionId,
+                      nativeTurnKey,
+                      formatVersion: 1,
+                    },
+                    input: [{ type: "text", text }],
+                    items: [],
+                    outcome: { status: "succeeded" },
+                  },
+                ],
+              });
+              return { stopReason: "end_turn" };
+            };
+            fake.cancel = async () => {
+              fake.cancelled = true;
+              cancelTurn?.();
+            };
+            transportOptions.push(options);
+            transports.push(fake);
+            return fake;
+          },
+          locateSession: async (_options, sessionId) => ({
+            sessionDirectory: "/synthetic/kiro-conformance",
+            cwd: "/synthetic",
+            sessionMeta: { id: sessionId, workspacePaths: ["/synthetic"] },
+          }),
+          readSnapshot: async (location) => snapshots.get(location.sessionMeta.id) ?? { turns: [] },
+        },
+      );
+    };
+
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd: "/synthetic",
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-transport-fixture",
+      },
+      environment: {
+        primary: { CODEXHOST_CONFORMANCE_SCOPE: "primary" },
+        isolated: { CODEXHOST_CONFORMANCE_SCOPE: "isolated" },
+        resume: { CODEXHOST_CONFORMANCE_SCOPE: "resume" },
+      },
+      prompts: {
+        first: "fixture first",
+        cancellable: "fixture cancellable",
+        followup: "fixture followup",
+      },
+      probes: {
+        assertEnvironmentIsolation: async () => {
+          const received = transportOptions
+            .map((options) => options.environment?.CODEXHOST_CONFORMANCE_SCOPE)
+            .filter((value): value is string => value !== undefined);
+          expect(received).toEqual(expect.arrayContaining(["primary", "isolated"]));
+        },
+        readCleanup: async () => ({
+          residue: transports.every((transport) => transport.closed) ? "none" : "present",
+        }),
+      },
+    });
+
+    expect(receipt).toMatchObject({
+      status: "incomplete",
+      harnessId: "kiro-cli",
+      scenarios: {
+        inspect: { status: "passed" },
+        create: { status: "passed" },
+        environmentIsolation: { status: "passed" },
+        firstTurn: { status: "passed" },
+        concurrentTurn: { status: "passed" },
+        cancel: { status: "passed" },
+        resume: { status: "passed" },
+        followup: { status: "passed" },
+        cleanup: { status: "passed" },
+      },
+      cleanup: { residue: "none", nativeReadback: "passed" },
+    });
+  });
+});
+
 describe("KiroAdapter", () => {
   const dummyBin = "/fake/bin/kiro-cli";
 
@@ -1348,9 +1607,48 @@ describe("KiroAdapter", () => {
       await adapter.inspect({ cwd: path.join(process.cwd(), "other-project") });
       expect(createTransport).toHaveBeenCalledTimes(2);
       await adapter.close();
-      await adapter.inspect();
-      expect(createTransport).toHaveBeenCalledTimes(3);
+      await expect(adapter.inspect()).resolves.toMatchObject({
+        status: "unavailable",
+        error: { code: "invalidState" },
+      });
+      expect(createTransport).toHaveBeenCalledTimes(2);
       await adapter.close();
+    });
+
+    it("retains a failed inspection cleanup and reports the sticky failure on Adapter close", async () => {
+      const transport = new FakeKiroTransport();
+      const cleanupFailure = new Error("inspection process group is still alive");
+      let physicalCloseAttempts = 0;
+      let stickyClose: Promise<void> | undefined;
+      const close = vi.spyOn(transport, "close").mockImplementation(() => {
+        if (!stickyClose) {
+          physicalCloseAttempts += 1;
+          stickyClose = Promise.reject(cleanupFailure);
+        }
+        return stickyClose;
+      });
+      const adapter = new KiroAdapter(
+        {},
+        {
+          inspectInstallation: () => undefined,
+          createTransport: () => transport,
+        },
+      );
+
+      await expect(adapter.inspect()).resolves.toMatchObject({
+        status: "unavailable",
+        error: {
+          code: "unavailable",
+          message: "Kiro inspection process cleanup did not complete",
+          retryable: false,
+        },
+      });
+      expect(close).toHaveBeenCalledOnce();
+      expect(physicalCloseAttempts).toBe(1);
+
+      await expect(adapter.close()).rejects.toThrow("inspection process group is still alive");
+      expect(close).toHaveBeenCalledTimes(2);
+      expect(physicalCloseAttempts).toBe(1);
     });
 
     it("refreshes changed native entitlements without blocking cached reads", async () => {
@@ -1599,6 +1897,30 @@ describe("KiroAdapter", () => {
       }
     });
 
+    it("rejects unattended-full-access resume before creating a native transport", async () => {
+      const fakeTransport = new FakeKiroTransport();
+      const adapter = new KiroAdapter(
+        { command: dummyBin },
+        { createTransport: () => fakeTransport },
+      );
+      const nativeRef = nativeSessionRefSchema.parse({
+        harnessId: harnessIdSchema.parse("kiro-cli"),
+        nativeSessionId: "existing-session-456",
+        formatVersion: 1,
+      });
+
+      await expect(
+        adapter.open({
+          kind: "resume",
+          cwd: "/workspace",
+          nativeRef,
+          executionPolicy: "unattended-full-access",
+        }),
+      ).resolves.toMatchObject({ ok: false, error: { code: "unsupported" } });
+      expect(fakeTransport.openCalls).toEqual([]);
+      await adapter.close();
+    });
+
     it("creates a new session and initializes model and autopilot", async () => {
       const fakeTransport = new FakeKiroTransport();
       const adapter = new KiroAdapter(
@@ -1655,6 +1977,41 @@ describe("KiroAdapter", () => {
         autopilot: "on",
       });
     });
+
+    it.each(["create", "resume"] as const)(
+      "rejects an unknown permission mode before native %s side effects",
+      async (kind) => {
+        const fakeTransport = new FakeKiroTransport();
+        const adapter = new KiroAdapter(
+          { command: dummyBin },
+          { createTransport: () => fakeTransport },
+        );
+        const nativeRef = nativeSessionRefSchema.parse({
+          harnessId: harnessIdSchema.parse("kiro-cli"),
+          nativeSessionId: "existing-session-456",
+          formatVersion: 1,
+        });
+
+        const result = await adapter.open(
+          kind === "create"
+            ? {
+                kind,
+                cwd: "/workspace",
+                permissionModeId: "stale-mode" as HarnessPermissionModeId,
+              }
+            : {
+                kind,
+                cwd: "/workspace",
+                nativeRef,
+                permissionModeId: "stale-mode" as HarnessPermissionModeId,
+              },
+        );
+
+        expect(result).toMatchObject({ ok: false, error: { code: "invalidRequest" } });
+        expect(fakeTransport.openCalls).toEqual([]);
+        await adapter.close();
+      },
+    );
 
     it("returns sessionNotFound when source session for fork does not exist", async () => {
       const fakeTransport = new FakeKiroTransport();
@@ -1811,6 +2168,51 @@ describe("KiroAdapter", () => {
         await consume;
         await adapter.close();
       }
+    });
+
+    it("rejects a mismatched or undelivered cancellation without claiming acceptance", async () => {
+      const fakeTransport = new FakeKiroTransport();
+      fakeTransport.blockRunTurn = true;
+      const adapter = new KiroAdapter(
+        { command: dummyBin },
+        { createTransport: () => fakeTransport },
+      );
+      const opened = await adapter.open({ kind: "create", cwd: "/workspace" });
+      if (!opened.ok) throw new Error(opened.error.message);
+      const activeTurnId = hostTurnIdSchema.parse("turn-active");
+      await opened.value.execute({
+        type: "turn.start",
+        turnId: activeTurnId,
+        input: [{ type: "text", text: "Long running task" }],
+      });
+
+      await expect(
+        opened.value.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("other-turn") }),
+      ).resolves.toMatchObject({ ok: false, error: { code: "invalidRequest" } });
+      expect(fakeTransport.cancelled).toBe(false);
+
+      fakeTransport.cancelError = new Error("cancel transport disconnected");
+      await expect(
+        opened.value.execute({ type: "turn.cancel", turnId: activeTurnId }),
+      ).resolves.toMatchObject({ ok: false, error: { code: "nativeFailure" } });
+      expect(fakeTransport.cancelled).toBe(false);
+      await adapter.close();
+    });
+
+    it("does not create a native transport after Adapter close", async () => {
+      const createTransport = vi.fn(() => new FakeKiroTransport());
+      const adapter = new KiroAdapter({ command: dummyBin }, { createTransport });
+
+      await adapter.close();
+      await expect(adapter.open({ kind: "create", cwd: "/workspace" })).resolves.toMatchObject({
+        ok: false,
+        error: { code: "invalidState" },
+      });
+      expect(createTransport).not.toHaveBeenCalled();
+      await expect(adapter.inspect()).resolves.toMatchObject({
+        status: "unavailable",
+        error: { code: "invalidState" },
+      });
     });
 
     it("executes /compact slash command via transport.compact()", async () => {

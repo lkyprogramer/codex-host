@@ -18,10 +18,12 @@ import {
   type HarnessCommandInvocation,
   type HarnessError,
   type HarnessInspection,
+  type HarnessIdleSuspendSignal,
   type HarnessModelRef,
   type HarnessPermissionModeId,
   type HarnessOutput,
   type HarnessResult,
+  type HarnessResourceLifecycle,
   type HarnessSession,
   type HarnessSessionCapabilities,
   type HarnessSessionState,
@@ -490,9 +492,13 @@ class ClaudeHarnessSession implements HarnessSession {
       permissionModeScope: "live",
     },
     history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
+    turnControl: { steering: "restart", workModes: ["default"] },
     subagents: { observe: true, readTranscript: true },
   };
   readonly commands: HarnessCommandCapability;
+  readonly resourceLifecycle: HarnessResourceLifecycle = {
+    suspend: (signal) => this.#suspendIdle(signal),
+  };
   readonly initialState: HarnessSessionState;
   readonly initialUsage = null;
   readonly outputs: AsyncIterable<HarnessOutput>;
@@ -1001,6 +1007,35 @@ class ClaudeHarnessSession implements HarnessSession {
     return this.#closePromise;
   }
 
+  async #suspendIdle(signal: HarnessIdleSuspendSignal) {
+    if (signal.aborted) {
+      return { status: "unknown" as const, reason: "Claude Code idle suspension was aborted" };
+    }
+    if (this.#phase !== "open") {
+      return { status: "unknown" as const, reason: "Claude Code Session is not open" };
+    }
+    if (
+      this.#active ||
+      this.#acceptingTurn ||
+      this.#configurationTask ||
+      this.#readingHistory ||
+      this.#startupTask ||
+      this.#hardCancelTask ||
+      this.#contextRefreshInFlight ||
+      this.#contextRefreshPending ||
+      this.#occupancy.unsettled
+    ) {
+      return {
+        status: "busy" as const,
+        reason: "Claude Code Session still has native work or observation in progress",
+      };
+    }
+    // close() changes the phase synchronously before its first await. That is the
+    // atomic admission boundary for late autonomous SDK segments.
+    await this.close();
+    return { status: "suspended" as const, scope: "claude-sdk-session" };
+  }
+
   async #selectModel(command: ModelSelectCommand): Promise<HarnessResult<ModelSelectCompleted>> {
     if (this.#acceptingTurn || this.#active || this.#configurationTask || this.#readingHistory) {
       return {
@@ -1353,9 +1388,9 @@ class ClaudeHarnessSession implements HarnessSession {
       this.#finishFailed(active, invalidState("Claude Code Session closed during active Turn"));
     this.#phase = "closed";
     this.#channel.end();
-    this.#onClosed();
     if (failures.length > 0)
       throw new AggregateError(failures, "Claude Code Session could not stop safely");
+    this.#onClosed();
   }
 
   #ensureTransport(): Promise<ClaudeTurnTransport> {
@@ -2624,6 +2659,7 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
             permissionModeScope: "live",
           },
           history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
+          turnControl: { steering: "restart", workModes: ["default"] },
           subagents: { observe: true, readTranscript: true },
         },
       };
@@ -2719,15 +2755,16 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         };
       }
     }
+    const hasRequestedExecutionPolicy =
+      input.kind !== "fork" &&
+      (input.permissionModeId !== undefined || input.executionPolicy !== undefined);
     let requestedPermissionModeId =
-      input.kind === "create"
-        ? (input.permissionModeId ??
+      input.kind === "fork"
+        ? CLAUDE_DEFAULT_PERMISSION_MODE_ID
+        : (input.permissionModeId ??
           (input.executionPolicy === "unattended-full-access"
             ? encodeClaudePermissionModeId("auto")
-            : CLAUDE_DEFAULT_PERMISSION_MODE_ID))
-        : input.kind === "rollbackLastTurn" || input.kind === "resume"
-          ? (input.permissionModeId ?? CLAUDE_DEFAULT_PERMISSION_MODE_ID)
-          : CLAUDE_DEFAULT_PERMISSION_MODE_ID;
+            : CLAUDE_DEFAULT_PERMISSION_MODE_ID));
     try {
       decodeClaudePermissionModeId(requestedPermissionModeId);
     } catch {
@@ -2812,8 +2849,8 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
         requestedThinkingOptionId =
           pending.configuration.effectiveThinkingOptionId ?? requestedThinkingOptionId;
         requestedPermissionModeId =
-          input.kind === "resume" && input.permissionModeId
-            ? input.permissionModeId
+          input.kind === "resume" && hasRequestedExecutionPolicy
+            ? requestedPermissionModeId
             : (pending.configuration.effectivePermissionModeId ?? requestedPermissionModeId);
       } catch {
         return {

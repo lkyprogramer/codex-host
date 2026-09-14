@@ -35,6 +35,7 @@ import {
   type HostItemOutcome,
   type HostItemSnapshot,
   type HostReasoningItem,
+  type HostSubagentState,
   type HostThreadSnapshot,
   type HostUsage,
   type InspectHarnessInput,
@@ -180,6 +181,7 @@ export interface GrokAcpTransportLike {
   setSessionMode?(modeId: string): Promise<void>;
   interject?(text: string, interjectionId: string): Promise<{ queued: boolean }>;
   onModeChange?(listener: ((modeId: string) => void) | null): void;
+  onSessionEvent?(listener: ((event: GrokTransportEvent) => void) | null): void;
   cancel(): Promise<void>;
   close(): Promise<void>;
   ownedProcess?(): { pid: number; pgid: number; startedAtMs: number } | null;
@@ -244,6 +246,7 @@ function capabilitiesForModels(modelState: GrokModelState): HarnessSessionCapabi
       permissionModeScope: "atCreate",
     },
     history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
+    turnControl: { steering: "native", workModes: ["default", "plan"] },
     subagents: { observe: true, readTranscript: true },
   };
 }
@@ -346,6 +349,7 @@ class GrokHarnessSession implements HarnessSession {
   readonly #snapshot: HostThreadSnapshot;
   readonly #toolOutputLimit: number;
   readonly #transport: GrokAcpTransportLike;
+  readonly #backgroundSubagents = new Map<string, HostSubagentState>();
   #active: ActiveTurn | null = null;
   #closePromise: Promise<void> | null = null;
   #configuring = false;
@@ -417,19 +421,21 @@ class GrokHarnessSession implements HarnessSession {
       events: [...opened.replay, ...options.history],
     });
     this.#currentModeId = this.#modes.currentModeId;
-    const session = this;
-    this.workMode = {
-      get current(): HarnessWorkMode | null {
-        return hostWorkModeForNativeId(session.#modes.availableModes, session.#currentModeId);
+    this.workMode = Object.defineProperty(
+      { set: (mode: HarnessWorkMode) => this.#setWorkMode(mode) },
+      "current",
+      {
+        enumerable: true,
+        get: () => hostWorkModeForNativeId(this.#modes.availableModes, this.#currentModeId),
       },
-      set: (mode) => session.#setWorkMode(mode),
-    };
+    ) as HarnessWorkModeControl;
     this.steering = {
-      interject: (input) => session.#interject(input),
+      interject: (input) => this.#interject(input),
     };
     this.#transport.onModeChange?.((modeId) => {
-      session.#currentModeId = modeId;
+      this.#currentModeId = modeId;
     });
+    this.#transport.onSessionEvent?.((event) => this.#handleSessionEvent(event));
   }
 
   currentConfiguration(): {
@@ -1060,6 +1066,44 @@ class GrokHarnessSession implements HarnessSession {
     } else if (event.type === "usage" || event.type === "turn.completed") return;
   }
 
+  #handleSessionEvent(event: GrokTransportEvent): void {
+    if (this.#phase !== "open") return;
+    if (event.type === "subagent.spawned") {
+      const existing = this.#backgroundSubagents.get(event.nativeSubagentId);
+      const role = event.role ?? existing?.role;
+      const model = event.model ?? existing?.model;
+      const subagent: HostSubagentState = {
+        subagentId: event.nativeSubagentId,
+        nativeSubagentId: event.nativeSubagentId,
+        description: event.description ?? existing?.description ?? "Grok Subagent",
+        ...(role ? { role } : {}),
+        ...(model ? { model } : {}),
+        background: existing?.background ?? true,
+        status: "running",
+      };
+      this.#backgroundSubagents.set(event.nativeSubagentId, subagent);
+      this.#event({
+        type: "subagent.state.changed",
+        nativeSubagentId: event.nativeSubagentId,
+        status: "running",
+      });
+      this.#event({
+        type: "subagent.transcript.changed",
+        nativeSubagentId: event.nativeSubagentId,
+      });
+      return;
+    }
+    if (event.type !== "subagent.finished") return;
+    this.#backgroundSubagents.delete(event.nativeSubagentId);
+    this.#event({
+      type: "subagent.state.changed",
+      nativeSubagentId: event.nativeSubagentId,
+      status: event.status,
+      ...(event.resultSummary ? { resultSummary: event.resultSummary } : {}),
+    });
+    this.#event({ type: "subagent.transcript.changed", nativeSubagentId: event.nativeSubagentId });
+  }
+
   #startCompaction(
     active: ActiveTurn,
     event: Extract<GrokTransportEvent, { type: "compaction.started" }>,
@@ -1495,6 +1539,13 @@ class GrokHarnessSession implements HarnessSession {
     const itemOutcome: HostItemOutcome = outcome;
     this.#completeReasoning(active, itemOutcome);
     this.#completeAgent(active, itemOutcome);
+    if (outcome.status === "succeeded") {
+      for (const subagent of active.subagents.runningBackgroundSubagents()) {
+        if (subagent.nativeSubagentId) {
+          this.#backgroundSubagents.set(subagent.nativeSubagentId, subagent);
+        }
+      }
+    }
     active.subagents.finalize(active.command.turnId, itemOutcome);
     if (active.compactionItem) {
       this.#completeItem(active, active.compactionItem, itemOutcome);
@@ -1749,15 +1800,16 @@ export class GrokAdapter implements HarnessAdapter {
         ok: false,
         error: { code: "invalidRequest", message: "Grok Adapter requires cwd", retryable: false },
       };
+    const hasRequestedExecutionPolicy =
+      input.kind !== "fork" &&
+      (input.permissionModeId !== undefined || input.executionPolicy !== undefined);
     const requestedPermissionModeId =
-      input.kind === "create"
-        ? (input.permissionModeId ??
+      input.kind === "fork"
+        ? GROK_DEFAULT_PERMISSION_MODE_ID
+        : (input.permissionModeId ??
           (input.executionPolicy === "unattended-full-access"
             ? harnessPermissionModeIdSchema.parse("always-approve")
-            : GROK_DEFAULT_PERMISSION_MODE_ID))
-        : input.kind === "resume"
-          ? (input.permissionModeId ?? GROK_DEFAULT_PERMISSION_MODE_ID)
-          : GROK_DEFAULT_PERMISSION_MODE_ID;
+            : GROK_DEFAULT_PERMISSION_MODE_ID));
     try {
       decodeGrokPermissionModeId(requestedPermissionModeId);
     } catch {
@@ -1784,7 +1836,7 @@ export class GrokAdapter implements HarnessAdapter {
       };
     }
     let session: GrokHarnessSession | null = null;
-    const transport = this.#createTransport(
+    let transport = this.#createTransport(
       cwd,
       (error) => session?.handleTransportFault(error),
       input.environment,
@@ -1796,6 +1848,10 @@ export class GrokAdapter implements HarnessAdapter {
           permissionModeId?: HarnessPermissionModeId;
         }
       | undefined;
+    // A Fork is still private to this open attempt until the Session wrapper is
+    // returned to Host. If model restoration or snapshot setup fails, remove the
+    // derived Native resource; never compensate by changing the source Session.
+    let derivedSessionIdForCleanup: string | undefined;
     let initialPermissionModeId = requestedPermissionModeId;
     try {
       let opened: GrokOpenResult | undefined;
@@ -1823,18 +1879,39 @@ export class GrokAdapter implements HarnessAdapter {
           sourceRef: sourceRef.data,
           locateSource: (sessionId) => transport.locateSession(sessionId),
           readHistory: (historyCwd, sessionId) => transport.readHistory(sessionId, historyCwd),
-          rewindAndLoad: async (params) => {
+          forkAndLoad: async (params) => {
             opened = await transport.open({
-              kind: "rewind",
-              sessionId: params.sessionId,
+              kind: "fork",
+              sourceSessionId: params.sourceSessionId,
+              sourceCwd: params.sourceCwd,
               targetPromptIndex: params.targetPromptIndex,
+              ...(params.sessionKind ? { sessionKind: params.sessionKind } : {}),
+              ...(params.sourceWorkspaceDir
+                ? { sourceWorkspaceDir: params.sourceWorkspaceDir }
+                : {}),
             });
             return { sessionId: opened.sessionId };
           },
+          deleteSession: async (_historyCwd, sessionId) => transport.deleteSession(sessionId),
         });
         if (!rewound.ok) {
           await transport.close().catch(() => undefined);
           return rewound;
+        }
+        derivedSessionIdForCleanup = opened?.sessionId;
+        if (hasRequestedExecutionPolicy && opened) {
+          const derivedSessionId = opened.sessionId;
+          await transport.close();
+          transport = this.#createTransport(
+            cwd,
+            (error) => session?.handleTransportFault(error),
+            input.environment,
+          );
+          opened = await transport.open({
+            kind: "resume",
+            sessionId: derivedSessionId,
+            permissionModeId: requestedPermissionModeId,
+          });
         }
       } else if (input.kind === "fork") {
         const sourceSession = [...this.#sessions].find(
@@ -1869,6 +1946,7 @@ export class GrokAdapter implements HarnessAdapter {
           await transport.close().catch(() => undefined);
           return forked;
         }
+        derivedSessionIdForCleanup = opened?.sessionId;
       } else {
         opened = await transport.open(
           parsedRef?.success
@@ -1892,7 +1970,7 @@ export class GrokAdapter implements HarnessAdapter {
             code: "nativeFailure",
             message:
               input.kind === "rollbackLastTurn"
-                ? "Grok Native Rewind did not open a Session"
+                ? "Grok Native rollback Fork did not open a Session"
                 : "Grok Native Fork did not open a Session",
             retryable: true,
           },
@@ -1905,9 +1983,11 @@ export class GrokAdapter implements HarnessAdapter {
         throw new GrokTransportError("protocolError", "Grok returned an invalid Model catalog");
       const retainedConfiguration = sourceConfiguration;
       if ((input.kind === "rollbackLastTurn" || input.kind === "fork") && retainedConfiguration) {
-        const operation = input.kind === "rollbackLastTurn" ? "Rewind" : "Fork";
+        const operation = input.kind === "rollbackLastTurn" ? "Rollback Fork" : "Fork";
         initialPermissionModeId =
-          retainedConfiguration.permissionModeId ?? GROK_DEFAULT_PERMISSION_MODE_ID;
+          input.kind === "rollbackLastTurn" && hasRequestedExecutionPolicy
+            ? requestedPermissionModeId
+            : (retainedConfiguration.permissionModeId ?? GROK_DEFAULT_PERMISSION_MODE_ID);
         const catalogModel = modelState.catalog.models.find(
           ({ ref }) => ref.id === retainedConfiguration.model.id,
         );
@@ -2002,9 +2082,13 @@ export class GrokAdapter implements HarnessAdapter {
       );
       session = openedSession;
       this.#sessions.add(openedSession);
+      derivedSessionIdForCleanup = undefined;
       this.#scheduleCreditsRefresh();
       return { ok: true, value: openedSession };
     } catch (error) {
+      if (derivedSessionIdForCleanup) {
+        await transport.deleteSession(derivedSessionIdForCleanup).catch(() => undefined);
+      }
       await transport.close().catch(() => undefined);
       return { ok: false, error: normalizeError(error, "unavailable") };
     }

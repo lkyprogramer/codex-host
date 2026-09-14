@@ -77,7 +77,7 @@ export function grokSessionModesOrNative(
     parsed?.currentModeId ??
     parseAcpCurrentModeId(session) ??
     lastModeIdFromEvents(options.events ?? []) ??
-    (options.restore ? null : GROK_NATIVE_WORK_MODES[0]!.id);
+    (options.restore ? null : (GROK_NATIVE_WORK_MODES[0]?.id ?? null));
   return { currentModeId, availableModes };
 }
 

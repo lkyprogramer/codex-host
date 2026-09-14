@@ -3,6 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import type { HarnessOutput, HostEvent } from "@codexhost/harness-adapter";
+import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import {
   accountCreditsSnapshotSchema,
   harnessModelRefSchema,
@@ -11,7 +12,7 @@ import {
   hostTurnIdSchema,
   nativeSessionRefSchema,
 } from "@codexhost/shared-contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   ANTIGRAVITY_WORKSPACE_FILE_INSTRUCTION,
@@ -117,6 +118,25 @@ const FAKE_MODELS = [
 ] as const;
 
 describe("Antigravity Adapter", () => {
+  it("keeps Adapter cleanup failure observable on subsequent close calls", async () => {
+    const fixture = await fakeAgy(FAKE_MODELS);
+    const adapter = new AntigravityAdapter({ command: fixture.command });
+    const opened = await adapter.open({ kind: "create", cwd: fixture.cwd });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const close = vi
+      .spyOn(opened.value, "close")
+      .mockRejectedValue(new Error("group exit unconfirmed"));
+    try {
+      await expect(adapter.close()).rejects.toThrow("resource cleanup failed");
+      await expect(adapter.close()).rejects.toThrow("resource cleanup failed");
+      expect(close).toHaveBeenCalledOnce();
+    } finally {
+      close.mockRestore();
+      await opened.value.close();
+      await fixture.cleanup();
+    }
+  });
+
   it("reads account quota without a Thread and hides it after native authentication stops returning data", async () => {
     const fixture = await fakeAgy([
       JSON.stringify({ event: "command_result", command: USAGE_COMMAND }),
@@ -599,7 +619,7 @@ describe("Antigravity Adapter", () => {
   });
 
   describe("Session Lifecycle & Tool Streaming", () => {
-    async function fakeStreamingAgy(streamLines: readonly string[]): Promise<{
+    async function fakeAgyScript(scriptContent: string): Promise<{
       command: string;
       cwd: string;
       cleanup(): Promise<void>;
@@ -611,16 +631,6 @@ describe("Antigravity Adapter", () => {
           await rm(target, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
         }
       };
-      const scriptContent = `
-const lines = ${JSON.stringify(streamLines)};
-if (process.argv.includes("models")) {
-  process.stdout.write("gemini-3.7-flash-high\\tGemini 3.7 Flash High\\n");
-  process.exit(0);
-}
-for (const line of lines) {
-  process.stdout.write(line + "\\n");
-}
-`;
       const jsPath = path.join(directory, "agy.cjs");
       await writeFile(jsPath, scriptContent);
       if (process.platform === "win32") {
@@ -634,12 +644,209 @@ for (const line of lines) {
       return { command, cwd, cleanup };
     }
 
+    async function fakeStreamingAgy(streamLines: readonly string[]): Promise<{
+      command: string;
+      cwd: string;
+      cleanup(): Promise<void>;
+    }> {
+      return fakeAgyScript(`
+const lines = ${JSON.stringify(streamLines)};
+if (process.argv.includes("models")) {
+  process.stdout.write("gemini-3.7-flash-high\\tGemini 3.7 Flash High\\n");
+  process.exit(0);
+}
+for (const line of lines) {
+  process.stdout.write(line + "\\n");
+}
+`);
+    }
+
     async function nextEvent(iterator: AsyncIterator<HarnessOutput>): Promise<HostEvent> {
       const result = await iterator.next();
       if (result.done) throw new Error("Output stream ended unexpectedly");
       if (result.value.kind !== "event") throw new Error("Expected an event output");
       return result.value.event;
     }
+
+    it("records an agy native-process fixture conformance receipt", async () => {
+      const dataDir = await mkdtemp(path.join(os.tmpdir(), "codexhost-agy-conformance-data-"));
+      const statusPath = path.join(dataDir, "native-processes.log");
+      const fixture = await fakeAgyScript(`
+const fs = require("node:fs");
+const conversationFlag = process.argv.indexOf("--conversation");
+const resumed = conversationFlag >= 0;
+const marker = process.env.CODEXHOST_CONFORMANCE_ENV ?? "missing";
+const sessionId = resumed ? process.argv[conversationFlag + 1] : "agy-conformance-" + marker;
+const statusPath = process.env.CODEXHOST_CONFORMANCE_STATUS;
+const record = (state) => {
+  if (statusPath) fs.appendFileSync(statusPath, JSON.stringify({ state, pid: process.pid, marker, sessionId }) + "\\n");
+};
+if (process.argv.includes("models")) {
+  process.stdout.write("gemini-3.7-flash-high\\tGemini 3.7 Flash High\\n");
+  process.exit(0);
+}
+if (process.argv.some((arg) => arg.includes("/usage"))) process.exit(0);
+let consumed = false;
+process.on("exit", () => record("exit"));
+process.on("SIGTERM", () => process.exit(0));
+process.stdin.setEncoding("utf8");
+process.stdin.on("data", (chunk) => {
+  if (consumed) return;
+  consumed = true;
+  const prompt = JSON.parse(chunk).message.content;
+  record("start");
+  process.stdout.write(JSON.stringify({
+    event: "init",
+    init: { permission_mode: "dangerously-skip-permissions" },
+    conversation_id: sessionId,
+  }) + "\\n");
+  if (prompt.includes("fixture cancellable")) {
+    setInterval(() => undefined, 1_000);
+    return;
+  }
+  process.stdout.write(JSON.stringify({
+    event: "result",
+    result: {
+      conversation_id: sessionId,
+      status: "SUCCESS",
+      num_turns: resumed ? 2 : 1,
+      response: "fixture native response",
+    },
+  }) + "\\n");
+  process.exit(0);
+});
+`);
+      const primaryEnvironment = {
+        CODEXHOST_DATA_DIR: dataDir,
+        CODEXHOST_THREAD_ID: "conformance-primary",
+        CODEXHOST_CONFORMANCE_ENV: "primary",
+        CODEXHOST_CONFORMANCE_STATUS: statusPath,
+      };
+      try {
+        const receipt = await runAdapterConformance({
+          createAdapter: () => new AntigravityAdapter({ command: fixture.command }),
+          cwd: fixture.cwd,
+          evidence: {
+            hostSha: null,
+            pluginBundleSha256: null,
+            nativeVersion: null,
+            platform: process.platform,
+            mode: "native-process-fixture",
+          },
+          environment: {
+            primary: primaryEnvironment,
+            isolated: {
+              ...primaryEnvironment,
+              CODEXHOST_THREAD_ID: "conformance-isolated",
+              CODEXHOST_CONFORMANCE_ENV: "isolated",
+            },
+            // Antigravity's persisted native history is thread-scoped, so resume
+            // must use the same fixture Thread identity as its source Session.
+            resume: { ...primaryEnvironment, CODEXHOST_CONFORMANCE_ENV: "resume" },
+          },
+          prompts: {
+            first: "fixture first",
+            cancellable: "fixture cancellable",
+            followup: "fixture followup",
+          },
+          probes: {
+            activateIsolated: async (session, output) => {
+              const turnId = hostTurnIdSchema.parse("conformance-isolated");
+              const started = await session.execute({
+                type: "turn.start",
+                turnId,
+                input: [{ type: "text", text: "fixture isolated" }],
+              });
+              if (!started.ok) throw new Error(started.error.message);
+              const terminal = await output.waitForTerminal(turnId);
+              if (terminal.outcome.status !== "succeeded")
+                throw new Error("isolated agy fixture Turn did not succeed");
+            },
+            assertEnvironmentIsolation: async () => {
+              const records = (await readFile(statusPath, "utf8"))
+                .trim()
+                .split("\n")
+                .filter(Boolean)
+                .map(
+                  (line) =>
+                    JSON.parse(line) as {
+                      state: string;
+                      pid: number;
+                      marker: string;
+                      sessionId: string;
+                    },
+                );
+              const primary = records.find(
+                (record) => record.state === "start" && record.marker === "primary",
+              );
+              const isolated = records.find(
+                (record) => record.state === "start" && record.marker === "isolated",
+              );
+              expect(primary).toBeDefined();
+              expect(isolated).toBeDefined();
+              expect(primary?.marker).toBe("primary");
+              expect(isolated?.marker).toBe("isolated");
+              expect(primary?.sessionId).not.toBe(isolated?.sessionId);
+              expect(primary?.pid).not.toBe(isolated?.pid);
+            },
+            readCleanup: async () => {
+              const records = (await readFile(statusPath, "utf8"))
+                .trim()
+                .split("\n")
+                .filter(Boolean)
+                .map((line) => JSON.parse(line) as { state: string; pid: number; marker: string });
+              const started = records.filter((record) => record.state === "start");
+              const exited = new Set(
+                records.filter((record) => record.state === "exit").map((record) => record.pid),
+              );
+              const allExited = started.every((record) => exited.has(record.pid));
+              const observedMarkers = new Set(started.map((record) => record.marker));
+              await rm(dataDir, { recursive: true, force: true });
+              // The cancelled process may be reaped before its Node fixture
+              // receives stdin. Every process that did reach the fixture must
+              // exit, and primary/isolated/resume must be observed separately.
+              return {
+                residue:
+                  allExited &&
+                  ["primary", "isolated", "resume"].every((marker) => observedMarkers.has(marker))
+                    ? "none"
+                    : "present",
+              };
+            },
+          },
+        });
+
+        expect(receipt.status).toBe("incomplete");
+        expect(receipt.environment).toMatchObject({
+          nativeActivation: "executed",
+          nativeIsolationReadback: "passed",
+        });
+        expect(receipt.cleanup).toMatchObject({
+          sessionClose: "passed",
+          adapterClose: "passed",
+          outputTermination: "passed",
+          nativeReadback: "passed",
+          residue: "none",
+        });
+        expect(receipt.scenarios).toMatchObject({
+          inspect: { status: "passed" },
+          create: { status: "passed" },
+          environmentIsolation: { status: "passed" },
+          firstTurn: { status: "passed" },
+          concurrentTurn: { status: "passed" },
+          cancel: { status: "passed" },
+          identityReadback: { status: "passed" },
+          resume: { status: "passed" },
+          followup: { status: "passed" },
+          fork: { status: "notCovered" },
+          rollback: { status: "notCovered" },
+          subagents: { status: "notCovered" },
+        });
+      } finally {
+        await rm(dataDir, { recursive: true, force: true });
+        await fixture.cleanup();
+      }
+    });
 
     it("executes a turn projecting write_to_file, run_command, and agentMessage", async () => {
       const streamLines = [
@@ -901,6 +1108,55 @@ for (const line of lines) {
         await cleanup();
       }
     });
+
+    it.skipIf(process.platform === "win32")(
+      "reclaims an active Turn's TERM-resistant descendant",
+      async () => {
+        const fixture = await fakeAgyScript(`
+if (process.argv.includes("models")) {
+  console.log("gemini-3.7-flash-high\\tGemini 3.7 Flash High"); process.exit(0);
+}
+if (!process.argv.includes("--input-format")) process.exit(0);
+const child = require("node:child_process").spawn(process.execPath, ["-e", 'process.on("SIGTERM",()=>{});console.log("ready");setInterval(()=>{},1000)'], {stdio:["ignore","pipe","ignore"]});
+child.stdout.once("data",()=>{
+  require("node:fs").writeFileSync("owned-fixture.json", JSON.stringify({pid:process.pid,child:child.pid}));
+  console.log(JSON.stringify({event:"init", conversation_id:"conv-owned", init:{permission_mode:"default"}}));
+});
+process.on("SIGTERM",()=>process.exit(0));
+setInterval(()=>{},1000);
+`);
+        const adapter = new AntigravityAdapter({ command: fixture.command });
+        let owned: { pid: number; child: number } | undefined;
+        try {
+          const opened = await adapter.open({ kind: "create", cwd: fixture.cwd });
+          if (!opened.ok) throw new Error(opened.error.message);
+          await opened.value.execute({
+            type: "turn.start",
+            turnId: hostTurnIdSchema.parse("turn-owned"),
+            input: [{ type: "text", text: "fixture" }],
+          });
+          await vi.waitFor(async () => {
+            owned = JSON.parse(
+              await readFile(path.join(fixture.cwd, "owned-fixture.json"), "utf8"),
+            );
+          });
+          await opened.value.close();
+          if (!owned) throw new Error("Owned fixture did not record its process ids");
+          for (const pid of [owned.pid, owned.child]) {
+            expect(() => process.kill(pid, 0)).toThrow();
+          }
+        } finally {
+          await adapter.close();
+          if (owned) {
+            try {
+              process.kill(-owned.pid, "SIGKILL");
+            } catch {}
+          }
+          await fixture.cleanup();
+        }
+      },
+      10_000,
+    );
 
     it("emits turn.completed with cancelled outcome on session close while active", async () => {
       // Stream that does not emit result immediately (simulates long turn)

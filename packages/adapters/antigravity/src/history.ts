@@ -236,6 +236,24 @@ export class AntigravityHistory {
     return history;
   }
 
+  /** Removes a newly derived sidecar only when it still belongs to that Native Session. */
+  static async removeDerived(input: {
+    environment: NodeJS.ProcessEnv;
+    nativeSessionId: string;
+  }): Promise<void> {
+    const file = historyPath(input.environment);
+    if (!file) return;
+    try {
+      const parsed = historySchema.safeParse(JSON.parse(await readFile(file, "utf8")));
+      if (parsed.success && parsed.data.nativeSessionId === input.nativeSessionId) {
+        await rm(file, { force: true });
+      }
+    } catch {
+      // The sidecar is absent, malformed, or has already been superseded. It
+      // cannot be attributed safely to this derived Native Session.
+    }
+  }
+
   static async findByNativeSessionId(
     environment: NodeJS.ProcessEnv,
     nativeSessionId: string,

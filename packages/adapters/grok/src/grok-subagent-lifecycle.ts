@@ -61,6 +61,15 @@ export class GrokSubagentLifecycle {
     return this.#delegations.get(callId)?.item.subagents[0]?.nativeSubagentId;
   }
 
+  runningBackgroundSubagents(): HostSubagentState[] {
+    const subagents: HostSubagentState[] = [];
+    for (const active of this.#delegations.values()) {
+      const current = active.item.subagents[0];
+      if (current?.background && current.status === "running") subagents.push(current);
+    }
+    return subagents;
+  }
+
   start(turnId: HostTurnId, input: GrokSubagentStartInput): HostSubagentState {
     if (this.#delegations.has(input.callId)) {
       throw new Error("Grok Subagent delegation started more than once");

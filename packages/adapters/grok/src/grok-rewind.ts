@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+
 import path from "node:path";
 
 import type { HarnessError, HarnessResult, HostThreadSnapshot } from "@codexhost/harness-adapter";
@@ -8,7 +10,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import type { GrokNativeSessionLocation, GrokTransportEvent } from "./acp-transport.js";
-import { isGrokMethodNotFound } from "./grok-fork.js";
+import { buildGrokForkParams, isGrokMethodNotFound, type GrokForkParams } from "./grok-fork.js";
 import { mapGrokReplay, resolveGrokLastTurnPromptIndex } from "./grok-history.js";
 
 export const GROK_REWIND_EXECUTE_METHOD = "_x.ai/rewind/execute";
@@ -34,7 +36,8 @@ export interface GrokRewindInput {
   harnessId: HarnessId;
   locateSource(sessionId: string): Promise<GrokNativeSessionLocation | null>;
   readHistory(cwd: string, sessionId: string): Promise<GrokTransportEvent[]>;
-  rewindAndLoad(params: GrokRewindParams): Promise<{ sessionId: string }>;
+  forkAndLoad(params: GrokForkParams): Promise<{ sessionId: string }>;
+  deleteSession(cwd: string, sessionId: string): Promise<void>;
   sourceRef: NativeSessionRef;
 }
 
@@ -155,21 +158,33 @@ export async function rewindGrokLastTurn(
 
   let sessionId: string;
   try {
-    const rewound = await input.rewindAndLoad(
-      buildGrokRewindParams({
-        sessionId: sourceRef.data.nativeSessionId,
+    // Rewind mutates the source conversation in place. A failed Host commit can
+    // then leave the Native history behind a mapping which still points at the
+    // original last Turn. Forking produces an independently verifiable result,
+    // so the source remains authoritative until the caller commits the replacement.
+    const forked = await input.forkAndLoad(
+      buildGrokForkParams({
+        sourceSessionId: sourceRef.data.nativeSessionId,
+        sourceCwd,
+        newCwd: targetCwd,
         targetPromptIndex,
+        sessionKind: "fork",
       }),
     );
-    if (rewound.sessionId !== sourceRef.data.nativeSessionId) {
-      throw new Error("Grok Rewind returned a different Session identity");
+    const derivedRef = nativeSessionRefSchema.safeParse({
+      harnessId: input.harnessId,
+      nativeSessionId: forked.sessionId,
+      formatVersion: 1,
+    });
+    if (!derivedRef.success || derivedRef.data.nativeSessionId === sourceRef.data.nativeSessionId) {
+      throw new Error("Grok rollback Fork returned an invalid Session identity");
     }
-    sessionId = rewound.sessionId;
+    sessionId = derivedRef.data.nativeSessionId;
   } catch (caught) {
     if (isGrokMethodNotFound(caught)) {
       return {
         ok: false,
-        error: error("unsupported", "Grok ACP does not support Session Rewind"),
+        error: error("unsupported", "Grok ACP does not support Session Fork for rollback"),
       };
     }
     const message = caught instanceof Error ? caught.message : String(caught);
@@ -177,27 +192,51 @@ export async function rewindGrokLastTurn(
       ok: false,
       error: error(
         "nativeFailure",
-        message.includes("Rewind") ? message : "Grok Native Rewind failed",
+        message.includes("Fork") ? message : "Grok Native rollback Fork failed",
         true,
       ),
     };
   }
 
-  const derived = await readSnapshot({ ...input, cwd: targetCwd }, sessionId);
-  if (!derived.ok) return derived;
+  const cleanup = async (): Promise<string | null> => {
+    try {
+      await input.deleteSession(targetCwd, sessionId);
+      return null;
+    } catch {
+      return "Grok rollback Fork cleanup failed";
+    }
+  };
+  const failAfterCleanup = async <T>(result: HarnessResult<T>): Promise<HarnessResult<T>> => {
+    const cleanupFailure = await cleanup();
+    if (cleanupFailure) {
+      return {
+        ok: false,
+        error: error("nativeFailure", cleanupFailure, true),
+      };
+    }
+    return result;
+  };
+
+  const [derived, sourceAfter] = await Promise.all([
+    readSnapshot({ ...input, cwd: targetCwd }, sessionId),
+    readSnapshot({ ...input, cwd: sourceCwd }, sourceRef.data.nativeSessionId),
+  ]);
+  if (!derived.ok) return failAfterCleanup(derived);
+  if (!sourceAfter.ok) return failAfterCleanup(sourceAfter);
   const expectedKeys = source.value.turns
     .slice(0, -1)
     .map((turn) => turn.nativeTurnRef.nativeTurnKey);
   const actualKeys = derived.value.turns.map((turn) => turn.nativeTurnRef.nativeTurnKey);
   if (
+    !isDeepStrictEqual(sourceAfter.value.turns, source.value.turns) ||
     derived.value.turns.length !== source.value.turns.length - 1 ||
     actualKeys.some((key, index) => key !== expectedKeys[index]) ||
     derived.value.turns.some((turn) => turn.nativeTurnRef.nativeSessionId !== sessionId)
   ) {
-    return {
+    return failAfterCleanup({
       ok: false,
-      error: error("protocolError", "Grok Native Rewind history is invalid"),
-    };
+      error: error("protocolError", "Grok Native rollback Fork history is invalid"),
+    });
   }
 
   return { ok: true, value: { sessionId } };

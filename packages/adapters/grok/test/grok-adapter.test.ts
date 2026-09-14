@@ -4,6 +4,10 @@ import type {
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import type { HarnessOutput } from "@codexhost/harness-adapter";
+import {
+  runAdapterConformance,
+  serializeConformanceReceipt,
+} from "@codexhost/harness-adapter/conformance";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path, { resolve } from "node:path";
@@ -26,6 +30,7 @@ import {
   GROK_SESSION_FORK_METHOD,
   parseGrokInterjectResponse,
   type GrokAcpTransportLike,
+  type GrokAcpTransportOptions,
   type GrokOpenInput,
   type GrokOpenResult,
   type GrokPermissionRequest,
@@ -60,7 +65,11 @@ class FakeGrokTransport implements GrokAcpTransportLike {
   sessionId = "grok-session";
   readonly openCalls: GrokOpenInput[] = [];
   readonly compactCalls: Array<string | undefined> = [];
-  readonly cancel = vi.fn(async () => undefined);
+  autoCompletePrompt: ((text: string) => PromptResponse | undefined) | undefined;
+  autoSettleCancellation = false;
+  readonly cancel = vi.fn(async () => {
+    if (this.autoSettleCancellation) this.finish({ stopReason: "cancelled" });
+  });
   readonly close = vi.fn(async () => undefined);
   readonly setModel = vi.fn(async () => undefined);
   readonly setSessionMode = vi.fn(async (modeId: string) => {
@@ -80,8 +89,12 @@ class FakeGrokTransport implements GrokAcpTransportLike {
   } | null = null;
   currentModeId: string | null = null;
   #modeListener: ((modeId: string) => void) | null = null;
+  #sessionEventListener: ((event: GrokTransportEvent) => void) | null = null;
   onModeChange(listener: ((modeId: string) => void) | null): void {
     this.#modeListener = listener;
+  }
+  onSessionEvent(listener: ((event: GrokTransportEvent) => void) | null): void {
+    this.#sessionEventListener = listener;
   }
   readonly deleteSession = vi.fn(async (sessionId: string) => {
     this.histories.delete(sessionId);
@@ -189,14 +202,21 @@ class FakeGrokTransport implements GrokAcpTransportLike {
     this.#activePromptEvents = [];
     this.#onEvent = onEvent;
     this.#onPermission = onPermission;
-    return new Promise((resolve) => {
+    const pending = new Promise<PromptResponse>((resolve) => {
       this.#resolve = resolve;
     });
+    const response = this.autoCompletePrompt?.(text);
+    if (response) queueMicrotask(() => this.finish(response));
+    return pending;
   }
 
   event(event: GrokTransportEvent): void {
     this.#activePromptEvents.push(event);
     this.#onEvent?.(event);
+  }
+
+  sessionEvent(event: GrokTransportEvent): void {
+    this.#sessionEventListener?.(event);
   }
 
   compactEvent(event: GrokTransportEvent): void {
@@ -255,6 +275,7 @@ class FakeGrokTransport implements GrokAcpTransportLike {
         },
       );
     }
+    this.histories.set(this.sessionId, [...this.replay]);
     this.#activePromptText = null;
     this.#activePromptEvents = [];
     this.#resolve?.(response);
@@ -343,6 +364,99 @@ describe("Grok Adapter ACP projection", () => {
     );
     await adapter.close();
   });
+
+  it("records an ACP native-fixture conformance receipt across create, cancel, and resume", async () => {
+    const transportOptions: GrokAcpTransportOptions[] = [];
+    const transports: FakeGrokTransport[] = [];
+    const histories = new Map<string, GrokTransportEvent[]>();
+    let adapterNumber = 0;
+    const createAdapter = (): GrokAdapter => {
+      let uuid = 0;
+      adapterNumber += 1;
+      return new GrokAdapter(
+        {},
+        {
+          randomUUID: () => `grok-conformance-${adapterNumber}-${++uuid}`,
+          createTransport: (options) => {
+            transportOptions.push(options);
+            const transport = new FakeGrokTransport();
+            transport.histories = histories;
+            transport.autoCompletePrompt = (text) =>
+              text === "fixture first" || text === "fixture followup"
+                ? { stopReason: "end_turn" }
+                : undefined;
+            transport.autoSettleCancellation = true;
+            transports.push(transport);
+            return transport;
+          },
+          fetchCredits: async () => null,
+        },
+      );
+    };
+
+    const receipt = await runAdapterConformance({
+      createAdapter,
+      cwd: "/synthetic",
+      evidence: {
+        hostSha: null,
+        pluginBundleSha256: null,
+        nativeVersion: null,
+        platform: process.platform,
+        mode: "native-transport-fixture",
+      },
+      environment: {
+        primary: { CODEXHOST_CONFORMANCE_ENV: "primary" },
+        isolated: { CODEXHOST_CONFORMANCE_ENV: "isolated" },
+        resume: { CODEXHOST_CONFORMANCE_ENV: "resume" },
+      },
+      prompts: {
+        first: "fixture first",
+        cancellable: "fixture cancellable",
+        followup: "fixture followup",
+      },
+      probes: {
+        assertEnvironmentIsolation: async () => {
+          const received = transportOptions
+            .map((options) => options.environment?.CODEXHOST_CONFORMANCE_ENV)
+            .filter((value): value is string => value !== undefined);
+          expect(received).toEqual(expect.arrayContaining(["primary", "isolated"]));
+          expect(received).not.toContain("primary:isolated");
+        },
+        readCleanup: async () => ({
+          residue: transports.every((transport) => transport.close.mock.calls.length === 1)
+            ? "none"
+            : "present",
+        }),
+      },
+    });
+
+    expect(receipt.status).toBe("incomplete");
+    expect(receipt.environment.nativeIsolationReadback).toBe("passed");
+    expect(receipt.cleanup).toMatchObject({
+      sessionClose: "passed",
+      adapterClose: "passed",
+      nativeReadback: "passed",
+      residue: "none",
+    });
+    expect(receipt.scenarios).toMatchObject({
+      inspect: { status: "passed" },
+      create: { status: "passed" },
+      firstTurn: { status: "passed" },
+      concurrentTurn: { status: "passed" },
+      cancel: { status: "passed" },
+      resume: { status: "passed" },
+      followup: { status: "passed" },
+      fork: { status: "notCovered" },
+      rollback: { status: "notCovered" },
+      permissionAtCreate: { status: "notCovered" },
+      subagents: { status: "notCovered" },
+    });
+    expect(JSON.parse(serializeConformanceReceipt(receipt))).toMatchObject({
+      status: "incomplete",
+      mode: "native-transport-fixture",
+    });
+  });
+
   it("reports a single available Grok Model as selectable", async () => {
     const transport = new FakeGrokTransport();
     const adapter = new GrokAdapter(
@@ -400,6 +514,48 @@ describe("Grok Adapter ACP projection", () => {
       permissionModeId: alwaysApprove,
     });
     expect(opened.value.initialState.effectivePermissionModeId).toBe(alwaysApprove);
+    await adapter.close();
+  });
+
+  it("restores unattended execution policy on resume while preserving explicit permission priority", async () => {
+    const transport = new FakeGrokTransport();
+    transport.histories.set("policy-session", []);
+    const adapter = new GrokAdapter(
+      {},
+      {
+        randomUUID: () => "grok-policy",
+        createTransport: () => transport,
+        fetchCredits: async () => null,
+      },
+    );
+    const nativeRef = nativeSessionRefSchema.parse({
+      harnessId: adapter.harnessId,
+      nativeSessionId: "policy-session",
+      formatVersion: 1,
+    });
+
+    const unattended = await adapter.open({
+      kind: "resume",
+      cwd: "/synthetic",
+      nativeRef,
+      executionPolicy: "unattended-full-access",
+    });
+    if (!unattended.ok) throw new Error(unattended.error.message);
+    expect(transport.openCalls.at(-1)).toMatchObject({
+      kind: "resume",
+      permissionModeId: "always-approve",
+    });
+    await unattended.value.close();
+
+    const explicit = await adapter.open({
+      kind: "resume",
+      cwd: "/synthetic",
+      nativeRef,
+      executionPolicy: "unattended-full-access",
+      permissionModeId: harnessPermissionModeIdSchema.parse("ask"),
+    });
+    if (!explicit.ok) throw new Error(explicit.error.message);
+    expect(transport.openCalls.at(-1)).toMatchObject({ kind: "resume", permissionModeId: "ask" });
     await adapter.close();
   });
 
@@ -1850,7 +2006,7 @@ describe("Grok Adapter ACP projection", () => {
     await adapter.close();
   });
 
-  it("rewinds the last Native Turn in place", async () => {
+  it("forks a replacement for last-Turn rollback and preserves the source history", async () => {
     const transport = new FakeGrokTransport();
     const sourceHistory: GrokTransportEvent[] = [
       { type: "user.text", text: "first", metadata: { eventId: "user-1" } },
@@ -1861,11 +2017,9 @@ describe("Grok Adapter ACP projection", () => {
       { type: "turn.completed", nativeTurnKey: "prompt-2", stopReason: "end_turn" },
     ];
     transport.histories.set("source-session", sourceHistory);
-    transport.rewindImpl = async (input) => {
-      transport.histories.set("source-session", [
-        ...sourceHistory,
-        { type: "rewind.marker", targetPromptIndex: input.targetPromptIndex },
-      ]);
+    transport.forkImpl = async () => {
+      transport.histories.set("rollback-session", sourceHistory.slice(0, 3));
+      return { sessionId: "rollback-session" };
     };
     const adapter = new GrokAdapter(
       {},
@@ -1878,6 +2032,7 @@ describe("Grok Adapter ACP projection", () => {
     const opened = await adapter.open({
       kind: "rollbackLastTurn",
       cwd: "/synthetic",
+      executionPolicy: "unattended-full-access",
       sourceRef: nativeSessionRefSchema.parse({
         harnessId: adapter.harnessId,
         nativeSessionId: "source-session",
@@ -1886,7 +2041,7 @@ describe("Grok Adapter ACP projection", () => {
     });
     if (!opened.ok) throw new Error(opened.error.message);
     expect(opened.value.initialState).toMatchObject({
-      nativeRef: { nativeSessionId: "source-session" },
+      nativeRef: { nativeSessionId: "rollback-session" },
     });
     expect(opened.value.capabilities.history).toEqual({
       fork: true,
@@ -1898,20 +2053,32 @@ describe("Grok Adapter ACP projection", () => {
       value: {
         turns: [
           {
-            nativeTurnRef: { nativeSessionId: "source-session", nativeTurnKey: "prompt-1" },
-            checkpoint: { nativeSessionId: "source-session", checkpointId: "0" },
+            nativeTurnRef: { nativeSessionId: "rollback-session", nativeTurnKey: "prompt-1" },
+            checkpoint: { nativeSessionId: "rollback-session", checkpointId: "0" },
             input: [{ text: "first" }],
           },
         ],
       },
     });
-    expect(transport.rewindCalls).toEqual([
-      { kind: "rewind", sessionId: "source-session", targetPromptIndex: 1 },
+    expect(transport.forkCalls).toEqual([
+      {
+        kind: "fork",
+        sourceSessionId: "source-session",
+        sourceCwd: "/synthetic",
+        targetPromptIndex: 1,
+        sessionKind: "fork",
+      },
     ]);
+    expect(transport.openCalls.at(-1)).toMatchObject({
+      kind: "resume",
+      sessionId: "rollback-session",
+      permissionModeId: "always-approve",
+    });
+    expect(transport.histories.get("source-session")).toEqual(sourceHistory);
     await opened.value.close();
   });
 
-  it("restores the source Session Model and Thinking after Rewind", async () => {
+  it("restores the source Session Model and Thinking after rollback Fork", async () => {
     const transport = new FakeGrokTransport();
     const adapter = new GrokAdapter(
       {},
@@ -1938,11 +2105,9 @@ describe("Grok Adapter ACP projection", () => {
     const sourceRef = created.value.initialState.nativeRef;
     if (!sourceRef) throw new Error("Created Session is missing its Native reference");
     transport.histories.set(sourceRef.nativeSessionId, sourceHistory);
-    transport.rewindImpl = async (input) => {
-      transport.histories.set(input.sessionId, [
-        ...sourceHistory,
-        { type: "rewind.marker", targetPromptIndex: input.targetPromptIndex },
-      ]);
+    transport.forkImpl = async () => {
+      transport.histories.set("rollback-session", sourceHistory.slice(0, 3));
+      return { sessionId: "rollback-session" };
     };
     transport.setModel.mockClear();
     const opened = await adapter.open({
@@ -1960,20 +2125,16 @@ describe("Grok Adapter ACP projection", () => {
     await opened.value.close();
   });
 
-  it("rewinds the only Native Turn to empty history", async () => {
+  it("forks an empty history when rolling back the only Native Turn", async () => {
     const transport = new FakeGrokTransport();
     transport.histories.set("source-session", [
       { type: "user.text", text: "only", metadata: { eventId: "user-1" } },
       { type: "agent.text", text: "answer" },
       { type: "turn.completed", nativeTurnKey: "prompt-1", stopReason: "end_turn" },
     ]);
-    transport.rewindImpl = async (input) => {
-      transport.histories.set("source-session", [
-        { type: "user.text", text: "only", metadata: { eventId: "user-1" } },
-        { type: "agent.text", text: "answer" },
-        { type: "turn.completed", nativeTurnKey: "prompt-1", stopReason: "end_turn" },
-        { type: "rewind.marker", targetPromptIndex: input.targetPromptIndex },
-      ]);
+    transport.forkImpl = async () => {
+      transport.histories.set("rollback-session", []);
+      return { sessionId: "rollback-session" };
     };
     const adapter = new GrokAdapter(
       {},
@@ -1997,8 +2158,14 @@ describe("Grok Adapter ACP projection", () => {
       ok: true,
       value: { turns: [] },
     });
-    expect(transport.rewindCalls).toEqual([
-      { kind: "rewind", sessionId: "source-session", targetPromptIndex: 0 },
+    expect(transport.forkCalls).toEqual([
+      {
+        kind: "fork",
+        sourceSessionId: "source-session",
+        sourceCwd: "/synthetic",
+        targetPromptIndex: 0,
+        sessionKind: "fork",
+      },
     ]);
     await opened.value.close();
   });
@@ -2281,7 +2448,7 @@ describe("Grok Adapter ACP projection", () => {
     await adapter.close();
   });
 
-  it("rejects last-Turn Rewind when Grok ACP is missing or history is unchanged", async () => {
+  it("rejects last-Turn rollback when the Fork is unavailable or does not truncate history", async () => {
     const transport = new FakeGrokTransport();
     const sourceHistory: GrokTransportEvent[] = [
       { type: "user.text", text: "first", metadata: { eventId: "user-1" } },
@@ -2311,10 +2478,15 @@ describe("Grok Adapter ACP projection", () => {
     ).resolves.toMatchObject({ ok: false, error: { code: "unsupported" } });
 
     transport.methodNotFound = false;
-    transport.rewindImpl = async () => undefined;
+    transport.forkImpl = async () => {
+      transport.histories.set("invalid-rollback-session", sourceHistory);
+      return { sessionId: "invalid-rollback-session" };
+    };
     await expect(
       adapter.open({ kind: "rollbackLastTurn", cwd: "/synthetic", sourceRef }),
     ).resolves.toMatchObject({ ok: false, error: { code: "protocolError" } });
+    expect(transport.deleteSession).toHaveBeenCalledWith("invalid-rollback-session");
+    expect(transport.histories.get("source-session")).toEqual(sourceHistory);
     await adapter.close();
   });
 
@@ -2560,6 +2732,60 @@ describe("Grok Adapter ACP projection", () => {
     },
   );
 
+  it("publishes a background child terminal update after its parent Turn has completed", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-background-parent");
+
+    await session.execute({
+      type: "turn.start",
+      turnId,
+      input: [{ type: "text", text: "delegate in background" }],
+    });
+    expect((await nextEvent(iterator)).type).toBe("turn.started");
+    transport.event({
+      type: "tool.call",
+      callId: "spawn-background",
+      title: "spawn_subagent",
+      name: "spawn_subagent",
+      rawInput: {
+        subagent_id: "background-child",
+        description: "Inspect after parent terminal",
+        background: true,
+      },
+      status: "completed",
+    });
+
+    // Drain the spawn projection; the parent must complete while the child remains running.
+    expect((await nextEvent(iterator)).type).toBe("item.started");
+    expect((await nextEvent(iterator)).type).toBe("subagent.state.changed");
+    expect((await nextEvent(iterator)).type).toBe("item.updated");
+    expect((await nextEvent(iterator)).type).toBe("subagent.state.changed");
+    transport.finish();
+    while ((await nextEvent(iterator)).type !== "turn.completed") {
+      // The completed parent may first publish the completed spawn item and its running state.
+    }
+
+    transport.sessionEvent({
+      type: "subagent.finished",
+      nativeSubagentId: "background-child",
+      status: "completed",
+      resultSummary: "Inspection finished after parent Turn",
+    });
+    await expect(nextEvent(iterator)).resolves.toMatchObject({
+      type: "subagent.state.changed",
+      nativeSubagentId: "background-child",
+      status: "completed",
+      resultSummary: "Inspection finished after parent Turn",
+    });
+    await expect(nextEvent(iterator)).resolves.toEqual({
+      type: "subagent.transcript.changed",
+      nativeSubagentId: "background-child",
+    });
+    await adapter.close();
+  });
+
   it("reads a Grok Subagent transcript from the child Native Session", async () => {
     const grokHome = await mkdtemp(path.join(os.tmpdir(), "codexhost-grok-subagent-"));
     const cwd = "/workspace";
@@ -2653,10 +2879,12 @@ describe("Grok Adapter ACP projection", () => {
   it("sets Plan before a prompt when session/new omits modes, and does not prompt when mode switch fails", async () => {
     const transport = new FakeGrokTransport();
     const { adapter, session } = await openedSession(transport);
-    expect(session.workMode.current).toBe("default");
-    await expect(session.workMode.set("plan")).resolves.toEqual({ ok: true, value: undefined });
+    const workMode = session.workMode;
+    if (!workMode) throw new Error("Grok Session did not expose work Mode control");
+    expect(workMode.current).toBe("default");
+    await expect(workMode.set("plan")).resolves.toEqual({ ok: true, value: undefined });
     expect(transport.setSessionMode).toHaveBeenCalledWith("plan");
-    expect(session.workMode.current).toBe("plan");
+    expect(workMode.current).toBe("plan");
     const outputs = session.outputs[Symbol.asyncIterator]();
     const turnId = hostTurnIdSchema.parse("turn-plan");
     const started = session.execute({
@@ -2671,20 +2899,22 @@ describe("Grok Adapter ACP projection", () => {
     transport.finish();
     await started;
     transport.setSessionMode.mockRejectedValueOnce(new Error("mode rejected"));
-    await expect(session.workMode.set("default")).resolves.toMatchObject({ ok: false });
+    await expect(workMode.set("default")).resolves.toMatchObject({ ok: false });
     await adapter.close();
   });
 
   it("calls session/set_mode on resume when native current mode is unknown", async () => {
     const transport = new FakeGrokTransport();
     const { adapter, session } = await openedSession(transport, "resume");
-    expect(session.workMode.current).toBeNull();
-    await expect(session.workMode.set("default")).resolves.toEqual({ ok: true, value: undefined });
+    const workMode = session.workMode;
+    if (!workMode) throw new Error("Grok Session did not expose work Mode control");
+    expect(workMode.current).toBeNull();
+    await expect(workMode.set("default")).resolves.toEqual({ ok: true, value: undefined });
     expect(transport.setSessionMode).toHaveBeenCalledWith("default");
     transport.setSessionMode.mockRejectedValueOnce(
       new GrokTransportError("protocolError", "Grok ACP Method Not Found: session/set_mode"),
     );
-    await expect(session.workMode.set("plan")).resolves.toMatchObject({
+    await expect(workMode.set("plan")).resolves.toMatchObject({
       ok: false,
       error: { code: "unsupported" },
     });
@@ -2695,9 +2925,11 @@ describe("Grok Adapter ACP projection", () => {
     const transport = new FakeGrokTransport();
     transport.histories.set(transport.sessionId, [{ type: "mode.update", modeId: "plan" }]);
     const { adapter, session } = await openedSession(transport, "resume");
-    expect(session.workMode.current).toBe("plan");
+    const workMode = session.workMode;
+    if (!workMode) throw new Error("Grok Session did not expose work Mode control");
+    expect(workMode.current).toBe("plan");
     transport.setSessionMode.mockClear();
-    await expect(session.workMode.set("plan")).resolves.toEqual({ ok: true, value: undefined });
+    await expect(workMode.set("plan")).resolves.toEqual({ ok: true, value: undefined });
     expect(transport.setSessionMode).not.toHaveBeenCalled();
     await adapter.close();
   });
@@ -2705,6 +2937,8 @@ describe("Grok Adapter ACP projection", () => {
   it("queues a native interjection on the active Turn and rejects a stale Turn", async () => {
     const transport = new FakeGrokTransport();
     const { adapter, session } = await openedSession(transport);
+    const steering = session.steering;
+    if (!steering) throw new Error("Grok Session did not expose native steering");
     const outputs = session.outputs[Symbol.asyncIterator]();
     const turnId = hostTurnIdSchema.parse("turn-steer");
     const started = session.execute({
@@ -2714,7 +2948,7 @@ describe("Grok Adapter ACP projection", () => {
     });
     await nextEvent(outputs);
     await expect(
-      session.steering.interject({
+      steering.interject({
         expectedTurnId: turnId,
         text: "steer now",
         interjectionId: "inject-1",
@@ -2722,7 +2956,7 @@ describe("Grok Adapter ACP projection", () => {
     ).resolves.toEqual({ ok: true, value: { accepted: true } });
     expect(transport.interject).toHaveBeenCalledWith("steer now", "inject-1");
     await expect(
-      session.steering.interject({
+      steering.interject({
         expectedTurnId: hostTurnIdSchema.parse("other-turn"),
         text: "late",
         interjectionId: "inject-2",

@@ -149,6 +149,9 @@ describe("kiro permission modes", () => {
   it("decodes permission mode to native autopilot on/off switch", () => {
     expect(decodeKiroPermissionMode(harnessPermissionModeIdSchema.parse("autopilot"))).toBe("on");
     expect(decodeKiroPermissionMode(harnessPermissionModeIdSchema.parse("supervised"))).toBe("off");
+    expect(() =>
+      decodeKiroPermissionMode(harnessPermissionModeIdSchema.parse("stale-mode")),
+    ).toThrow("Unknown Kiro permission mode");
   });
 
   it("encodes native value to permission mode id", () => {

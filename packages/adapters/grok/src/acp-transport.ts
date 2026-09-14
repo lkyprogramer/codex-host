@@ -183,6 +183,38 @@ export interface GrokOpenResult {
   replay: GrokTransportEvent[];
   signals?: unknown;
 }
+
+/**
+ * A native Fork creates its derived Session before ACP loads it. Keep cleanup
+ * with the transport that owns that connection so a load failure cannot leave
+ * an orphan for the Adapter layer to discover too late.
+ */
+export async function loadForkedGrokSession<T>(input: {
+  sessionId: string;
+  load(): Promise<T>;
+  deleteSession(): Promise<void>;
+}): Promise<T> {
+  try {
+    return await input.load();
+  } catch (loadError) {
+    try {
+      await input.deleteSession();
+    } catch (cleanupError) {
+      const detail = cleanupError instanceof Error ? cleanupError.message : String(cleanupError);
+      throw new GrokTransportError(
+        "unavailable",
+        `Grok Fork succeeded as ${input.sessionId} but session/load and derived Session cleanup failed`,
+        { cause: loadError, diagnostic: `Derived Session cleanup failed: ${detail}` },
+      );
+    }
+    throw new GrokTransportError(
+      "unavailable",
+      `Grok Fork succeeded as ${input.sessionId} but session/load failed; derived Session was deleted`,
+      { cause: loadError },
+    );
+  }
+}
+
 interface ActivePrompt {
   onEvent(event: GrokTransportEvent): void;
   onPermission(request: GrokPermissionRequest): Promise<RequestPermissionResponse>;
@@ -580,6 +612,7 @@ export class GrokAcpTransport {
   #connection: ClientSideConnection | null = null;
   #initialize: InitializeResponse | null = null;
   #onModeChange: ((modeId: string) => void) | null = null;
+  #onSessionEvent: ((event: GrokTransportEvent) => void) | null = null;
   #replay: GrokTransportEvent[] | null = null;
   #sessionId: string | null = null;
   #startupModelId: string | undefined;
@@ -687,23 +720,28 @@ export class GrokAcpTransport {
           ...(input.sessionKind ? { sessionKind: input.sessionKind } : {}),
           ...(input.sourceWorkspaceDir ? { sourceWorkspaceDir: input.sourceWorkspaceDir } : {}),
         });
-        try {
-          session = await withTimeout(
-            connection.loadSession({
-              cwd: this.#options.cwd,
-              mcpServers: [],
-              sessionId: forked.newSessionId,
-            }),
-            this.#options.commandTimeoutMs,
-            "Grok Session load",
-          );
-        } catch (error) {
-          throw new GrokTransportError(
-            "unavailable",
-            `Grok Fork succeeded as ${forked.newSessionId} but session/load failed`,
-            { cause: error },
-          );
-        }
+        session = await loadForkedGrokSession({
+          sessionId: forked.newSessionId,
+          load: () =>
+            withTimeout(
+              connection.loadSession({
+                cwd: this.#options.cwd,
+                mcpServers: [],
+                sessionId: forked.newSessionId,
+              }),
+              this.#options.commandTimeoutMs,
+              "Grok Session load",
+            ),
+          deleteSession: () =>
+            withTimeout(
+              connection.request(GROK_SESSION_DELETE_METHOD, {
+                sessionId: forked.newSessionId,
+                cwd: this.#options.cwd,
+              }),
+              this.#options.commandTimeoutMs,
+              "Grok derived Session cleanup",
+            ),
+        });
         sessionId = forked.newSessionId;
       } else {
         const permissionMode =
@@ -1118,11 +1156,16 @@ export class GrokAcpTransport {
     if (event.type === "mode.update") this.#onModeChange?.(event.modeId);
     if (this.#replay) this.#replay.push(enriched);
     else if (this.#activePrompt) this.#activePrompt.onEvent(enriched);
-    else this.#activeCompact?.onEvent(enriched);
+    else if (this.#activeCompact) this.#activeCompact.onEvent(enriched);
+    else this.#onSessionEvent?.(enriched);
   }
 
   onModeChange(listener: ((modeId: string) => void) | null): void {
     this.#onModeChange = listener;
+  }
+
+  onSessionEvent(listener: ((event: GrokTransportEvent) => void) | null): void {
+    this.#onSessionEvent = listener;
   }
 
   #handleExtensionNotification(method: string, params: Record<string, unknown>): void {

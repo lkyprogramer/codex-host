@@ -1,9 +1,13 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
-import { commandInvocation } from "@codexhost/harness-discovery";
+import {
+  commandInvocation,
+  trackOwnedProcessTree,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
 import {
@@ -218,28 +222,20 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, operation: st
   });
 }
 
-function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): Promise<boolean> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve(true);
-  return Promise.race([
-    new Promise<boolean>((resolve) => child.once("exit", () => resolve(true))),
-    new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
-  ]);
-}
-
-function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return;
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "ESRCH") throw error;
-  }
+function waitForLeaderExit(
+  child: ChildProcessWithoutNullStreams,
+  timeoutMs: number,
+): Promise<void> {
+  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
+  return new Promise((resolve) => {
+    const finish = (): void => {
+      clearTimeout(timer);
+      child.removeListener("exit", finish);
+      resolve();
+    };
+    const timer = setTimeout(finish, timeoutMs);
+    child.once("exit", finish);
+  });
 }
 
 export class KiroAcpTransport {
@@ -248,8 +244,10 @@ export class KiroAcpTransport {
   readonly #closeTimeoutMs: number;
   #activePrompt: ActivePrompt | null = null;
   #child: ChildProcessWithoutNullStreams | null = null;
+  #ownedProcessTree: OwnedProcessTree | null = null;
   #closed = false;
   #closing = false;
+  #closePromise: Promise<void> | null = null;
   #connection: ClientSideConnection | null = null;
   #initialize: InitializeResponse | null = null;
   #replay: KiroTransportEvent[] | null = null;
@@ -718,6 +716,17 @@ export class KiroAcpTransport {
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
     });
     this.#child = child;
+    this.#ownedProcessTree = trackOwnedProcessTree(child, {
+      detached: process.platform !== "win32",
+      closeTimeoutMs: this.#closeTimeoutMs,
+      onExitCleanupFailure: (error) =>
+        this.#fault(
+          new KiroTransportError(
+            "processExited",
+            `Kiro ACP owned process cleanup failed: ${errorText(error)}`,
+          ),
+        ),
+    });
 
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
@@ -913,26 +922,41 @@ export class KiroAcpTransport {
     this.#options.onFault?.(error);
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
-    this.#closing = true;
+  close(): Promise<void> {
+    if (!this.#closed) {
+      this.#closed = true;
+      this.#closing = true;
+    }
+    this.#closePromise ??= this.#performClose();
+    return this.#closePromise;
+  }
+
+  async #performClose(): Promise<void> {
     for (const listener of this.#configUpdates) listener.cancel();
     this.#configUpdates.clear();
 
     try {
       if (this.#child) {
         const child = this.#child;
-        this.#child = null;
-
-        if (child.stdin && !child.stdin.destroyed) {
-          child.stdin.end();
+        const processTree = this.#ownedProcessTree;
+        if (!processTree) {
+          throw new KiroTransportError("processExited", "Kiro ACP ownership handle is unavailable");
         }
+        if (process.platform === "win32") {
+          await processTree.close();
+        } else {
+          if (child.stdin && !child.stdin.destroyed) {
+            child.stdin.end();
+          }
 
-        const exited = await waitForExit(child, this.#closeTimeoutMs);
-        if (!exited) {
-          signalProcessTree(child, "SIGKILL");
-          await waitForExit(child, 1_000);
+          // A graceful leader exit does not prove that its detached tool group
+          // is empty. Always ask the tracker to verify that group afterwards.
+          await waitForLeaderExit(child, this.#closeTimeoutMs);
+          await processTree.close();
+        }
+        if (this.#child === child) {
+          this.#child = null;
+          this.#ownedProcessTree = null;
         }
       }
     } finally {

@@ -37,6 +37,13 @@ vi.mock("node:child_process", async (original) => ({
   spawn: () => peer.start(),
 }));
 
+// The in-memory ACP peer has no OS PID or detached process group. Model the
+// tracker contract explicitly so this test never attempts to signal a real PID.
+vi.mock("@codexhost/harness-discovery", async (importOriginal) => ({
+  ...(await importOriginal()),
+  trackOwnedProcessTree: () => ({ close: async () => undefined }),
+}));
+
 class NativePeer {
   readonly child = Object.assign(new EventEmitter(), {
     stdin: new PassThrough(),

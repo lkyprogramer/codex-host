@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { copyFile, cp, mkdir } from "node:fs/promises";
+import { access, copyFile, cp, mkdir, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { DatabaseSync as DatabaseSyncType, SQLInputValue } from "node:sqlite";
@@ -25,6 +25,31 @@ export function nativeBrainDirPath(nativeSessionId: string, homedir = os.homedir
   return path.join(homedir, ".gemini", "antigravity-cli", "brain", nativeSessionId);
 }
 
+function nativeConversationSummariesDbPath(homedir: string): string {
+  return path.join(homedir, ".gemini", "antigravity-cli", "conversation_summaries.db");
+}
+
+export function antigravityHomeDirectory(environment: NodeJS.ProcessEnv): string {
+  return environment.HOME?.trim() || environment.USERPROFILE?.trim() || os.homedir();
+}
+
+async function exists(target: string): Promise<boolean> {
+  try {
+    await access(target);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function cleanupFailureDetail(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function appendCleanupDiagnostic(message: string, cleanupDiagnostic: string | undefined): string {
+  return cleanupDiagnostic ? `${message}; derived cleanup failed: ${cleanupDiagnostic}` : message;
+}
+
 export async function cloneNativeConversationDb(
   sourceSessionId: string,
   derivedSessionId: string,
@@ -41,83 +66,99 @@ export async function cloneNativeConversationDb(
 
   const sourceDb = nativeConversationDbPath(sourceSessionId, homedir);
   const targetDb = nativeConversationDbPath(derivedSessionId, homedir);
+  const fail = async (): Promise<boolean> => {
+    await removeNativeDerivedSessionArtifacts(derivedSessionId, homedir);
+    return false;
+  };
   try {
     await mkdir(path.dirname(targetDb), { recursive: true });
     await copyFile(sourceDb, targetDb);
   } catch {
-    return false;
+    return fail();
   }
 
   let DatabaseSync: typeof DatabaseSyncType;
   try {
     ({ DatabaseSync } = await import("node:sqlite"));
   } catch {
-    return false;
+    return fail();
   }
 
   try {
     const db = new DatabaseSync(targetDb);
     try {
+      const trajectory = db.prepare("SELECT cascade_id FROM trajectory_meta LIMIT 1").get() as
+        { cascade_id?: unknown } | undefined;
+      if (!trajectory || typeof trajectory.cascade_id !== "string") {
+        throw new Error("Antigravity Native conversation has no trajectory metadata");
+      }
       db.prepare("UPDATE trajectory_meta SET cascade_id = ?").run(derivedSessionId);
       if (retainedTurnsCount !== undefined) {
-        try {
-          if (retainedTurnsCount === 0) {
-            db.prepare("DELETE FROM steps").run();
-          } else {
-            // In agy, each turn begins with a user_input step (step_type = 14)
-            const rows = db
-              .prepare("SELECT idx FROM steps WHERE step_type = 14 ORDER BY idx ASC")
-              .all() as Array<{ idx: number }>;
-            const cutoff = rows[retainedTurnsCount];
-            if (cutoff) {
-              db.prepare("DELETE FROM steps WHERE idx >= ?").run(cutoff.idx);
-            }
+        if (retainedTurnsCount === 0) {
+          db.prepare("DELETE FROM steps").run();
+        } else {
+          // In agy, each turn begins with a user_input step (step_type = 14).
+          const rows = db
+            .prepare("SELECT idx FROM steps WHERE step_type = 14 ORDER BY idx ASC")
+            .all() as Array<{ idx: number }>;
+          const cutoff = rows[retainedTurnsCount];
+          if (!cutoff || rows.length < retainedTurnsCount) {
+            throw new Error("Antigravity Native conversation cannot retain the requested history");
           }
-        } catch {}
-        try {
-          db.prepare("DELETE FROM gen_metadata WHERE idx >= ?").run(retainedTurnsCount);
-        } catch {}
-        try {
-          db.prepare("DELETE FROM executor_metadata WHERE idx >= ?").run(retainedTurnsCount);
-        } catch {}
-        try {
-          db.prepare("DELETE FROM parent_references WHERE idx >= ?").run(retainedTurnsCount);
-        } catch {}
-        try {
-          db.prepare("DELETE FROM battle_mode_infos WHERE idx >= ?").run(retainedTurnsCount);
-        } catch {}
+          db.prepare("DELETE FROM steps WHERE idx >= ?").run(cutoff.idx);
+        }
+        const retained = db
+          .prepare("SELECT count(*) AS count FROM steps WHERE step_type = 14")
+          .get() as { count?: number } | undefined;
+        if (retained?.count !== retainedTurnsCount) {
+          throw new Error("Antigravity Native conversation history verification failed");
+        }
+        for (const table of [
+          "gen_metadata",
+          "executor_metadata",
+          "parent_references",
+          "battle_mode_infos",
+        ]) {
+          try {
+            db.prepare(`DELETE FROM ${table} WHERE idx >= ?`).run(retainedTurnsCount);
+          } catch {
+            // These tables are version-dependent auxiliary metadata. The core
+            // trajectory and step prefix above are the required clone contract.
+          }
+        }
       }
     } finally {
       db.close();
     }
   } catch {
-    // If table updating fails, ignore
+    return fail();
   }
 
-  // Register in conversation_summaries.db so `agy` trajectory lookup succeeds
+  // Register in conversation_summaries.db so `agy` trajectory lookup succeeds.
   try {
-    const summariesDbPath = path.join(
-      homedir,
-      ".gemini",
-      "antigravity-cli",
-      "conversation_summaries.db",
-    );
+    const summariesDbPath = nativeConversationSummariesDbPath(homedir);
+    // Some supported agy builds create the per-conversation database before
+    // the summaries catalog. When the catalog exists it is part of the clone
+    // transaction and must validate; its absence is not synthesized here.
+    if (!(await exists(summariesDbPath))) return true;
     const sumDb = new DatabaseSync(summariesDbPath);
     try {
       const cur = sumDb.prepare("SELECT * FROM conversation_summaries WHERE conversation_id = ?");
       const row = cur.get(sourceSessionId) as Record<string, unknown> | undefined;
-      if (row) {
+      if (!row) throw new Error("Antigravity Native conversation summary is unavailable");
+      {
         let remainingStepCount = 0;
+        const countDb = new DatabaseSync(targetDb);
         try {
-          const countDb = new DatabaseSync(targetDb);
-          try {
-            const countRow = countDb.prepare("SELECT count(*) as c FROM steps").get() as
-              { c: number } | undefined;
-            if (countRow) remainingStepCount = countRow.c;
-          } finally {
-            countDb.close();
+          const countRow = countDb.prepare("SELECT count(*) as c FROM steps").get() as
+            { c: number } | undefined;
+          if (!countRow || !Number.isSafeInteger(countRow.c)) {
+            throw new Error("Antigravity Native conversation step count is invalid");
           }
-        } catch {}
+          remainingStepCount = countRow.c;
+        } finally {
+          countDb.close();
+        }
 
         const cols = Object.keys(row);
         const newRow: Record<string, unknown> = {
@@ -133,15 +174,21 @@ export async function cloneNativeConversationDb(
             `INSERT OR REPLACE INTO conversation_summaries (${cols.map((c) => `\`${c}\``).join(", ")}) VALUES (${placeholders})`,
           )
           .run(...values);
+        const registered = sumDb
+          .prepare("SELECT conversation_id FROM conversation_summaries WHERE conversation_id = ?")
+          .get(derivedSessionId) as { conversation_id?: unknown } | undefined;
+        if (registered?.conversation_id !== derivedSessionId) {
+          throw new Error("Antigravity Native conversation summary verification failed");
+        }
       }
     } finally {
       sumDb.close();
     }
   } catch {
-    // If summaries registration fails, continue
+    return fail();
   }
 
-  return true;
+  return exists(targetDb);
 }
 
 export const copyNativeConversationDbIfExists = cloneNativeConversationDb;
@@ -162,6 +209,87 @@ export async function copyNativeBrainDirIfExists(
   } catch {
     return false;
   }
+}
+
+export async function removeNativeDerivedSessionArtifacts(
+  nativeSessionId: string,
+  homedir: string,
+): Promise<string | undefined> {
+  const results = await Promise.allSettled([
+    rm(nativeConversationDbPath(nativeSessionId, homedir), { force: true }),
+    rm(nativeBrainDirPath(nativeSessionId, homedir), { recursive: true, force: true }),
+    removeNativeConversationSummary(nativeSessionId, homedir),
+  ]);
+  const diagnostics = results.flatMap((result) =>
+    result.status === "rejected" ? [cleanupFailureDetail(result.reason)] : [],
+  );
+  return diagnostics.length > 0 ? diagnostics.join("; ") : undefined;
+}
+
+export async function cleanupDerivedAntigravitySession(input: {
+  nativeSessionId: string;
+  homedir: string;
+  environment: NodeJS.ProcessEnv;
+}): Promise<string | undefined> {
+  const [nativeCleanup, sidecarCleanup] = await Promise.allSettled([
+    removeNativeDerivedSessionArtifacts(input.nativeSessionId, input.homedir),
+    AntigravityHistory.removeDerived({
+      environment: input.environment,
+      nativeSessionId: input.nativeSessionId,
+    }),
+  ]);
+  const diagnostics: string[] = [];
+  if (nativeCleanup.status === "fulfilled") {
+    if (nativeCleanup.value) diagnostics.push(nativeCleanup.value);
+  } else {
+    diagnostics.push(cleanupFailureDetail(nativeCleanup.reason));
+  }
+  if (sidecarCleanup.status === "rejected") {
+    diagnostics.push(cleanupFailureDetail(sidecarCleanup.reason));
+  }
+  return diagnostics.length > 0 ? diagnostics.join("; ") : undefined;
+}
+
+async function removeNativeConversationSummary(
+  nativeSessionId: string,
+  homedir: string,
+): Promise<void> {
+  const summariesDbPath = nativeConversationSummariesDbPath(homedir);
+  if (!(await exists(summariesDbPath))) return;
+  const { DatabaseSync } = await import("node:sqlite");
+  const db = new DatabaseSync(summariesDbPath);
+  try {
+    db.prepare("DELETE FROM conversation_summaries WHERE conversation_id = ?").run(nativeSessionId);
+  } finally {
+    db.close();
+  }
+}
+
+export async function cloneNativeDerivedSessionArtifacts(input: {
+  sourceSessionId: string;
+  derivedSessionId: string;
+  retainedTurnsCount: number;
+  homedir: string;
+}): Promise<boolean> {
+  const sourceDb = nativeConversationDbPath(input.sourceSessionId, input.homedir);
+  const sourceBrain = nativeBrainDirPath(input.sourceSessionId, input.homedir);
+  const sourceDbExists = await exists(sourceDb);
+  const sourceBrainExists = await exists(sourceBrain);
+  if (!sourceDbExists) return !sourceBrainExists;
+  const copiedDb = await cloneNativeConversationDb(
+    input.sourceSessionId,
+    input.derivedSessionId,
+    input.retainedTurnsCount,
+    input.homedir,
+  );
+  if (!copiedDb) return false;
+  if (!sourceBrainExists) return true;
+  const copiedBrain = await copyNativeBrainDirIfExists(
+    input.sourceSessionId,
+    input.derivedSessionId,
+    input.homedir,
+  );
+  return copiedBrain && (await exists(nativeBrainDirPath(input.derivedSessionId, input.homedir)));
 }
 
 export interface ForkAntigravitySessionOptions {
@@ -292,22 +420,57 @@ export async function forkAntigravitySession(
   const thinkingOptionId = sourceSession?.thinkingOptionId ?? sourceHistory.thinkingOptionId;
   const permissionMode = sourceSession?.permissionMode ?? "dangerously-skip-permissions";
 
-  const forkedHistory = await AntigravityHistory.createDerived({
-    environment: sessionEnvironment,
-    nativeSessionId: derivedNativeSessionId,
-    turns: copiedTurns,
-    ...(model ? { model } : {}),
-    ...(thinkingOptionId ? { thinkingOptionId } : {}),
+  const homedir = antigravityHomeDirectory(sessionEnvironment);
+  const cleanupDerived = (): Promise<string | undefined> =>
+    cleanupDerivedAntigravitySession({
+      nativeSessionId: derivedNativeSessionId,
+      homedir,
+      environment: sessionEnvironment,
+    });
+  const nativeCopied = await cloneNativeDerivedSessionArtifacts({
+    sourceSessionId: sourceRef.nativeSessionId,
+    derivedSessionId: derivedNativeSessionId,
+    retainedTurnsCount: retainedTurns.length,
+    homedir,
   });
+  if (!nativeCopied) {
+    const cleanupDiagnostic = await cleanupDerived();
+    return {
+      ok: false,
+      error: {
+        code: "nativeFailure",
+        message: appendCleanupDiagnostic(
+          "Antigravity Native fork history could not be cloned and verified",
+          cleanupDiagnostic,
+        ),
+        retryable: true,
+      },
+    };
+  }
 
-  await Promise.all([
-    copyNativeConversationDbIfExists(
-      sourceRef.nativeSessionId,
-      derivedNativeSessionId,
-      retainedTurns.length,
-    ),
-    copyNativeBrainDirIfExists(sourceRef.nativeSessionId, derivedNativeSessionId),
-  ]);
+  let forkedHistory: AntigravityHistory;
+  try {
+    forkedHistory = await AntigravityHistory.createDerived({
+      environment: sessionEnvironment,
+      nativeSessionId: derivedNativeSessionId,
+      turns: copiedTurns,
+      ...(model ? { model } : {}),
+      ...(thinkingOptionId ? { thinkingOptionId } : {}),
+    });
+  } catch {
+    const cleanupDiagnostic = await cleanupDerived();
+    return {
+      ok: false,
+      error: {
+        code: "nativeFailure",
+        message: appendCleanupDiagnostic(
+          "Antigravity derived history could not be recorded",
+          cleanupDiagnostic,
+        ),
+        retryable: true,
+      },
+    };
+  }
 
   const derivedNativeRef: NativeSessionRef = {
     harnessId,
@@ -315,15 +478,31 @@ export async function forkAntigravitySession(
     formatVersion: 1,
   };
 
-  const session = createSession({
-    history: forkedHistory,
-    nativeRef: derivedNativeRef,
-    ...(model ? { model } : {}),
-    ...(thinkingOptionId ? { thinkingOptionId } : {}),
-    permissionMode,
-    cwd: input.cwd,
-    environment: sessionEnvironment,
-  });
+  let session: HarnessSession;
+  try {
+    session = createSession({
+      history: forkedHistory,
+      nativeRef: derivedNativeRef,
+      ...(model ? { model } : {}),
+      ...(thinkingOptionId ? { thinkingOptionId } : {}),
+      permissionMode,
+      cwd: input.cwd,
+      environment: sessionEnvironment,
+    });
+  } catch {
+    const cleanupDiagnostic = await cleanupDerived();
+    return {
+      ok: false,
+      error: {
+        code: "nativeFailure",
+        message: appendCleanupDiagnostic(
+          "Antigravity derived Session could not be opened",
+          cleanupDiagnostic,
+        ),
+        retryable: true,
+      },
+    };
+  }
 
   return { ok: true, value: session };
 }

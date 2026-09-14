@@ -382,7 +382,7 @@ describe("Antigravity Rollback Last Turn Capability", () => {
     }
   });
 
-  it("copies native sqlite db file on rollback if present", async () => {
+  it("refuses rollback when the source native sqlite database is invalid", async () => {
     const fakeHome = await mkdtemp(path.join(os.tmpdir(), "codexhost-rb-fakehome-"));
     const dataDir = await mkdtemp(path.join(os.tmpdir(), "codexhost-rb-dbdata-"));
     const { command, cwd, cleanup } = await fakeMultiTurnAgy([]);
@@ -429,12 +429,7 @@ describe("Antigravity Rollback Last Turn Capability", () => {
         },
       });
 
-      expect(rolledBack.ok).toBe(true);
-      if (rolledBack.ok) {
-        const derivedNativeId = rolledBack.value.initialState.nativeRef?.nativeSessionId;
-        expect(derivedNativeId).toBeDefined();
-        await rolledBack.value.close();
-      }
+      expect(rolledBack).toMatchObject({ ok: false, error: { code: "nativeFailure" } });
       await adapter.close();
     } finally {
       await cleanup();

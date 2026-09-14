@@ -13,9 +13,17 @@ import {
   type NativeSessionRef,
 } from "@codexhost/shared-contracts";
 
-import { copyNativeBrainDirIfExists, copyNativeConversationDbIfExists } from "./fork.js";
+import {
+  antigravityHomeDirectory,
+  cleanupDerivedAntigravitySession,
+  cloneNativeDerivedSessionArtifacts,
+} from "./fork.js";
 import { AntigravityHistory, type AntigravityTurn } from "./history.js";
 import type { AntigravityPermissionMode } from "./permission-modes.js";
+
+function withCleanupDiagnostic(message: string, cleanupDiagnostic: string | undefined): string {
+  return cleanupDiagnostic ? `${message}; derived cleanup failed: ${cleanupDiagnostic}` : message;
+}
 
 export interface RollbackAntigravityLastTurnOptions {
   harnessId: HarnessId;
@@ -123,22 +131,57 @@ export async function rollbackAntigravityLastTurn(
   const thinkingOptionId = sourceSession?.thinkingOptionId ?? sourceHistory.thinkingOptionId;
   const permissionMode = sourceSession?.permissionMode ?? "dangerously-skip-permissions";
 
-  const rolledBackHistory = await AntigravityHistory.createDerived({
-    environment: sessionEnvironment,
-    nativeSessionId: derivedNativeSessionId,
-    turns: mappedTurns,
-    ...(model ? { model } : {}),
-    ...(thinkingOptionId ? { thinkingOptionId } : {}),
+  const homedir = antigravityHomeDirectory(sessionEnvironment);
+  const cleanupDerived = (): Promise<string | undefined> =>
+    cleanupDerivedAntigravitySession({
+      nativeSessionId: derivedNativeSessionId,
+      homedir,
+      environment: sessionEnvironment,
+    });
+  const nativeCopied = await cloneNativeDerivedSessionArtifacts({
+    sourceSessionId: sourceRef.nativeSessionId,
+    derivedSessionId: derivedNativeSessionId,
+    retainedTurnsCount: mappedTurns.length,
+    homedir,
   });
+  if (!nativeCopied) {
+    const cleanupDiagnostic = await cleanupDerived();
+    return {
+      ok: false,
+      error: {
+        code: "nativeFailure",
+        message: withCleanupDiagnostic(
+          "Antigravity Native rollback history could not be cloned and verified",
+          cleanupDiagnostic,
+        ),
+        retryable: true,
+      },
+    };
+  }
 
-  await Promise.all([
-    copyNativeConversationDbIfExists(
-      sourceRef.nativeSessionId,
-      derivedNativeSessionId,
-      mappedTurns.length,
-    ),
-    copyNativeBrainDirIfExists(sourceRef.nativeSessionId, derivedNativeSessionId),
-  ]);
+  let rolledBackHistory: AntigravityHistory;
+  try {
+    rolledBackHistory = await AntigravityHistory.createDerived({
+      environment: sessionEnvironment,
+      nativeSessionId: derivedNativeSessionId,
+      turns: mappedTurns,
+      ...(model ? { model } : {}),
+      ...(thinkingOptionId ? { thinkingOptionId } : {}),
+    });
+  } catch {
+    const cleanupDiagnostic = await cleanupDerived();
+    return {
+      ok: false,
+      error: {
+        code: "nativeFailure",
+        message: withCleanupDiagnostic(
+          "Antigravity derived history could not be recorded",
+          cleanupDiagnostic,
+        ),
+        retryable: true,
+      },
+    };
+  }
 
   const derivedNativeRef: NativeSessionRef = {
     harnessId,
@@ -146,15 +189,31 @@ export async function rollbackAntigravityLastTurn(
     formatVersion: 1,
   };
 
-  const session = createSession({
-    history: rolledBackHistory,
-    nativeRef: derivedNativeRef,
-    ...(model ? { model } : {}),
-    ...(thinkingOptionId ? { thinkingOptionId } : {}),
-    permissionMode,
-    cwd: input.cwd,
-    environment: sessionEnvironment,
-  });
+  let session: HarnessSession;
+  try {
+    session = createSession({
+      history: rolledBackHistory,
+      nativeRef: derivedNativeRef,
+      ...(model ? { model } : {}),
+      ...(thinkingOptionId ? { thinkingOptionId } : {}),
+      permissionMode,
+      cwd: input.cwd,
+      environment: sessionEnvironment,
+    });
+  } catch {
+    const cleanupDiagnostic = await cleanupDerived();
+    return {
+      ok: false,
+      error: {
+        code: "nativeFailure",
+        message: withCleanupDiagnostic(
+          "Antigravity derived Session could not be opened",
+          cleanupDiagnostic,
+        ),
+        retryable: true,
+      },
+    };
+  }
 
   return { ok: true, value: session };
 }

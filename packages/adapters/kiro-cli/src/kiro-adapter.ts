@@ -9,10 +9,12 @@ import type {
   HarnessCommandInvocation,
   HarnessError,
   HarnessInspection,
+  HarnessIdleSuspendSignal,
   HarnessModelCatalog,
   HarnessModelRef,
   HarnessOutput,
   HarnessResult,
+  HarnessResourceLifecycle,
   HarnessSession,
   HarnessSessionCapabilities,
   HarnessSessionState,
@@ -90,6 +92,7 @@ import {
   KIRO_PERMISSION_MODE_CATALOG,
   decodeKiroPermissionMode,
   encodeKiroPermissionMode,
+  isKiroPermissionMode,
 } from "./permission-modes.js";
 import {
   projectKiroPermission,
@@ -167,11 +170,14 @@ export class KiroAdapter implements HarnessAdapter {
   readonly #options: KiroAdapterOptions;
   readonly #deps: KiroAdapterDependencies;
   readonly #sessions = new Set<KiroSession>();
+  readonly #inspections = new Set<KiroAcpTransportLike>();
+  readonly #openingTransports = new Set<KiroAcpTransportLike>();
   readonly #inspectionCache = new Map<
     string,
     { result: Extract<HarnessInspection, { status: "ready" }>; refreshAfter: number }
   >();
   readonly #inspectionInFlight = new Map<string, Promise<HarnessInspection>>();
+  #closePromise: Promise<void> | null = null;
 
   constructor(options: KiroAdapterOptions = {}, deps: KiroAdapterDependencies = {}) {
     this.#options = options;
@@ -179,6 +185,16 @@ export class KiroAdapter implements HarnessAdapter {
   }
 
   async inspect(input: InspectHarnessInput = {}): Promise<HarnessInspection> {
+    if (this.#closePromise) {
+      return {
+        status: "unavailable",
+        error: {
+          code: "invalidState",
+          message: "Kiro Adapter is closed",
+          retryable: false,
+        },
+      };
+    }
     const cwd = path.resolve(input.cwd ?? process.cwd());
     const cached = this.#inspectionCache.get(cwd);
     if (!input.refresh && cached) {
@@ -246,58 +262,93 @@ export class KiroAdapter implements HarnessAdapter {
     }
 
     const transport = this.#createTransport(cwd);
-    try {
-      const initialize = await transport.inspect();
-      const modelCatalog =
-        isRecord(initialize) && isRecord(initialize.catalog)
-          ? (initialize.catalog as unknown as HarnessModelCatalog)
-          : parseKiroModelCatalog(isRecord(initialize) ? initialize.configOptions : undefined);
-      if (modelCatalog.models.length === 0)
-        throw new Error("Kiro returned no native model catalog");
-      return {
-        status: "ready",
-        catalog: modelCatalog,
-        permissionModes: KIRO_PERMISSION_MODE_CATALOG,
-        capabilities: KIRO_SESSION_CAPABILITIES,
-      };
-    } catch (error) {
-      if (error instanceof KiroTransportError) {
-        if (error.kind === "authenticationRequired") {
-          return {
-            status: "error",
-            error: {
-              code: "authenticationRequired",
-              message: "Kiro CLI authentication is required",
-              retryable: false,
-            },
-          };
+    this.#inspections.add(transport);
+    const inspection = await (async (): Promise<HarnessInspection> => {
+      try {
+        const initialize = await transport.inspect();
+        const modelCatalog =
+          isRecord(initialize) && isRecord(initialize.catalog)
+            ? (initialize.catalog as unknown as HarnessModelCatalog)
+            : parseKiroModelCatalog(isRecord(initialize) ? initialize.configOptions : undefined);
+        if (modelCatalog.models.length === 0)
+          throw new Error("Kiro returned no native model catalog");
+        return {
+          status: "ready",
+          catalog: modelCatalog,
+          permissionModes: KIRO_PERMISSION_MODE_CATALOG,
+          capabilities: KIRO_SESSION_CAPABILITIES,
+        };
+      } catch (error) {
+        if (error instanceof KiroTransportError) {
+          if (error.kind === "authenticationRequired") {
+            return {
+              status: "error",
+              error: {
+                code: "authenticationRequired",
+                message: "Kiro CLI authentication is required",
+                retryable: false,
+              },
+            };
+          }
+          if (error.kind === "notInstalled") {
+            return {
+              status: "notInstalled",
+              error: {
+                code: "notInstalled",
+                message: "Kiro CLI is not installed",
+                retryable: false,
+              },
+            };
+          }
         }
-        if (error.kind === "notInstalled") {
-          return {
-            status: "notInstalled",
-            error: {
-              code: "notInstalled",
-              message: "Kiro CLI is not installed",
-              retryable: false,
-            },
-          };
-        }
+        return {
+          status: "unavailable",
+          error: {
+            code: "unavailable",
+            message: error instanceof Error ? error.message : "Kiro CLI is unavailable",
+            retryable: true,
+          },
+        };
       }
+    })();
+    try {
+      await transport.close();
+      this.#inspections.delete(transport);
+      return inspection;
+    } catch {
       return {
         status: "unavailable",
         error: {
           code: "unavailable",
-          message: error instanceof Error ? error.message : "Kiro CLI is unavailable",
-          retryable: true,
+          message: "Kiro inspection process cleanup did not complete",
+          retryable: false,
         },
       };
-    } finally {
-      await transport.close().catch(() => undefined);
     }
   }
 
   async open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>> {
-    if (input.kind === "create" && input.executionPolicy === "unattended-full-access") {
+    if (this.#closePromise) {
+      return {
+        ok: false,
+        error: { code: "invalidState", message: "Kiro Adapter is closed", retryable: false },
+      };
+    }
+    if (
+      (input.kind === "create" || input.kind === "resume") &&
+      input.permissionModeId &&
+      !isKiroPermissionMode(input.permissionModeId)
+    ) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidRequest",
+          message: "Kiro Permission Mode is invalid",
+          retryable: false,
+        },
+      };
+    }
+    if (input.executionPolicy === "unattended-full-access") {
       return {
         ok: false,
         error: {
@@ -320,6 +371,7 @@ export class KiroAdapter implements HarnessAdapter {
         else usage.observe(event.metadata?.kiro);
       },
     );
+    this.#openingTransports.add(transport);
     const locateSessionFn = this.#deps.locateSession ?? locateKiroNativeSession;
     const readSnapshotFn = this.#deps.readSnapshot ?? readKiroSnapshot;
 
@@ -499,6 +551,13 @@ export class KiroAdapter implements HarnessAdapter {
       for (const event of openResult.replay ?? []) {
         if (event.type === "usage") usage.observe(event.metadata?.kiro);
       }
+      if (this.#closePromise) {
+        await transport.close().catch(() => undefined);
+        return {
+          ok: false,
+          error: { code: "invalidState", message: "Kiro Adapter is closed", retryable: false },
+        };
+      }
       session = new KiroSession({
         harnessId: this.harnessId,
         transport,
@@ -542,18 +601,25 @@ export class KiroAdapter implements HarnessAdapter {
           retryable: false,
         },
       };
+    } finally {
+      this.#openingTransports.delete(transport);
     }
   }
 
   async close(): Promise<void> {
-    try {
-      await Promise.all([
-        ...this.#inspectionInFlight.values(),
-        ...[...this.#sessions].map((session) => session.close()),
-      ]);
-    } finally {
-      this.#inspectionCache.clear();
-    }
+    this.#closePromise ??= (async () => {
+      try {
+        await Promise.all([
+          ...this.#inspectionInFlight.values(),
+          ...[...this.#inspections].map((transport) => transport.close()),
+          ...[...this.#openingTransports].map((transport) => transport.close()),
+          ...[...this.#sessions].map((session) => session.close()),
+        ]);
+      } finally {
+        this.#inspectionCache.clear();
+      }
+    })();
+    return this.#closePromise;
   }
 
   #createTransport(
@@ -626,6 +692,9 @@ export class KiroSession implements HarnessSession {
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly commands: HarnessCommandCapability;
+  readonly resourceLifecycle: HarnessResourceLifecycle = {
+    suspend: (signal) => this.#suspendIdle(signal),
+  };
 
   readonly #channel = new OutputChannel<HarnessOutput>();
   readonly #transport: KiroAcpTransportLike;
@@ -656,6 +725,7 @@ export class KiroSession implements HarnessSession {
   #publishedUsage: string;
   #usageRefresh: Promise<void> | null = null;
   #newSessionWithoutTurn: boolean;
+  #reading = false;
 
   constructor(options: KiroSessionOptions) {
     this.harnessId = options.harnessId;
@@ -747,12 +817,13 @@ export class KiroSession implements HarnessSession {
   }
 
   async readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>> {
-    if (this.#activeTurnId !== null || this.#configBusy) {
+    if (this.#activeTurnId !== null || this.#configBusy || this.#reading) {
       return {
         ok: false,
         error: { code: "sessionBusy", message: "Kiro is writing history", retryable: true },
       };
     }
+    this.#reading = true;
     try {
       const location = await this.#locateSession(
         { environment: this.#environment },
@@ -791,6 +862,8 @@ export class KiroSession implements HarnessSession {
           retryable: false,
         },
       };
+    } finally {
+      this.#reading = false;
     }
   }
 
@@ -1022,10 +1095,29 @@ export class KiroSession implements HarnessSession {
   }
 
   async #cancelTurn(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>> {
-    if (this.#activeTurnId !== null && this.#activeTurnId === command.turnId) {
+    if (this.#activeTurnId === null || this.#activeTurnId !== command.turnId) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidRequest",
+          message: "Kiro cancellation must reference the active Turn",
+          retryable: false,
+        },
+      };
+    }
+    try {
       await this.#transport.cancel();
       // The native cancellation notification can settle the Prompt before it returns.
       if (this.#activeTurnId === command.turnId) this.#cancelInteractions(command.turnId);
+    } catch (error) {
+      return {
+        ok: false,
+        error: {
+          code: "nativeFailure",
+          message: error instanceof Error ? error.message : "Kiro cancellation failed",
+          retryable: true,
+        },
+      };
     }
     return { ok: true, value: { cancellationRequested: true } };
   }
@@ -1155,6 +1247,16 @@ export class KiroSession implements HarnessSession {
   async #selectPermissionMode(
     command: PermissionModeSelectCommand,
   ): Promise<HarnessResult<PermissionModeSelectCompleted>> {
+    if (!isKiroPermissionMode(command.permissionModeId)) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidRequest",
+          message: "Kiro Permission Mode is invalid",
+          retryable: false,
+        },
+      };
+    }
     if (this.#activeTurnId !== null || this.#configBusy) {
       return {
         ok: false,
@@ -1441,6 +1543,37 @@ export class KiroSession implements HarnessSession {
     void this.close().catch(() => undefined);
   }
 
+  async #suspendIdle(signal: HarnessIdleSuspendSignal) {
+    if (signal.aborted) {
+      return { status: "unknown" as const, reason: "Kiro idle suspension was aborted" };
+    }
+    if (this.#closed || this.#faultError) {
+      return { status: "unknown" as const, reason: "Kiro Session is closed or faulted" };
+    }
+    if (
+      this.#activeTurnId !== null ||
+      this.#configBusy ||
+      this.#reading ||
+      this.#pendingInteractions.size > 0 ||
+      this.#usageRefresh
+    ) {
+      return {
+        status: "busy" as const,
+        reason: "Kiro Session still has native work or observation in progress",
+      };
+    }
+    if (this.#newSessionWithoutTurn) {
+      return {
+        status: "unknown" as const,
+        reason: "Kiro has not persisted this empty Native Session yet",
+      };
+    }
+    // close() marks the Session closed before awaiting the ACP process, so no
+    // late callback can publish work after this admission check.
+    await this.close();
+    return { status: "suspended" as const, scope: "kiro-acp-session" };
+  }
+
   close(): Promise<void> {
     if (this.#closeTask) return this.#closeTask;
     this.#closed = true;
@@ -1464,8 +1597,8 @@ export class KiroSession implements HarnessSession {
         await this.#transport.close();
       } finally {
         this.#channel.end();
-        this.#onClose?.();
       }
+      this.#onClose?.();
     })();
     return this.#closeTask;
   }

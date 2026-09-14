@@ -49,6 +49,18 @@ invalid or duplicate responses do not consume another interaction. Cancellation,
 Turn completion, Session fault and close resolve and close every pending
 interaction before the Turn's terminal event.
 
+## Permission, cancellation, and Adapter ownership
+
+Unknown Permission Mode IDs return `invalidRequest` before native side effects; they never fall back to autopilot. Persisted `executionPolicy` is passed through supported open operations, while an explicit permission selection takes precedence.
+
+Cancel validates the active Turn ID and reports a failed native notification as an error. A cancel acknowledgement is not a terminal event. `Adapter.close()` closes admission, waits for opening resources and existing Sessions, and prevents a concurrent open from publishing a closed Session; later inspect/open calls are rejected.
+
+The Adapter's subagent capability permits observation but does not claim transcript reads or autonomous Turn observation. Capabilities describe this implementation's native support, not every feature of the ACP SDK.
+
+## Public conformance
+
+`test/kiro-adapter.test.ts` consumes `@codexhost/harness-adapter/conformance` with the actual Adapter and controlled ACP transport. The driver covers environment separation, create, concurrent-start rejection, cancel, fresh resume, follow-up, and cleanup. Advertised capabilities without a native fixture scenario retain `notCovered` and make the overall receipt `incomplete`. See the repository [conformance contract](../../../docs/adapter-conformance.md).
+
 ## Regression coverage
 
 `test/acp-session-lifecycle.test.ts` exercises the real ACP SDK, Transport and

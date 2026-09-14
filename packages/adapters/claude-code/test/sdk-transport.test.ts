@@ -1079,6 +1079,17 @@ describe("ClaudeSdkTransport Model control", () => {
     expect(options(value)).not.toHaveProperty("sessionId");
     expect(options(value)).not.toHaveProperty("resume");
   });
+
+  it("uses the SDK default filesystem sources for execution queries", async () => {
+    const value = fixture();
+
+    await value.transport.start();
+
+    // SDK 0.3.220 loads user/project/local settings when this option is omitted.
+    // Explicit user-only isolation skips project CLAUDE.md and local policy.
+    expect(options(value)).not.toHaveProperty("settingSources");
+    await value.transport.close();
+  });
 });
 
 describe("ClaudeSdkTransport abort", () => {
