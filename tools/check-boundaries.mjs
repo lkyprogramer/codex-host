@@ -15,6 +15,9 @@ const forbiddenLocalRuntimePackages = new Set([
   "@agentclientprotocol/sdk",
   "@anthropic-ai/claude-agent-sdk",
   "@openai/codex-sdk",
+  "@opencode-ai/sdk",
+  "@deepseek-ai/cosmokit",
+  "@deepseek-ai/schemastery",
   "electron",
 ]);
 
@@ -137,6 +140,7 @@ async function sourceFiles(directory) {
   for (const entry of entries) {
     const entryPath = resolve(directory, entry.name);
     if (entry.isDirectory()) {
+      if (["node_modules", "dist", ".git"].includes(entry.name)) continue;
       files.push(...(await sourceFiles(entryPath)));
     } else if (entry.isFile() && /\.tsx?$/u.test(entry.name)) {
       files.push(entryPath);
@@ -146,9 +150,92 @@ async function sourceFiles(directory) {
   return files;
 }
 
+/** Dependency declarations must not reintroduce edges hidden from source-import checks. */
+export function findPackageBoundaryViolations({
+  packageRoot,
+  manifest,
+  tsconfig,
+  packagesDirectory = packagesRoot,
+}) {
+  const violations = [];
+  const owner = relative(packagesDirectory, packageRoot).replaceAll("\\", "/");
+  const dependencies = new Set(
+    Object.keys({
+      ...manifest.dependencies,
+      ...manifest.optionalDependencies,
+      ...manifest.peerDependencies,
+    }),
+  );
+  const validate = (name, location) => {
+    if (owner === "host-runtime" && name.startsWith("@codexhost/adapter-")) {
+      violations.push(
+        `${location}: Host Runtime must load installed plugins, not depend on '${name}'`,
+      );
+    }
+    if (
+      owner === "shared-contracts" &&
+      (name.startsWith("@codexhost/") || isForbiddenLocalRuntimeImport(name))
+    ) {
+      violations.push(`${location}: Shared Contracts cannot depend on '${name}'`);
+    }
+    if (
+      owner === "renderer-extension" &&
+      (isForbiddenLocalRuntimeImport(name) ||
+        (name.startsWith("@codexhost/") && name !== "@codexhost/shared-contracts"))
+    ) {
+      violations.push(`${location}: Renderer cannot depend on '${name}'`);
+    }
+  };
+  for (const name of dependencies) validate(name, resolve(packageRoot, "package.json"));
+  for (const reference of tsconfig.references ?? []) {
+    if (typeof reference.path !== "string") continue;
+    const target = resolve(packageRoot, reference.path).replace(/[/\\]tsconfig\.json$/u, "");
+    const targetName = relative(packagesDirectory, target).replaceAll("\\", "/");
+    const workspaceName = `@codexhost/${targetName.startsWith("adapters/") ? `adapter-${targetName.slice(9)}` : targetName}`;
+    validate(workspaceName, resolve(packageRoot, "tsconfig.json"));
+    if (isInside(target, packagesDirectory) && !dependencies.has(workspaceName)) {
+      violations.push(
+        `${resolve(packageRoot, "tsconfig.json")}: project reference '${reference.path}' has no public package dependency`,
+      );
+    }
+  }
+  for (const [alias, targets] of Object.entries(tsconfig.compilerOptions?.paths ?? {})) {
+    for (const target of targets) {
+      const resolved = resolve(packageRoot, tsconfig.compilerOptions?.baseUrl ?? ".", target);
+      if (isInside(resolved, packagesDirectory) && !isInside(resolved, packageRoot)) {
+        violations.push(
+          `${resolve(packageRoot, "tsconfig.json")}: path alias '${alias}' bypasses package public exports`,
+        );
+      }
+    }
+  }
+  return violations;
+}
+
+async function packageDirectories(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const roots = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory() || ["node_modules", "dist"].includes(entry.name)) continue;
+    const child = resolve(directory, entry.name);
+    if (existsSync(resolve(child, "package.json"))) roots.push(child);
+    else roots.push(...(await packageDirectories(child)));
+  }
+  return roots;
+}
+
 export async function findRepositoryBoundaryViolations() {
   const files = await sourceFiles(packagesRoot);
   const violations = [];
+
+  for (const packageRoot of await packageDirectories(packagesRoot)) {
+    const manifest = JSON.parse(await readFile(resolve(packageRoot, "package.json"), "utf8"));
+    const configPath = resolve(packageRoot, "tsconfig.json");
+    const tsconfig = existsSync(configPath)
+      ? ts.parseConfigFileTextToJson(configPath, await readFile(configPath, "utf8")).config
+      : {};
+    violations.push(...findPackageBoundaryViolations({ packageRoot, manifest, tsconfig }));
+  }
 
   for (const filePath of files) {
     const packageRoot = packageRootFor(filePath);

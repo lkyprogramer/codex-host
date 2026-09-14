@@ -11,14 +11,16 @@
     "packages/adapters/codebuddy",
     "packages/adapters/cursor-cli"
   ],
-  "runtimePackages": [
-    "@agentclientprotocol/sdk",
-    "@anthropic-ai/claude-agent-sdk",
-    "@deepseek-ai/cosmokit",
-    "@deepseek-ai/schemastery",
-    "@opencode-ai/sdk",
-    "diff",
-    "ws",
-    "zod"
-  ]
+  "runtimePackages": {
+    "pi": ["diff", "zod"],
+    "claude-code": ["@anthropic-ai/claude-agent-sdk", "zod"],
+    "deepseek-harness": ["@deepseek-ai/cosmokit", "@deepseek-ai/schemastery", "diff", "ws", "zod"],
+    "opencode": ["@opencode-ai/sdk", "zod"],
+    "grok": ["@agentclientprotocol/sdk", "diff", "zod"],
+    "omp": ["diff", "zod"],
+    "antigravity": ["zod"],
+    "kiro-cli": ["@agentclientprotocol/sdk", "diff", "zod"],
+    "codebuddy": ["@agentclientprotocol/sdk", "diff", "zod"],
+    "cursor-cli": ["@agentclientprotocol/sdk", "diff", "zod"]
+  }
 }

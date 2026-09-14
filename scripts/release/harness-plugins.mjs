@@ -23,13 +23,24 @@ export function preinstalledHarnessPlugins(root = defaultRoot) {
     const manifest = harnessPluginManifestSchema.parse(
       JSON.parse(readFileSync(path.join(pluginRoot, "manifest.json"), "utf8")),
     );
-    return { pluginRoot, manifest };
+    const allowed = distribution.runtimePackages?.[manifest.id];
+    if (
+      !Array.isArray(allowed) ||
+      allowed.some((name) => typeof name !== "string") ||
+      new Set(allowed).size !== allowed.length
+    ) {
+      throw new Error(`Missing or invalid runtime package allowance for ${manifest.id}`);
+    }
+    return { pluginRoot, manifest, allowedRuntimePackages: new Set(allowed) };
   });
   const configuration = harnessPluginConfigurationSchema.parse({
     version: 1,
     enabled: plugins.map(({ manifest }) => manifest.id),
   });
-  return { plugins, configuration, allowedRuntimePackages: new Set(distribution.runtimePackages) };
+  if (Object.keys(distribution.runtimePackages).some((id) => !configuration.enabled.includes(id))) {
+    throw new Error("Runtime package allowances must belong to a preinstalled plugin");
+  }
+  return { plugins, configuration };
 }
 
 export function preinstalledHarnessPluginPaths(prefix = "app/plugins") {
@@ -39,6 +50,7 @@ export function preinstalledHarnessPluginPaths(prefix = "app/plugins") {
     ...plugins.flatMap(({ manifest }) => [
       `${prefix}/${manifest.id}/manifest.json`,
       `${prefix}/${manifest.id}/plugin.mjs`,
+      `${prefix}/${manifest.id}/build-receipt.json`,
       ...(manifest.icon ? [path.posix.join(prefix, manifest.id, manifest.icon)] : []),
     ]),
   ].sort();
@@ -49,8 +61,7 @@ export async function buildPreinstalledHarnessPlugins({
   repositoryRoot = defaultRoot,
   outputDirectory,
 }) {
-  const { plugins, configuration, allowedRuntimePackages } =
-    preinstalledHarnessPlugins(repositoryRoot);
+  const { plugins, configuration } = preinstalledHarnessPlugins(repositoryRoot);
   const output = path.resolve(outputDirectory);
   const relative = path.relative(path.resolve(repositoryRoot), output);
   if (
@@ -75,7 +86,7 @@ export async function buildPreinstalledHarnessPlugins({
   await rm(output, { recursive: true, force: true });
   await mkdir(output, { recursive: true });
   const audits = [];
-  for (const { pluginRoot, manifest } of plugins) {
+  for (const { pluginRoot, manifest, allowedRuntimePackages } of plugins) {
     audits.push(
       await buildHarnessPlugin({
         pluginRoot,

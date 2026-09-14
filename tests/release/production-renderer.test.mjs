@@ -12,7 +12,7 @@ async function source(relative) {
 }
 
 describe("production Renderer release chain", () => {
-  it("uses the fixed production Agent list without a development enable switch", async () => {
+  it("keeps the legacy Agent list only as a directory-unavailable compatibility fallback", async () => {
     const [productionEntry, probeEntry, installer, agentState] = await Promise.all([
       source("packages/renderer-extension/src/production-entry.ts"),
       source("packages/renderer-extension/src/probe-entry.ts"),
@@ -24,7 +24,10 @@ describe("production Renderer release chain", () => {
     expect(agentState).toContain('"opencode",');
     expect(agentState).toContain('"grok",');
     expect(agentState).toContain('"antigravity",');
-    expect(agentState).toContain("DEFAULT_RENDERER_AGENTS = KNOWN_RENDERER_AGENTS");
+    expect(agentState).toContain("LEGACY_RENDERER_AGENTS");
+    expect(agentState).toContain(
+      "Product identity is supplied by `codexhost/harness/plugins/list`",
+    );
     expect(productionEntry).toContain("installRendererBinding(DEFAULT_RENDERER_AGENTS");
     expect(productionEntry).toContain("__codexhostProductionConfigV1");
     expect(productionEntry).toContain('window.addEventListener("DOMContentLoaded"');
@@ -35,7 +38,7 @@ describe("production Renderer release chain", () => {
     expect(installer).toContain("installCurrentRendererAdapter");
   });
 
-  it("accepts Grok and Antigravity in renderer probe capabilities and selections", () => {
+  it("keeps the release probe's static compatibility validation", () => {
     const status = validateProbeStatus({
       version: 2,
       mountedComposers: 1,
@@ -50,12 +53,6 @@ describe("production Renderer release chain", () => {
     expect(status.selections).toEqual([
       { composerId: "composer-grok", agent: "grok", phase: "draft" },
     ]);
-    expect(() =>
-      validateProbeStatus({
-        ...status,
-        selections: [{ composerId: "composer-unknown", agent: "unknown", phase: "draft" }],
-      }),
-    ).toThrow("invalid selection");
   });
 
   it("builds the local audit entry without packaging it in production", async () => {

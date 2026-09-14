@@ -1,9 +1,57 @@
 import { describe, expect, it } from "vitest";
-import { findSourceBoundaryViolations } from "./check-boundaries.mjs";
+import {
+  findPackageBoundaryViolations,
+  findSourceBoundaryViolations,
+} from "./check-boundaries.mjs";
 
 const packagesDirectory = "/repo/packages";
 const rendererDirectory = "/repo/packages/renderer-extension";
 const sharedContractsDirectory = "/repo/packages/shared-contracts/src";
+
+describe("package boundary checks", () => {
+  const check = (owner, manifest, tsconfig = {}) =>
+    findPackageBoundaryViolations({
+      packageRoot: `${packagesDirectory}/${owner}`,
+      manifest,
+      tsconfig,
+      packagesDirectory,
+    });
+  it("rejects forbidden dependency edges even with no source import", () => {
+    expect(
+      check("host-runtime", { dependencies: { "@codexhost/adapter-grok": "*" } }),
+    ).toHaveLength(1);
+    expect(
+      check("shared-contracts", { optionalDependencies: { "@codexhost/protocol-core": "*" } }),
+    ).toHaveLength(1);
+    expect(
+      check("renderer-extension", { peerDependencies: { "@opencode-ai/sdk": "*" } }),
+    ).toHaveLength(1);
+  });
+  it("checks project references and private source aliases", () => {
+    expect(
+      check("renderer-extension", {}, { references: [{ path: "../host-runtime" }] }),
+    ).toHaveLength(2);
+    expect(
+      check(
+        "protocol-core",
+        {},
+        { compilerOptions: { paths: { hidden: ["../mapping-store/src/index.ts"] } } },
+      ),
+    ).toHaveLength(1);
+    expect(
+      check(
+        "protocol-core",
+        { dependencies: { "@codexhost/shared-contracts": "*" } },
+        { references: [{ path: "../shared-contracts/tsconfig.json" }] },
+      ),
+    ).toEqual([]);
+  });
+  it("keeps test-only dependencies outside the production graph", () => {
+    expect(check("host-runtime", { devDependencies: { "@codexhost/adapter-grok": "*" } })).toEqual(
+      [],
+    );
+  });
+});
 
 describe("source boundary checks", () => {
   it.each([
