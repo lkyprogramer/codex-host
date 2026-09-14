@@ -1,0 +1,42 @@
+{
+  "status": "SCOPE_AND_STRUCTURE_VERIFIED_WITH_PREEXISTING_LINT_LIMITATIONS",
+  "scope": "codex-host only",
+  "task_count": 10,
+  "dependency_graph": "ACYCLIC",
+  "existing_absolute_links": 18,
+  "goal_lint_exit_code": 1,
+  "goal_lint_findings": [
+    {
+      "id": "output_reports_accountability",
+      "severity": "error"
+    },
+    {
+      "id": "stop_rules_cover_high_risk_blockers",
+      "severity": "error"
+    },
+    {
+      "id": "stop_rules_cover_repeated_failures",
+      "severity": "error"
+    }
+  ],
+  "manual_assessment": "Chinese OUTPUT and STOP RULES cover accountability and high-risk blockers; project limit is two unchanged failures while the generic linter matches three. Raw lint result retained; no claim of lint PASS.",
+  "historical_evidence": "Original raw observations retained without granting execution scope. Active baseline uses evidence/host-baseline.json.",
+  "files_sha256": {
+    "EXECUTION.md": "b272c742cd41224c3c29d658b91553eb0c74d10d920cd0b470b98546ed918551",
+    "GOAL.md": "240067ad8bdad035fed6718e288143f67a54f3f16a7bcb182aeb69d73251a071",
+    "PR_PLAN.md": "1a478cd2af8cc9cb6767dcd9dcc5bff1ed5523814acb27cdc7927bb27b57f5fa",
+    "README.md": "35a60efd9f7ea4a0f389011f8795e5b6aed7af955dc17fca7e4b90835684f069",
+    "TEST_MATRIX.md": "7fff1e7c1013bf9d862673c94b8af797eefd505cb26426ef4f9bfd1dad791fc5",
+    "state.json": "6a61db1945440385f5ed066ef06d5c198f06122171079e43c430d917240c1565",
+    "tasks/T00-baseline.md": "6050e33b2ee11c1d3d773596492cc6bc123f606238b2b93cd848383bb88c9e80",
+    "tasks/T01-isolated-harness.md": "6fedf41acab3be47a9015e14cfa8873b51e785dd7351d2f69c828fe8f30db927",
+    "tasks/T02-creation-recovery.md": "1b8ca8ddbd1961cd7ec6980d53e6c93dbfbdf7b982a81d9a106ea77cf116a74b",
+    "tasks/T03-turn-control.md": "5683843d0faddcc59525be6e4542cdeafe91f9775d3b93d8608beca220c20a2f",
+    "tasks/T04-quiescence.md": "f3847bf017aee760fdc47281e28296a08c6def078680f90895a2a2c4af05b47e",
+    "tasks/T05-observation-input.md": "c6b2defb5e4709c0de5f99646b3deb281c528d70e302d926242e11643a6077b7",
+    "tasks/T06-evidence.md": "86d805223e0bf188f32493efb4316396ccd1f18a6fdffb6769cd3150e7c62272",
+    "tasks/T07-host-skill.md": "d9f38ed8678f409a7318e9c4bda5cde33d59f444cf7ed0e3a53d754abb44aaa3",
+    "tasks/T08-acceptance.md": "9c00a4c2c8dc659e489605609a53e1282d6ccc4ee610ea33f03fd640f978f658",
+    "tasks/T09-upstream-pr.md": "0781591489d154cc141bcb1542238379afc20882aa7ce3ba57ee07e7f6603406"
+  }
+}

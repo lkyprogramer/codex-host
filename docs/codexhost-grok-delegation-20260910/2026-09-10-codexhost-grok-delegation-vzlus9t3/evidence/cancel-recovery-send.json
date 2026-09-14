@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "thread",
+    "send",
+    "be4e7c2d-4836-4127-bcd5-d027d2319cd6",
+    "--message",
+    "取消后原会话续接实验。不要执行任何命令或工具，只回复 CANCEL_RECOVERY_OK，并保留此前的 token。"
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 0,
+  "elapsed_seconds": 0.155,
+  "stdout": "{\n  \"threadId\": \"be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n  \"turnId\": \"e0bc467d-426b-4d63-a190-1a1d6d70fed3\",\n  \"harnessId\": \"grok\",\n  \"status\": \"running\",\n  \"next\": {\n    \"read\": \"/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli-darwin-arm64/bin/codexhost thread read be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n    \"wait\": \"/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli-darwin-arm64/bin/codexhost thread wait be4e7c2d-4836-4127-bcd5-d027d2319cd6 --timeout-ms 30000\"\n  }\n}\n",
+  "stderr": ""
+}

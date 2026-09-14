@@ -1,0 +1,2159 @@
+{
+  "passed": 3771,
+  "failed": 0,
+  "skipped": 22,
+  "total": 3793,
+  "files": [
+    {
+      "path": "tools/check-boundaries.test.mjs",
+      "passed": 31,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/desktop-controller-bundle.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/distribution-metadata.test.mjs",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/dmg-assets.test.mjs",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/host-bundle.test.mjs",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/linux-glibc.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/node-runtime.test.mjs",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/npm-package.test.mjs",
+      "passed": 27,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/npm-publish.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/packagers.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/payload.test.mjs",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "tests/release/plugin-dependencies.test.mjs",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/production-renderer.test.mjs",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/release-version.test.mjs",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tests/release/targets.test.mjs",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/codex-desktop-contract-audit/report.test.mjs",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/codex-desktop-contract-audit/run.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/dev-desktop/run.test.mjs",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/delegation/verify.test.mjs",
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-a/capture.test.mjs",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-a/differential.test.mjs",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-a/fixtures.test.mjs",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/capabilities.test.mjs",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/command-launch.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/command.test.mjs",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/jsonl.test.mjs",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/live-helpers.test.mjs",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/native-config.test.mjs",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/patch.test.mjs",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/profiles.test.mjs",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/rpc-client.test.mjs",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/run.test.mjs",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/scope.test.mjs",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-c/synthetic-fixture.test.mjs",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-dsh/lifecycle.real.test.mjs",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "tools/gate-claude-code/capabilities.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/close.real.test.mjs",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "tools/gate-claude-code/command.test.mjs",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/contracts.test.mjs",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/live-helpers.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/models.test.mjs",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/patch.test.mjs",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/privacy.test.mjs",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 7
+    },
+    {
+      "path": "tools/gate-claude-code/run.test.mjs",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-claude-code/terminal.test.mjs",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "tools/gate-pi/lifecycle.real.test.mjs",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "tools/gate-opencode/cancel.real.test.mjs",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "tools/renderer-binding/renderer-observer.test.mjs",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/cdp-client.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/contract-audit.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/controller-attachment-server.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/index.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/main-process-title-policy.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/production-controller.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/renderer-cdp-control-session.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/renderer-control-session.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/renderer-dom.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/desktop-control/test/renderer-draft-prewarm-policy.test.ts",
+      "passed": 28,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-adapter/test/approval.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-adapter/test/diagnostics.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-adapter/test/index.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-adapter/test/session-validation.test.ts",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-adapter/test/text-session.test.ts",
+      "passed": 29,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-adapter/test/usage.test.ts",
+      "passed": 26,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/mapping-store/test/index.test.ts",
+      "passed": 33,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/mapping-store/test/session-replacement.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/mapping-store/test/subagent-session.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-discovery/test/resolve.test.ts",
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/account-official-listeners.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/account-rate-limits.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/account-routing.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/antigravity-question.real.test.ts",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/host-runtime/test/antigravity-subagents.real.test.ts",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/host-runtime/test/app-server-host.claude.real.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/host-runtime/test/app-server-host.test.ts",
+      "passed": 160,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/broker-host-fault-recovery.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/deepseek-modern-session-import.test.ts",
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-cli-output.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-cli.test.ts",
+      "passed": 29,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-control-registry.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-control-server.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-next-commands.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-skill.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/delegation-snapshot.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/desktop-request-dispatcher.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-subagent-threads.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-thread-history.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-thread-list.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-thread-repository.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-thread-rollback.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-thread-runtime.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-turn-steering.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/external-work-mode.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/harness-accounts.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/harness-delegation-coordinator.test.ts",
+      "passed": 26,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/harness-plugin-loader.test.ts",
+      "passed": 26,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/harness-session-import.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/harness-session-validation.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/index.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/installed-harness-plugins.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/isolated-delegation-runtime.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/launcher-url-opener.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/multi-account-thread-list.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/official-codex-model-ref.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/official-request-broker.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/remote-app-server.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/remote-control-app-server.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/host-runtime/test/remote-host-cli.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/remote-host-install.test.ts",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/remote-host-lifecycle.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/remote-official-app-server.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/remote-official-connection.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/route-observation.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/run-host-runtime.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/session-state-observer.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/thread-change-hub.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/thread-list-aggregator.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/thread-observer-runtime.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/thread-observer.test.ts",
+      "passed": 24,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/host-runtime/test/update-coordinator.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-broker/test/broker-recovery.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/harness-broker/test/harness-broker.test.ts",
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/browser-bundle.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/deepseek-modern-sessions.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/errors.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/harness-commands.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/harness-models.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/harness-permission-modes.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/harness-plugins.test.ts",
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/harness-session-import.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/ids.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/index.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/json-rpc.test.ts",
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/json-value.test.ts",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/native-refs.test.ts",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/thread-usage.test.ts",
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/shared-contracts/test/updates.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/codex-approval.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/codex-native-usage.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/codex-question.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/codex-ui-projector-pending.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/codex-ui-projector.test.ts",
+      "passed": 29,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/codex-usage.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/index.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/jsonl.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/model-routing.test.ts",
+      "passed": 32,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/thread-fork.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/protocol-core/test/thread-management.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/ci-logs.test.mjs",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/github.test.mjs",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/intake.test.mjs",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/maintenance.test.mjs",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/release.test.mjs",
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/report.test.mjs",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/repository-automation/test/workflows.test.mjs",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/agent-selection-state.test.ts",
+      "passed": 24,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/codebuddy-selection.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/codex-locale-adapter.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/contract-audit.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/cursor-selection.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/index.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-agent-icon.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-agent-picker.test.ts",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-binding-probe-host-catalog.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-binding-probe.test.ts",
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-codex-account-state.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-composer-permissions.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-credits-control.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-external-queue.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-external-steering-rpc.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-external-steering.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-fork-control.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-harness-command-claim.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-harness-command-control.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-model-client.test.ts",
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-model-picker.test.ts",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-native-thread-ownership.test.ts",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-new-thread-preference.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-permission-mode-picker.test.ts",
+      "passed": 28,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-permission-mode-preference.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-settings-lifecycle.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-sidebar-agent-icons.test.ts",
+      "passed": 15,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-transcript-dom.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-unsupported-methods.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/renderer-usage-control.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/restore-model.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/versioned-renderer-adapter.test.ts",
+      "passed": 31,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/update-manager/test/distribution.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/update-manager/test/github-cli-process.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/update-manager/test/github-release.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/update-manager/test/operation-state.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/update-manager/test/update-manager.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/adapters/antigravity/test/adversarial-fork-rollback.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/adversarial-stress.test.ts",
+      "passed": 18,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/antigravity-adapter.test.ts",
+      "passed": 32,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/code-action-diff.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/fork.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/history.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/question-bridge.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/rollback.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/skip-permissions.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/slash-commands.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/subagents.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/antigravity/test/tool-projection.test.ts",
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/acp-client.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/codebuddy-adapter.test.ts",
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "passed": 18,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/exit-event.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/history-cwd.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/history-projection.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/subagent-observer.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/subagents.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/account-usage.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/background-occupancy.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.real.test.ts",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 3
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.test.ts",
+      "passed": 101,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-history.test.ts",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-rollback.test.ts",
+      "passed": 12,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-transcript.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/command.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/file-change.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/model-catalog.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/native-message.test.ts",
+      "passed": 44,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/sdk-transport.test.ts",
+      "passed": 55,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/usage-estimate.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/claude-code/test/user-shell-environment.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/deepseek-harness-adapter.test.ts",
+      "passed": 27,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/executable.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/generation-selector.test.ts",
+      "passed": 57,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/harness-commands.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/model-catalog.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/plugin.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/projection.test.ts",
+      "passed": 38,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/conformance.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/cursor.test.ts",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/file-changes.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/native-history.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/subagent-history.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/subagents.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/transport.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/acp-effort.test.ts",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/acp-session-lifecycle.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/command.test.ts",
+      "passed": 8,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/file-diff.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/history.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/kiro-adapter.test.ts",
+      "passed": 60,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/models-and-commands.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/projection.test.ts",
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/turn-output.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/usage.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/visible-text.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/acp-fork-cleanup.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-acp-compaction.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-adapter.test.ts",
+      "passed": 55,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-command.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-compaction.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-credits.test.ts",
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-file-change.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-fork.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-history.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-interject.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-manual-compaction.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-permission-modes.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-rewind.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-subagent.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-tool-output.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-usage.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-work-mode.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/grok/test/local-media-markdown.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/omp/test/omp-adapter.test.ts",
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/omp/test/omp-protocol.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/omp/test/omp-rpc-session.test.ts",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/omp/test/omp-session-file.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/omp/test/omp-tool-presentation.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/command.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/file-change-verification.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/history.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/model-catalog.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.real.test.ts",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.rollback.real.test.ts",
+      "passed": 0,
+      "failed": 0,
+      "skipped": 1
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.test.ts",
+      "passed": 46,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/sdk-transport.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/opencode/test/usage.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/index.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-adapter.test.ts",
+      "passed": 51,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-empty-session.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-history.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-model-catalog.test.ts",
+      "passed": 6,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-rpc-session.test.ts",
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-session-file.test.ts",
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-session-import.test.ts",
+      "passed": 26,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/accounts-reset-time.test.ts",
+      "passed": 19,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/accounts-usage.test.ts",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/appearance-page.test.ts",
+      "passed": 1,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/core.test.ts",
+      "passed": 10,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/localization.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/pages.test.ts",
+      "passed": 32,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/release-notes.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/shell.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/trigger.test.ts",
+      "passed": 5,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/renderer-extension/test/settings/update-request.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/profiles/parser-boundaries.test.ts",
+      "passed": 84,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/catalog.test.ts",
+      "passed": 20,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/commands.test.ts",
+      "passed": 23,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/configuration.test.ts",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/control-store.test.ts",
+      "passed": 36,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/deepseek-harness-adapter.test.ts",
+      "passed": 75,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/event-gateway.test.ts",
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/fork-inbox.test.ts",
+      "passed": 25,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/history.test.ts",
+      "passed": 36,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/journal.test.ts",
+      "passed": 32,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/permission-modes.test.ts",
+      "passed": 29,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/remote-connection.test.ts",
+      "passed": 72,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/session-list.test.ts",
+      "passed": 28,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/session.test.ts",
+      "passed": 83,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/v015.test.ts",
+      "passed": 48,
+      "failed": 0,
+      "skipped": 0
+    }
+  ],
+  "conformanceCases": [
+    {
+      "path": "packages/adapters/antigravity/test/antigravity-adapter.test.ts",
+      "name": "Antigravity Adapter Session Lifecycle & Tool Streaming records an agy native-process fixture conformance receipt",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt drives CodeBuddy through its controllable native transport fixture and writes a redacted receipt",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt accepts a lazy create identity once the first real native Turn provides readback",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt keeps a fully exercised lifecycle passed when every false capability is skipped",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt activates an isolated Session through the driver-owned single output consumer",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt marks missing native cleanup readback incomplete while preserving completed lifecycle evidence",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt fails a receipt when the actual fixture emits duplicate terminals for one Host Turn",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt rejects a lazy first terminal whose native identity belongs to another Harness",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt times out a hanging native cleanup readback and returns a failed partial receipt",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt waits for isolated output termination during cleanup",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt closes a late actual Adapter when factory creation exceeds the deadline",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt times out a late actual open and closes the Session when it eventually resolves",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt times out a late execute and still closes its known native Session",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt bounds inspect and calls Adapter close before returning its failed receipt",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt bounds snapshot and Session close while continuing Adapter close and cleanup readback",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt rejects a cancel terminal bound to another native Session",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt rejects a followup terminal bound to another resumed native Session",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt returns a failed receipt after a real fixture close failure and still proves residue cleanup",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "name": "actual Adapter conformance receipt returns a receipt with null identity when inspect fails before a Session exists",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.test.ts",
+      "name": "Claude Code HarnessAdapter records a lazy SDK native-fixture conformance receipt",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/cursor-cli/test/conformance.test.ts",
+      "name": "Cursor Adapter conformance drives the actual Adapter through create, cancel, resume, environment isolation, and cleanup",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/kiro-cli/test/kiro-adapter.test.ts",
+      "name": "Kiro Adapter conformance records a controlled ACP fixture receipt across create, cancellation, and resume",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/grok/test/grok-adapter.test.ts",
+      "name": "Grok Adapter ACP projection records an ACP native-fixture conformance receipt across create, cancel, and resume",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/omp/test/omp-adapter.test.ts",
+      "name": "OMP Adapter conformance records a controlled native-transport receipt across create, cancellation, and resume",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.test.ts",
+      "name": "OpenCode Adapter conformance records a controlled SDK-transport receipt across create, cancellation, and resume",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/pi/test/pi-adapter.test.ts",
+      "name": "Pi Adapter conformance records a controlled native-transport receipt across create, cancellation, and resume",
+      "status": "passed"
+    },
+    {
+      "path": "packages/adapters/deepseek-harness/test/modern/deepseek-harness-adapter.test.ts",
+      "name": "Modern DeepSeek Harness Adapter runs the shared lifecycle against Modern native journals and independent Web carriers",
+      "status": "passed"
+    }
+  ],
+  "skippedCases": [
+    {
+      "path": "tests/release/payload.test.mjs",
+      "name": "release Payload starts the current npm CLI without a batch file",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-dsh/lifecycle.real.test.mjs",
+      "name": "deepseek-harness native lifecycle streams, cancels without overlap, edits and resumes empty and retained history",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/close.real.test.mjs",
+      "name": "Claude native background task fence stops a running native Bash task before close resolves",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: completed",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: first interrupted",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: second interrupted",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: retained interruption",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: first interrupted after restart",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: first interrupted before output",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-claude-code/rollback.real.test.mjs",
+      "name": "Claude message editing through Host edits and resumes: first interrupted during tool",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-pi/lifecycle.real.test.mjs",
+      "name": "pi native lifecycle streams, cancels without overlap, edits and resumes empty and retained history",
+      "status": "skipped"
+    },
+    {
+      "path": "tools/gate-opencode/cancel.real.test.mjs",
+      "name": "OpenCode cancellation with a local model closes the old request before continuation and preserves warm and cold history",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/host-runtime/test/antigravity-question.real.test.ts",
+      "name": "Antigravity real question bridge projects a real question, returns the answer, cancels, and restores history",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/host-runtime/test/antigravity-subagents.real.test.ts",
+      "name": "Antigravity real Subagent Desktop protocol materializes live child progress, reads stable history, restores and cancels",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/host-runtime/test/app-server-host.claude.real.test.ts",
+      "name": "AppServerHost real Claude projection projects one real Claude text Turn through the registered external Harness path",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/host-runtime/test/remote-control-app-server.test.ts",
+      "name": "Remote Control app-server bridge carries LF app-server frames through a real named-pipe bridge process",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/update-manager/test/update-manager.test.ts",
+      "name": "background update manager retries transient Windows status replacement failures",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.real.test.ts",
+      "name": "ClaudeCodeAdapter real SDK integration round-trips native AskUserQuestion and continues the Session",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.real.test.ts",
+      "name": "ClaudeCodeAdapter real SDK integration cancels a pending native AskUserQuestion before the Turn terminal",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.real.test.ts",
+      "name": "ClaudeCodeAdapter real SDK integration reads history, resumes, cancels authoritatively, and continues the Session",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.real.test.ts",
+      "name": "OpenCode Adapter real Server inspects and opens an isolated latest-CLI Session without invoking a Model",
+      "status": "skipped"
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.rollback.real.test.ts",
+      "name": "OpenCode Adapter real rollback preserves current files and source history across rollback and restart",
+      "status": "skipped"
+    }
+  ]
+}

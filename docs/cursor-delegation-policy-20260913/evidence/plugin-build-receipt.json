@@ -1,0 +1,25 @@
+{
+  "formatVersion": 1,
+  "harnessId": "cursor-cli",
+  "adapterApiVersion": 1,
+  "pluginVersion": "0.0.0",
+  "runtimeTarget": "node22",
+  "bundleSha256": "91c917fc07de2b366035721179b5e587d7b8fbc8f26dd9ea0bd8c99e351522b6",
+  "runtimePackages": {
+    "@agentclientprotocol/sdk": [
+      "1.3.0"
+    ],
+    "diff": [
+      "8.0.2"
+    ],
+    "zod": [
+      "4.4.3"
+    ]
+  },
+  "nativeVersion": null,
+  "runtimeLicenses": {
+    "@agentclientprotocol/sdk@1.3.0": "Apache-2.0",
+    "diff@8.0.2": "BSD-3-Clause",
+    "zod@4.4.3": "MIT"
+  }
+}

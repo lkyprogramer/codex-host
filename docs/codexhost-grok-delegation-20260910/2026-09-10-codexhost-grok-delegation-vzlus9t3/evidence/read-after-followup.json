@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "thread",
+    "read",
+    "be4e7c2d-4836-4127-bcd5-d027d2319cd6"
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 0,
+  "elapsed_seconds": 0.161,
+  "stdout": "{\n  \"threadId\": \"be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n  \"harnessId\": \"grok\",\n  \"status\": \"completed\",\n  \"turn\": {\n    \"turnId\": \"e0bc467d-426b-4d63-a190-1a1d6d70fed3\",\n    \"status\": \"completed\"\n  },\n  \"progress\": [],\n  \"result\": {\n    \"availability\": \"available\",\n    \"text\": \"CANCEL_RECOVERY_OK\"\n  },\n  \"nextCursor\": \"codexhost:thread-messages:v1:eyJ2ZXJzaW9uIjoxLCJmaW5nZXJwcmludCI6IjI4ZWZmNDZmZDllYzY0ZjVlMDU2YjA1NmJjYzU5YjM0OGE0MDU5ZWY0ZmIzZGY1YjhhMTFkMzY0OGI4ODA3NTAiLCJvZmZzZXQiOjl9\"\n}\n",
+  "stderr": ""
+}

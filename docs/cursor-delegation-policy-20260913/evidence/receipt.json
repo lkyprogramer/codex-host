@@ -1,0 +1,19 @@
+{
+  "nativeVersion": "2026.09.10-fd3934a",
+  "requestedModel": "cursor-grok-4.6-xhigh",
+  "officialCodex": "fixture; no inference",
+  "candidateOnly": true,
+  "turns": [],
+  "cleanup": [
+    {
+      "cleanupErrors": []
+    }
+  ],
+  "selectedModel": {
+    "ref": {
+      "id": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd"
+    },
+    "label": "Cursor Grok 4.6 (Effort: Extra High, Fast: Off)"
+  },
+  "error": "AssertionError [ERR_ASSERTION]: {\n  \"error\": {\n    \"code\": \"DELEGATION_FAILED\",\n    \"message\": \"Cursor returned no parameterized models\"\n  }\n}\n\n\n1 !== 0\n\n    at cli (file:///private/tmp/cursor-policy-live.mjs:25:9)\n    at async file:///private/tmp/cursor-policy-live.mjs:66:16"
+}

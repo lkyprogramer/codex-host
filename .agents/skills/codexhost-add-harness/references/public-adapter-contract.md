@@ -36,7 +36,7 @@
 
 ### 执行意图与权限
 
-`create.executionPolicy` 是 Host 的执行意图，不是原生 Permission Mode。对于 `unattended-full-access`：
+`OpenSessionInput.executionPolicy` 是 Host 的持久化执行意图，不是原生 Permission Mode；create/resume/fork/rollback 路径均须处理。已有显式 Permission Mode 时不能以执行策略覆盖用户的明确选择；旧记录缺策略字段时不推断为高权限。对于 `unattended-full-access`：
 
 1. 原生可配置：映射为等价权限/沙箱/交互策略，确认成功。
 2. 已验证的原生基线天然满足：允许有测试依据的 deliberate no-op，例如不向 Pi 传不存在的权限参数。

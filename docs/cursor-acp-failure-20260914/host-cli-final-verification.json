@@ -1,0 +1,64 @@
+{
+  "resultVerified": {
+    "sum": 99,
+    "sha256": "28dc52483d3d4834b9fc61ad60df69d364118d0eb9931a5eff3abb8804053c06",
+    "cwd": "/Users/luo/.codex/evidence/cursor-host-cli-local5-20260914"
+  },
+  "originalThreadId": "ccc20661-a57b-4a3f-b260-807a75ad462f",
+  "finalRead": "completed",
+  "readOnlyRetries": 1,
+  "runtimeCleanup": {
+    "cleanupErrors": []
+  },
+  "capturedOwnedProcesses": [
+    {
+      "pid": 27358,
+      "ppid": 4441,
+      "pgid": 27358,
+      "executable": "/Users/luo/.nvm/versions/node/v22.22.0/bin/node"
+    },
+    {
+      "pid": 27649,
+      "ppid": 27358,
+      "pgid": 27358,
+      "executable": "node"
+    },
+    {
+      "pid": 27650,
+      "ppid": 27649,
+      "pgid": 27358,
+      "executable": "/Users/luo/.nvm/versions/node/v22.16.0/bin/node"
+    },
+    {
+      "pid": 27651,
+      "ppid": 27358,
+      "pgid": 27651,
+      "executable": "/Users/luo/.local/bin/cursor-agent"
+    },
+    {
+      "pid": 27762,
+      "ppid": 27651,
+      "pgid": 27651,
+      "executable": "/Users/luo/.local/share/cursor-agent/versions/2026.09.10-fd3934a/node"
+    },
+    {
+      "pid": 27776,
+      "ppid": 27762,
+      "pgid": 27651,
+      "executable": "npm"
+    },
+    {
+      "pid": 27807,
+      "ppid": 27776,
+      "pgid": 27651,
+      "executable": "node"
+    }
+  ],
+  "capturedProcessesRemaining": [],
+  "release": {
+    "threadId": "ccc20661-a57b-4a3f-b260-807a75ad462f",
+    "released": false,
+    "busy": false,
+    "quiescence": "unsupported"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "sources": [
+    {
+      "root": "/Users/luo/Documents/github/codex-host",
+      "head": "80f3116530c47e05ec24b97f267c011bbf7be982",
+      "branch": "local/all-fixes",
+      "status": "",
+      "files": [
+        {
+          "path": "packages/host-runtime/src/run-host-runtime.ts",
+          "sha256": "aefd659f3798a386f5c5ea24f218a76de045afabbf8f71e5b5ba0286878111e6",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/host-runtime/src/delegation-cli.ts",
+          "sha256": "1757779a33792d21671359eb51a7c4e0c5891eb9b7bc9e2bfc5bc8421e35e3ef",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/host-runtime/src/harness-delegation-coordinator.ts",
+          "sha256": "de3e5de28ad8f402444b5cf65a5200db60b6404e705d28890c4555ddfc0831e4",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/host-runtime/src/delegation-snapshot.ts",
+          "sha256": "fd15eaacc21c43c382c8fc9c230b43aac364f60a5a4925b51ae0c97d85c4fd4b",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/mapping-store/src/mapping-store.ts",
+          "sha256": "aad09b6494986985ba01ccbe3ff31dfc0637315e9993a9018eeae748b6139b83",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/adapters/grok/src/grok-adapter.ts",
+          "sha256": "5eb5a80efaa98bc982e49f3c40396eecb85ceebfffb103f962de0f10ab48c933",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/adapters/grok/src/acp-transport.ts",
+          "sha256": "d1ad87e7f1b9e3acd3b3e25fe205c5759bc152186d401095930545682dfb9815",
+          "unchanged_since_research": true
+        }
+      ]
+    }
+  ],
+  "cli_path": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js",
+  "parent_thread": "01a08908-80dd-7d60-aadc-550c7ac52d4e",
+  "observed_node": "v22.16.0",
+  "build_node": "/Users/luo/.nvm/versions/node/v22.20.0/bin/node",
+  "prior_evidence": "/Users/luo/Documents/Codex/reports/2026-09-10-codexhost-grok-delegation-vzlus9t3/evidence/source-binding.json",
+  "derivation": "Host-only selection of the original observation; not a new runtime verification."
+}

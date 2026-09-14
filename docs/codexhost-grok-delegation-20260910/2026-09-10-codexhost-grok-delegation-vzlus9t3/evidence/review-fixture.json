@@ -1,0 +1,5 @@
+{
+  "base_sha": "e108154c550e38ab9662d67cf60af4c71eeb46b5",
+  "result_sha": "ad142f653f7be5f14e5244c72f910fe1f585aea3",
+  "seeded_defect": "Mutates completed; selected tasks incorrectly satisfy same-batch dependencies."
+}

@@ -1,0 +1,13 @@
+
+> codexhost@0.7.0 lint
+> eslint . && node tools/check-boundaries.mjs
+
+
+/Users/luo/Documents/github/codex-host/packages/adapters/grok/src/grok-adapter.ts
+  420:11  error  Unexpected aliasing of 'this' to local variable  @typescript-eslint/no-this-alias
+
+/Users/luo/Documents/github/codex-host/packages/adapters/grok/src/grok-work-mode.ts
+  80:31  error  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+
+✖ 2 problems (2 errors, 0 warnings)
+

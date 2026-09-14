@@ -155,25 +155,30 @@ codexhost 优先通过已登录的 [GitHub CLI](https://cli.github.com/)（`gh a
 
 ## 功能状态
 
-| 能力 | <a href="https://openai.com/codex/"><img alt="Codex" src="docs/imgs/badge-codex.svg" /></a> | <a href="https://pi.dev/"><img alt="Pi" src="https://img.shields.io/badge/Pi-000000?logo=pi&logoColor=white" /></a> | <a href="https://github.com/can1357/oh-my-pi"><img alt="Oh My Pi" src="docs/imgs/badge-omp-v5.svg" /></a> | <a href="https://code.claude.com/docs/en/quickstart"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-D97757?logo=claudecode&logoColor=white" /></a> | <a href="https://opencode.ai/docs/"><img alt="OpenCode" src="docs/imgs/badge-opencode.svg" /></a> | <a href="https://grok.com/"><img alt="Grok" src="https://img.shields.io/badge/Grok-000000?logo=x&logoColor=white" /></a> | <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DeepSeek Harness" src="https://img.shields.io/badge/DeepSeek-4D6BFE?logo=deepseek&logoColor=white" /></a> | <a href="https://antigravity.google/product/antigravity-cli"><img alt="AGY" src="docs/imgs/badge-agy.svg" /></a> | <a href="https://www.codebuddy.cn/home/"><img alt="CodeBuddy" src="docs/imgs/badge-codebuddy.svg" /></a> | <a href="https://cursor.com/docs/cli/overview"><img alt="Cursor" src="docs/imgs/badge-cursor.svg" /></a> |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 流式回复 | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 工具状态 | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Edit Diff | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 提问 / 取消 | 原生 | ✅ | — / ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Model / Thinking 选择 | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ / — |
-| 工具审批 | 原生 | ✅ | — | ✅ | ✅ | ✅ | ✅ | —¹ | ✅ | ✅ |
-| 权限模式 | 原生 | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Agent 间任务协作 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| Usage | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| Fork | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| 上下文压缩 | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — |
-| 斜杠命令 | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| 修订上一条消息 | 原生 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
+官方 Codex 保留原生 app-server 路径。当前源码的[预装发行清单](scripts/release/harness-plugins.json)包含以下十个外部 Harness；插件、原生 CLI 和登录态分别管理，安装 codexhost 不会代为安装或登录各 Harness。
 
-> **Antigravity：**¹ 仅提供 **Skip permissions（危险）**，使用原生 `--dangerously-skip-permissions`；codexhost 不添加工具审批、权限规则或工作区读写限制，请仅在可信环境中使用。旧的 Configured permissions / Desktop approvals 不再支持，需明确选择 Skip permissions。提问仍支持单选和文本，子代理支持原生卡片与只读过程记录。详见[权限说明](docs/antigravity-tool-approval.md)和[子代理说明](docs/antigravity-subagents.md)。
+下表是接入方式与能力边界，不是全部版本的实机认证。Model、Thinking、权限和交互以目标 Host 当前的 inspection / Session 能力为准；流式回复、工具状态、Diff 和 Usage 由各 Adapter 按原生数据投影，不存在的数据不会伪造。
+
+| Harness | 原生接口 | Fork / 修订上一条 | 主要边界 |
+| --- | --- | --- | --- |
+| Pi | JSONL RPC | 支持，含跨目录 Fork | 无等价 Permission Mode；支持本地原生会话导入 |
+| Oh My Pi（OMP） | JSONL RPC | 支持，含跨目录 Fork | 子代理观察以当前 transport 的订阅探测为准 |
+| Claude Code | Agent SDK | 支持，同目录 | 执行读取原生项目规则；macOS 受管远程经 Aqua Broker |
+| OpenCode | SDK / Server / SSE | 支持，同目录 | 配置以原生回读为准；取消请求失败不改写真实 Turn 终态 |
+| Grok | ACP + 原生扩展 | 支持，含跨目录 Fork | 原生插话、Plan；权限在创建时设置，回退派生新 Session |
+| DeepSeek Harness | 托管 Web / journal | 支持，同目录 | 精确支持 `0.1.2-rc.1` / `0.1.5-rc.1`；支持本地原生会话导入 |
+| Antigravity CLI | stream-json / Hook / 原生历史 | 支持，含跨目录 Fork | 仅 Skip permissions；派生时校验已有原生历史与资源 |
+| Kiro CLI | ACP agent engine v3 | 支持，含跨目录 Fork | 未知权限值明确拒绝；原生子代理可观察，不提供过程正文读取 |
+| CodeBuddy | ACP | 不支持 | 配置与交互走原生协议，不由 Host 模拟历史派生 |
+| Cursor CLI | ACP + 原生历史 | 不支持 | 推理强度通过原生模型变体选择；无人值守映射原生 `--force` |
+
+**Antigravity：**仅提供 **Skip permissions（危险）**，使用原生 `--dangerously-skip-permissions`；codexhost 不添加工具审批或工作区访问限制。提问与子代理是独立能力，详见[权限说明](docs/antigravity-tool-approval.md)和[子代理说明](docs/antigravity-subagents.md)。
+
+**运行中调整方向：**有原生 steering 的 Session 使用原生插话；其余受支持路径使用取消、等待旧轮终态、再开始新轮。二者语义不同，见[外部 Thread 调整方向](docs/external-thread-steering.md)。固定模型或空 Model Catalog 的可用 Harness 也可以提交，不会因为没有可选模型而落到 Codex。
 
 ## 跨 Agent 协作
+
+**空闲资源：**Host 通过统一生命周期合同，在支持安全挂起的 Harness 空闲 60 秒后释放原生资源，保留 Thread 并按需恢复。活动任务和未知后台工作不会被强制回收；支持范围与资源释放、任务静默的区别见[资源生命周期](docs/harness-resource-lifecycle.md)。
 
 你可以让当前 Agent 把独立任务交给另一个 Harness。例如：
 
@@ -233,16 +238,14 @@ Windows 作为被控 Host 时，可以保留 Codex Desktop 官方配对、账号
 <details>
 <summary><h3>怎么做的</h3></summary>
 
-多数「多 Agent 客户端」通过 [ACP](https://agentclientprotocol.com/) 协议接入不同 Harness。接入快，但工具、审批、权限、Diff、提问等原生能力会先被削平。
+codexhost 按 Harness 的原生接口接入：Claude Code 使用 SDK，Pi / OMP 使用 RPC，Grok / Kiro / CodeBuddy / Cursor 使用 ACP，DeepSeek 使用托管 Web，Antigravity 使用 CLI / Hook。
 
-CodexHost 尽量不走这条路：
+- **Desktop**：保留官方外壳，以 CDP / Electron Inspector 和 Renderer Extension 增强选择与展示。
+- **Host**：CLI Shim 转发官方 Codex 请求；外部 Thread 通过公共协议投影、操作占位、持久化和恢复流程处理。
+- **插件**：目标 Host 动态加载已启用插件，Manifest 提供名称、图标和安装链接，Adapter / Session 提供真实能力与状态。
+- **原生执行**：原生历史、权限确认、取消和资源清理由对应 Adapter 负责，Host 不模拟原生不支持的能力。
 
-- **Desktop 侧**：用 CDP / Electron Inspector 在官方 Codex Desktop 上增强 Agent 选择与会话界面，不重做聊天壳，也不改官方安装包
-- **协议侧**：用 CLI Shim 透明接入官方 app-server；Codex 请求原样转发
-- **Harness 侧**：按各自原生接口接入。Pi 走官方 RPC，Claude Code 走 Agent SDK / CLI，再投影到 Desktop 已有的流式输出、工具、Diff、审批和提问
-- **编排侧**：为被委派的 Harness 创建独立 Native Session 与普通可写 Thread，并单独保存委派关系。创建与结果观察彼此分离，发起方显式选择读取、等待或后台运行
-
-目标是保真，不只「能聊」。流式、工具状态、可靠 Patch、原生审批和提问，都尽量来自 Harness 自己，而不是 Host 猜测或伪造。
+完整边界和源码入口见[当前架构](docs/harness-plugin-architecture.md)。
 
 </details>
 
@@ -271,7 +274,7 @@ CodexHost 尽量不走这条路：
 
 提交 Issue 或 PR 前可阅读[贡献说明](CONTRIBUTING.md)；PR 标题标签、简短 CI 结果和发布前校验见[仓库维护自动化](docs/repository-maintenance.md)。
 
-环境要求：官方 Codex Desktop、Node.js 22.19+ 或 24、Rust。
+环境要求：官方 Codex Desktop、Node.js 22.x（≥22.19）或 24.x、Rust。
 
 ```bash
 git clone https://github.com/BytePioneer-AI/codex-host
@@ -282,16 +285,40 @@ npm start
 
 ### 运行架构
 
-以 Pi 为例。从左到右是一次请求的调用链：Desktop → 公共层 → Pi 插件 → 原生进程。
+```mermaid
+flowchart LR
+  Desktop[Codex Desktop] --> Shim[CLI Shim / Host Runtime]
+  Shim --> Official[官方 Codex app-server]
+  Shim --> Loader[插件 Loader]
+  Loader --> Adapter[Harness Adapter / Session]
+  Adapter --> Native[原生 SDK / RPC / ACP / CLI / Web]
+  HostCatalog[目标 Host 插件目录] --> Renderer[Renderer Extension]
+  Renderer --> Desktop
+```
 
-<div align="center">
-  <img width="100%" src="docs/imgs/pi-runtime-architecture.png" alt="以 Pi 为例的运行架构：Desktop 到公共层，再到 Pi 插件和原生进程">
-</div>
+公共合同、Host 编排、原生协议和 Native 平台职责分别维护。详见[架构说明](docs/harness-plugin-architecture.md)、[插件运行时与信任边界](docs/harness-plugin-runtime.md)及[文档目录](docs/index.md)。
 
 ### 新增 Harness
 
-主要实现插件的 Manifest、工厂、Adapter、Session 及原生通信与转换逻辑。当前 Renderer 仍有静态接线，完整 Desktop 接入还需单独处理。
-新增 Harness 时，可以让编码 Agent 使用仓库内的 [codexhost-add-harness Skill](.agents/skills/codexhost-add-harness/SKILL.md)。它说明了插件结构、公共 Adapter 接口、能力实现与测试要求。
+实现插件 Manifest、工厂、Adapter、Session 和对应原生通信；在用户插件目录中显式启用并重启 Host。符合公共合同的新 ID 可由目标 Host 目录直接进入 Picker、配置草稿与 Sidebar，无需为名字或图标增加 Renderer 分支。预装到发行版是单独步骤，由发行清单管理。
+
+动态目录不代表全部原生能力自动可用。应声明能力与范围，处理环境隔离、取消、历史与关闭，并接入[公共一致性验证](docs/adapter-conformance.md)。仓库内 [codexhost-add-harness Skill](.agents/skills/codexhost-add-harness/SKILL.md)提供实现入口和接入要求。
+
+### 验证
+
+从 [package.json](package.json)选择与改动相符的检查；以下命令不会主动启动 Desktop：
+
+```bash
+npm run typecheck
+npm run lint
+npm run test:typescript -- --maxWorkers=2
+npm run test:rust
+npm run test:e2e -- --workers=2
+```
+
+`test:typescript` 包含 TypeScript 与预装插件构建；E2E 使用合成浏览器页面，需本机已有可用浏览器。按范围选取定向测试即可，不要求每次修改运行所有命令。`npm start` 才是源码构建并启动的入口，macOS / Windows 会先停止现有 Codex Desktop；`npm start -- --no-build` 复用已有产物。
+
+[2026-09-12 整改记录](docs/full-project-review-2026-09-12/remediation/README.md)保存当时的 3,771 项 TypeScript、172 项 Rust 和 73 项浏览器回归结果。它是固定代码快照的证据，不是本次文档修改重新运行的测试，也不代表真实 Harness、Desktop 或部署已验收。
 
 ## 鸣谢
 

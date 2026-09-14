@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "gh",
+    "api",
+    "repos/BytePioneer-AI/codex-host",
+    "--jq",
+    "{full_name,default_branch,permissions}"
+  ],
+  "exit_code": 0,
+  "stdout": "{\"default_branch\":\"main\",\"full_name\":\"BytePioneer-AI/codex-host\",\"permissions\":{\"admin\":false,\"maintain\":false,\"pull\":true,\"push\":false,\"triage\":false}}\n",
+  "stderr": ""
+}

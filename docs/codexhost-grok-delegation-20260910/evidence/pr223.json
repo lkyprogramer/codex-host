@@ -1,0 +1,12 @@
+{
+  "argv": [
+    "gh",
+    "api",
+    "repos/BytePioneer-AI/codex-host/pulls/223",
+    "--jq",
+    "{url:.html_url,state,head:{repo:.head.repo.full_name,ref:.head.ref,sha:.head.sha},base:{repo:.base.repo.full_name,ref:.base.ref,sha:.base.sha}}"
+  ],
+  "exit_code": 0,
+  "stdout": "{\"base\":{\"ref\":\"main\",\"repo\":\"BytePioneer-AI/codex-host\",\"sha\":\"0b76b9de8c6f551506287d9a12905f9fdc860da2\"},\"head\":{\"ref\":\"fix/delegation-cli-path\",\"repo\":\"lkyprogramer/codex-host\",\"sha\":\"405dae62e153f921d19e9d65039f01efa4a2a018\"},\"state\":\"open\",\"url\":\"https://github.com/BytePioneer-AI/codex-host/pull/223\"}\n",
+  "stderr": ""
+}

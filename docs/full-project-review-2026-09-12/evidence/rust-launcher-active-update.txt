@@ -1,0 +1,28 @@
+   Compiling winresource v0.1.31
+   Compiling getrandom v0.3.4
+   Compiling fs2 v0.4.3
+   Compiling codexhost-launcher v0.7.0 (/Users/luo/Documents/github/codex-host/crates/launcher)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.28s
+     Running unittests src/main.rs (target/debug/deps/codexhost-dd0c161f0f37fc74)
+
+running 5 tests
+test active_update::tests::waits_until_the_final_request_exists ... ok
+test active_update::tests::resolves_only_a_request_for_the_current_launcher ... ok
+test active_update::tests::treats_waiting_for_exit_as_a_managed_desktop_stop ... ok
+test active_update::tests::transfers_the_active_lock_to_the_updater_process ... ok
+test active_update::tests::waits_for_the_updater_ready_handshake_before_returning ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.09s
+
+     Running unittests src/start_menu.rs (target/debug/deps/codexhost_start-4578ff05457ae07b)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (target/debug/deps/cli-db0eca200437d3fe)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 0.00s
+

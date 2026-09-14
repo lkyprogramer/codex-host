@@ -9,6 +9,7 @@ This integration does not inject a replacement list, custom status subtitles, av
 ## Lifecycle and transcripts
 
 - Spawn/send tools expose child identity, description, role, background execution, and status through the public Subagent contract.
+- Parent Turn completion does not end background child observation. Idle native child updates continue as separate subagent state/transcript events and do not rewrite the completed parent Turn.
 - A completed background spawn tool does not mean the child has completed. Observed native completion events, terminal wait results, and successful kill tools settle child states. A failed kill tool does not imply that the child stopped.
 - Child transcripts are read-only snapshots of the child Native Session; they are not separate writable Host Sessions.
 - Parent Native history is projected back into Subagent Items when the Thread is reopened. Presentation uses the existing Desktop history path rather than a Renderer-maintained copy of the list.
@@ -51,7 +52,7 @@ child Sessions are retired so subsequent reads use the replacement parent, even
 if a child read was already in flight. Metadata discovery excludes descendants
 still bound to an older parent Native Session. This does not merge fork children
 with source children or reuse a removed child's Host identity when a new Native
-Session later reuses its native child ID. In-place rewind needs no rebinding.
+Session later reuses its native child ID. Grok rollback now uses a validated derived Session rather than rewinding the source in place.
 
 Ordinary hydration uses the existing creation-request index. Legacy records need
 at most one shared metadata scan per snapshot; rollback also shares that scan

@@ -1,0 +1,11 @@
+
+ RUN  v4.1.10 /Users/luo/Documents/github/codex-host
+
+(node:13862) ExperimentalWarning: SQLite is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+
+ Test Files  11 passed (11)
+      Tests  182 passed (182)
+   Start at  11:56:31
+   Duration  5.88s (transform 10.31s, setup 0ms, import 4.91s, tests 10.45s, environment 1ms)
+

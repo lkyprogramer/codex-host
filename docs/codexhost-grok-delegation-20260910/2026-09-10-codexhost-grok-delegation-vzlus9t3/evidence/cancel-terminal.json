@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "thread",
+    "wait",
+    "be4e7c2d-4836-4127-bcd5-d027d2319cd6",
+    "--timeout-ms",
+    "10000"
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 0,
+  "elapsed_seconds": 0.268,
+  "stdout": "{\n  \"threadId\": \"be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n  \"harnessId\": \"grok\",\n  \"status\": \"interrupted\",\n  \"turn\": {\n    \"turnId\": \"43d839cc-ec9c-4e24-bb07-f759eaf34c05\",\n    \"status\": \"interrupted\"\n  },\n  \"progress\": [\n    {\n      \"id\": \"grok-history-message-2-2\",\n      \"turnId\": \"43d839cc-ec9c-4e24-bb07-f759eaf34c05\",\n      \"text\": \"按授权只执行这一次探测脚本，前台等待其结束。\"\n    }\n  ],\n  \"result\": {\n    \"availability\": \"available\",\n    \"text\": \"脚本仍在运行，继续等待它自然结束。\"\n  },\n  \"nextCursor\": \"codexhost:thread-messages:v1:eyJ2ZXJzaW9uIjoxLCJmaW5nZXJwcmludCI6IjI4ZWZmNDZmZDllYzY0ZjVlMDU2YjA1NmJjYzU5YjM0OGE0MDU5ZWY0ZmIzZGY1YjhhMTFkMzY0OGI4ODA3NTAiLCJvZmZzZXQiOjd9\",\n  \"timedOut\": false\n}\n",
+  "stderr": ""
+}

@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "thread",
+    "wait",
+    "f7a1cc32-e8cf-4d1f-911e-a03bbfdbab6c",
+    "--timeout-ms",
+    "1"
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 0,
+  "elapsed_seconds": 0.156,
+  "stdout": "{\n  \"threadId\": \"f7a1cc32-e8cf-4d1f-911e-a03bbfdbab6c\",\n  \"harnessId\": \"grok\",\n  \"status\": \"running\",\n  \"turn\": {\n    \"turnId\": \"fefe45ea-7a17-4ccb-a56d-be5a9be4e929\",\n    \"status\": \"running\"\n  },\n  \"progress\": [\n    {\n      \"id\": \"8d09cc45-ea1f-4416-9536-b2d59b0882f1\",\n      \"turnId\": \"fefe45ea-7a17-4ccb-a56d-be5a9be4e929\",\n      \"text\": \"先核对工作目录和 git 状态，再读合同与相关文件，按合同实现 `select_ready`。\"\n    },\n    {\n      \"id\": \"8519b361-e290-41ed-b8dc-19da501c7eb0\",\n      \"turnId\": \"fefe45ea-7a17-4ccb-a56d-be5a9be4e929\",\n      \"text\": \"合同已核对：按输入顺序选出依赖已完成、自身未完成、且资源与 occupied/本批互斥的任务。接下来只改 `scheduler.py`。\"\n    }\n  ],\n  \"result\": {\n    \"availability\": \"pending\"\n  },\n  \"nextCursor\": \"codexhost:thread-messages:v1:eyJ2ZXJzaW9uIjoxLCJmaW5nZXJwcmludCI6IjRiZjRjMmY3NWU3NTU4N2M2MWViNTAwNWNkYmM1ZDFiZTljYWJjMjI4NDczNjY5MGIzYWJhOGY2NWU0YjMxZTQiLCJvZmZzZXQiOjN9\",\n  \"timedOut\": true\n}\n",
+  "stderr": ""
+}

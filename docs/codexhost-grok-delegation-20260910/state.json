@@ -1,0 +1,164 @@
+{
+  "plan_id": "codexhost-grok-delegation-20260910",
+  "status": "PAUSED_PR_OPEN_CI_PENDING",
+  "baseline": {
+    "host": {
+      "root": "/Users/luo/Documents/github/codex-host",
+      "branch": "local/all-fixes",
+      "sha": "80f3116530c47e05ec24b97f267c011bbf7be982"
+    }
+  },
+  "delivery": {
+    "worktree": "/Users/luo/Documents/github/codex-host-delegation-grok-workers",
+    "branch": "codex/delegation-grok-workers",
+    "head": "5890978d235d8b1ce61ee4ce9889a54310354367"
+  },
+  "tasks": [
+    {
+      "id": "T00",
+      "file": "tasks/T00-baseline.md",
+      "depends_on": [],
+      "status": "VERIFIED",
+      "result_sha": "80f3116530c47e05ec24b97f267c011bbf7be982",
+      "evidence": [
+        "evidence/npm-path-start.json",
+        "evidence/npm-path-next-read.json"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T01",
+      "file": "tasks/T01-isolated-harness.md",
+      "depends_on": ["T00"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "hermetic ENTRY-01/02/03 twice exit 0",
+        "live SMOKE-01 isolated Runtime PASS"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T02",
+      "file": "tasks/T02-creation-recovery.md",
+      "depends_on": ["T01"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "vitest CREATION-01/02",
+        "live CREATION-01 PASS",
+        "live RECOVERY-01 PASS"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T03",
+      "file": "tasks/T03-turn-control.md",
+      "depends_on": ["T02"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "vitest TURN-05",
+        "live TURN-01 PASS",
+        "live TURN-05 PASS"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T04",
+      "file": "tasks/T04-quiescence.md",
+      "depends_on": ["T03"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "live RELEASE-01 PASS",
+        "live RELEASE-04 PASS (handler shared with RELEASE-01)"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T05",
+      "file": "tasks/T05-observation-input.md",
+      "depends_on": ["T03"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "live OBSERVE-01 PASS",
+        "live INPUT-01 PASS"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T06",
+      "file": "tasks/T06-evidence.md",
+      "depends_on": ["T05"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "vitest EVIDENCE-03",
+        "live EVIDENCE-01 PASS",
+        "live EVIDENCE-04 PASS"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T07",
+      "file": "tasks/T07-host-skill.md",
+      "depends_on": ["T04", "T06"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "vitest delegation-skill.test.ts",
+        "hermetic SKILL-01/02 PASS",
+        "live SKILL-03 used TURN-01 handler (independent reviewer flow also run)"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T08",
+      "file": "tasks/T08-acceptance.md",
+      "depends_on": ["T07"],
+      "status": "DONE",
+      "result_sha": "2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0",
+      "evidence": [
+        "npm run check exit 0 Node 22.22.0 npm 11.8.0",
+        "hermetic all-required 29 PASS",
+        "two independent live Grok reviewers caught planted mark_done defect"
+      ],
+      "blocker": null
+    },
+    {
+      "id": "T09",
+      "file": "tasks/T09-upstream-pr.md",
+      "depends_on": ["T08"],
+      "status": "PR_OPEN_CI_PENDING",
+      "result_sha": "5890978d235d8b1ce61ee4ce9889a54310354367",
+      "evidence": [
+        "https://github.com/BytePioneer-AI/codex-host/pull/239",
+        "https://github.com/BytePioneer-AI/codex-host/actions/runs/34441256358"
+      ],
+      "blocker": "PAUSED. first-time fork GitHub Actions workflow approval; run 34441256358 is action_required. Viewer lkyprogramer has pull-only on BytePioneer-AI/codex-host (POST .../approve returned 403 Must have admin rights). Required checks Check ubuntu-22.04 / macos-14 / windows-latest / Linux ARM64 have no check-runs yet."
+    }
+  ],
+  "final_pr": {
+    "repo": "BytePioneer-AI/codex-host",
+    "base": "main",
+    "fork": "lkyprogramer/codex-host",
+    "head_branch": "codex/delegation-grok-workers",
+    "draft": false,
+    "url": "https://github.com/BytePioneer-AI/codex-host/pull/239",
+    "head_sha": "5890978d235d8b1ce61ee4ce9889a54310354367",
+    "mergeable": "MERGEABLE",
+    "ci": "ACTION_REQUIRED",
+    "workflow_run": "https://github.com/BytePioneer-AI/codex-host/actions/runs/34441256358"
+  },
+  "depends_on": {
+    "223": "OPEN",
+    "233": "OPEN"
+  },
+  "scope": {
+    "repository": "codex-host",
+    "allowed": "Repository source, direct tests, managed delegation skill and generic documentation; isolated test workspaces.",
+    "consumer_project_changes": false
+  }
+}

@@ -37,19 +37,15 @@ New clients may opt into forwarding the Host's scoped delegation environment:
 be supplied through this mechanism. Existing Claude clients retain their default
 behavior. Native login files and keychain state stay in the user's home/session.
 
-Discovery reconnects on the next explicit caller request after service startup or
-connection loss. Existing wrappers can recover on snapshot read or a subsequent
-Turn start by resuming their confirmed native Session with its last observed
-model/Thinking/permission state and scoped delegation environment. The filtered
-environment is retained per Session for native fault recovery on the same broker
-connection as well as for reconnection. Recovery is refused if no native identity
-was confirmed; it never creates a substitute Session or replays an interrupted Turn.
-There is no background model polling or native fallback.
-Closing a client also closes its owned sessions and output channels. A failed
-broker is reported as unavailable rather than routing the Thread to another
-Harness. A service restart is separate from restarting Desktop or Remote Host.
+Discovery reconnects on the next explicit caller request after service startup or connection loss. A `session.faulted` event is terminal: the client emits it once, ends outputs, ignores late output, and rejects further operations on the old wrapper. An authentication-required Turn is forwarded before that Session fault.
+
+Host retires the failed wrapper. A subsequent use of the same Thread opens a fresh resume with its confirmed Native Ref, persisted configuration and supported scoped execution intent. Recovery does not create a substitute identity or replay the interrupted Turn. Native authentication must still succeed; there is no background model polling, native fallback, or revival of a faulted wrapper.
+
+Closing a client closes its owned Sessions and output channels. A service restart is separate from restarting Desktop or Remote Host. A failed replacement restores the verified previous plist and generation when possible; readiness requires a new descriptor fingerprint, and combined replacement/recovery failure retains both diagnostics.
 
 Tests cover legacy compatibility, separate service/socket identities, foreign
 references, scoped environment forwarding, output closure, and on-demand
 discovery after a broker generation changes. Native install/stop operations must
 be run only when the affected service's active work is idle.
+
+The [Host/Broker integration regression](../packages/host-runtime/test/broker-host-fault-recovery.test.ts) uses an actual local server/client and Host with a controlled native Session. It proves one failed Turn, old-wrapper retirement, and exactly one fresh resume for the same Thread. This does not replace real Aqua, login-keychain, or launchctl upgrade/rollback acceptance. Current ownership and contracts are described in [architecture](harness-plugin-architecture.md) and [plugin runtime](harness-plugin-runtime.md).

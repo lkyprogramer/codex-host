@@ -1,0 +1,57 @@
+{
+  "officialParent": "fixture-no-inference",
+  "cursorHarness": "real-native",
+  "dataDirectory": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-cursor-isolated-live-27358-1789319013955",
+  "model": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd",
+  "commands": {
+    "inspect": {
+      "status": "ready",
+      "model": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd",
+      "label": "Cursor Grok 4.6 (Effort: Extra High, Fast: Off)"
+    },
+    "start": {
+      "delegationId": "d51104c0-5eea-403d-8c74-9913ddeecf8f",
+      "threadId": "ccc20661-a57b-4a3f-b260-807a75ad462f",
+      "turnId": "4c814531-2d84-42ab-8797-cb587da0ad9b",
+      "harnessId": "cursor-cli",
+      "deepLink": "codex://threads/ccc20661-a57b-4a3f-b260-807a75ad462f",
+      "status": "running",
+      "configuration": {
+        "requested": {
+          "model": {
+            "id": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd"
+          }
+        },
+        "effective": {
+          "effectiveModel": {
+            "id": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd"
+          }
+        }
+      },
+      "next": {
+        "read": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js thread read ccc20661-a57b-4a3f-b260-807a75ad462f",
+        "wait": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js thread wait ccc20661-a57b-4a3f-b260-807a75ad462f --timeout-ms 30000"
+      },
+      "cwd": "/Users/luo/.codex/evidence/cursor-host-cli-local5-20260914",
+      "parentThreadId": "00000000-0000-4000-8000-000000000001"
+    },
+    "initialRead": {
+      "threadId": "ccc20661-a57b-4a3f-b260-807a75ad462f",
+      "harnessId": "cursor-cli",
+      "status": "running",
+      "turn": {
+        "turnId": "4c814531-2d84-42ab-8797-cb587da0ad9b",
+        "status": "running"
+      },
+      "progress": [],
+      "result": {
+        "availability": "pending"
+      },
+      "nextCursor": "codexhost:thread-messages:v1:eyJ2ZXJzaW9uIjoxLCJmaW5nZXJwcmludCI6ImY3OWE1NjQ4OTY3ZDI4NzBhNmRhOTEwZmM2ZTc0MTRlNDBkNmEzYTI3OTZkNzE2YzVhMjJmMjA0YmRjZDU1MTgiLCJvZmZzZXQiOjF9"
+    }
+  },
+  "error": "thread wait returned invalid JSON: {\n  \"error\": {\n    \"code\": \"INTERNAL_ERROR\",\n    \"message\": \"External Harness is unavailable\"\n  }\n}\n",
+  "runtimeCleanup": {
+    "cleanupErrors": []
+  }
+}

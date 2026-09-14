@@ -1,0 +1,71 @@
+{
+  "branch": "codex/full-review-remediation-20260912",
+  "checks": [
+    {
+      "command": "npm run build:typescript",
+      "result": "passed"
+    },
+    {
+      "command": "npm run typecheck",
+      "result": "passed"
+    },
+    {
+      "command": "npx vitest run --config tests/vitest.config.js packages/adapters/cursor-cli/test",
+      "result": "82 passed in 9 files before adding one diagnostic unit test"
+    },
+    {
+      "command": "npx vitest run --config tests/vitest.config.js packages/adapters/cursor-cli/test/cursor.test.ts packages/adapters/cursor-cli/test/transport.test.ts",
+      "result": "40 passed in 2 files after final test addition"
+    },
+    {
+      "command": "npx eslint packages/adapters/cursor-cli/src/adapter.ts packages/adapters/cursor-cli/src/diagnostics.ts packages/adapters/cursor-cli/src/transport.ts packages/adapters/cursor-cli/test/cursor.test.ts packages/adapters/cursor-cli/test/transport.test.ts packages/adapters/cursor-cli/test/fixtures/acp.mjs",
+      "result": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "passed"
+    },
+    {
+      "command": "npx vitest run --config tests/vitest.config.js packages/adapters/cursor-cli/test",
+      "result": "84 passed in 9 files after redundant-write repair"
+    },
+    {
+      "command": "npm run release:npm -- --target macos-arm64 --version 0.7.0-local.4 --pack",
+      "result": "passed; TypeScript, plugins, Renderer and Rust release built"
+    },
+    {
+      "command": "npx vitest run --config tests/vitest.config.js packages/adapters/cursor-cli/test",
+      "result": "87 passed in 9 files after history-only repair"
+    },
+    {
+      "command": "npm run release:npm -- --target macos-arm64 --version 0.7.0-local.5 --pack",
+      "result": "passed"
+    },
+    {
+      "command": "npx vitest run --config tests/vitest.config.js packages/adapters/cursor-cli/test",
+      "result": "88 passed in 9 files after final error classification regression test"
+    }
+  ],
+  "nativeInference": "passed: confirmed grok-4.6[effort=xhigh,fast=false], shell and read tools completed, end_turn",
+  "originalParentRouting": "PARENT_THREAD_AMBIGUOUS; matchingRuntimeCount=0",
+  "sourceTransportFinalProbe": {
+    "opened": true,
+    "nativeSessionId": "4f8c57a2-e67f-4096-9d6a-17ecf11aa9b0",
+    "model": "grok-4.6[effort=xhigh,fast=false]",
+    "stopReason": "end_turn",
+    "closed": true
+  },
+  "review": "Independent read-only Sol review found no blocking issue in diagnostic helper or stage wrappers. Pre-existing cleanup failures can mask the original operation error; not reproduced in these probes.",
+  "installedVersion": "0.7.0-local.5",
+  "installedPackageFilesMatched": 62,
+  "hostCliAcceptance": {
+    "officialParent": "fixture-no-inference",
+    "harness": "real Cursor",
+    "threadId": "ccc20661-a57b-4a3f-b260-807a75ad462f",
+    "finalRead": "completed",
+    "retry": "one read-only retry in successful recovery run",
+    "runtimeCleanupErrors": [],
+    "capturedProcessesRemaining": 0,
+    "releaseQuiescence": "unsupported"
+  }
+}

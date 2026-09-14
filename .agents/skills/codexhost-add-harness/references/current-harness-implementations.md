@@ -25,7 +25,7 @@ packages/adapters/pi/
 
 Pi 适合观察 CLI/RPC、延迟启动、history、模型/Thinking、Question、Usage 与关闭。Pi 不提供可选 Session Permission Mode；接受执行意图不等于需要新增权限参数。
 
-## 七个 Harness 的传输参考
+## 发行清单中的 Harness 的传输参考
 
 以下相对文件路径均位于对应的 `packages/adapters/<目录>/src/`。
 
@@ -36,8 +36,11 @@ Pi 适合观察 CLI/RPC、延迟启动、history、模型/Thinking、Question、
 | `claude-code` | Claude Agent SDK；受管场景可经 Broker | `plugin.ts`、`claude-code-adapter.ts`、`sdk-transport.ts`、`transport.ts` | SDK、交互和生命周期参考；工厂中的直接/Broker 选择不代表所有插件都需要 Broker |
 | `opencode` | SDK 客户端与原生服务/事件流 | `plugin.ts`、`opencode-adapter.ts`、`sdk-transport.ts`、`server-connection.ts`、`protocol.ts` | 适合共享服务与事件关联；权限写入有增量规则，不能假定配置可全量替换 |
 | `grok` | ACP + 原生私有扩展 | `plugin.ts`、`grok-adapter.ts`、`acp-transport.ts` | 无可靠原生替代时才参考 ACP；权限创建期固定，私有历史扩展不能当标准 ACP |
-| `deepseek-harness` | 按原生版本选择 Legacy/Modern 协议 | `plugin.ts`、`deepseek-harness-adapter.ts`、`generation-selector.ts`，然后进入 `legacy/` 或 `modern/` | 两代是不同基线；必须分别读所选实现与测试，不混用旧能力表。Modern `0.1.2-rc.1` 支持 last-turn rollback（Fork 或空 Session replacement） |
-| `antigravity` | CLI stream-json | `plugin.ts`、`antigravity-adapter.ts`、`stream-events.ts`、`history.ts` | 适合流式 CLI 与插件持久化历史；当前明确不支持 Fork/Rollback |
+| `deepseek-harness` | 按原生版本选择 Modern profile | `plugin.ts`、`deepseek-harness-adapter.ts`、`generation-selector.ts`，然后进入 `modern/` | 仅接受 `0.1.2-rc.1` 和 `0.1.5-rc.1`；V0/V3 日志分别校验，支持 source-preserving rollback；逐 Session 环境使用独立 managed Web |
+| `antigravity` | CLI stream-json | `plugin.ts`、`antigravity-adapter.ts`、`stream-events.ts`、`history.ts` | 适合流式 CLI 与插件持久化历史；Fork/Rollback 必须同时验证 native SQLite/brain 与 sidecar 派生结果 |
+| `kiro-cli` | ACP agent-engine | `kiro-adapter.ts`、`acp-transport.ts`、`permission-modes.ts` | 权限 ID 严格解码；取消与关闭是显式生命周期 |
+| `codebuddy` | ACP + 原生 JSONL | `codebuddy-adapter.ts`、`acp-client.ts` | 可写 resume；不伪造 Fork/Rollback；Aqua process execution 仅作启动机制 |
+| `cursor-cli` | ACP + 原生 SQLite | `adapter.ts`、`transport.ts` | 私有存储必须验证版本/身份；不伪造 Fork/Rollback 或 Usage |
 
 原生 Codex 走官方 app-server，不实现外部 HarnessAdapter，不作为新外部插件的模板。
 
@@ -52,10 +55,10 @@ Pi 适合观察 CLI/RPC、延迟启动、history、模型/Thinking、Question、
 | SDK Approval/Question 与工具投影 | Claude `claude-code-adapter.ts`、`sdk-transport.ts` 及专项模块；按问题选择，不读完后整包复制 |
 | 原生权限确认和重启恢复 | OMP `omp-adapter.ts`；OpenCode `permission-modes.ts` 和 `opencode-adapter.ts`；Grok 创建期作用域 |
 | Subagent、自主 Turn、后台结果 | OMP/Claude Adapter 及生命周期模块；公共类型在 `text-session.ts` |
-| 常驻 Host RPC/共享订阅 | DeepSeek `legacy/host-client.ts`；Modern 读 `modern/remote-connection.ts`、`event-gateway.ts` 和 `session.ts` |
+| 常驻 Host RPC/共享订阅 | DeepSeek Modern 读 `modern/remote-connection.ts`、`event-gateway.ts` 和 `session.ts` |
 | 原生协议代际选择 | DeepSeek `generation-selector.ts`、顶层 Adapter；原生版本策略不等于插件 API 版本 |
-| 导入候选与本地 Web UI | DeepSeek 顶层 Adapter、`modern/session-list.ts`；Host 上层仍有专用边界 |
-| 插件工厂和非阻塞预取 | 七个 `src/plugin.ts`；只有确有预取需求时参考 Claude/Antigravity 的 warmup |
+| 导入候选与本地 Web UI | DeepSeek 顶层 Adapter、`modern/session-list.ts`；Host 使用公共 `sessionImport` 事务 |
+| 插件工厂和非阻塞预取 | 各 Adapter 的 `src/plugin.ts`；只有确有预取需求时参考 Claude/Antigravity 的 warmup |
 | 公共行为测试模式 | `packages/harness-adapter/src/testing.ts`、`packages/harness-adapter/test/text-session.test.ts`；Fake 是参考，不是自动证明插件正确的 conformance runner |
 | 插件加载/打包 | [加载与验证](registration-and-validation.md) |
 | Desktop 或跨 Harness 协调 | [Renderer](renderer-product-integration.md)、[委派](cross-harness-delegation.md) |

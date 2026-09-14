@@ -1,0 +1,165 @@
+{
+  "recordedAt": "2026-09-13T15:30:30.892917+00:00",
+  "strategy": "Focused batch followed by Kiro-only rerun after fixing in-memory process ownership fixtures and the inspection resource ledger. Latest result per file.",
+  "initialRun": {
+    "tests": 815,
+    "passed": 804,
+    "failed": 11
+  },
+  "kiroRerun": {
+    "tests": 89,
+    "passed": 89,
+    "failed": 0
+  },
+  "finalUniqueFiles": 24,
+  "finalUniqueTests": 830,
+  "passed": 830,
+  "failed": 0,
+  "skipped": 0,
+  "files": [
+    {
+      "file": "packages/adapters/antigravity/test/antigravity-adapter.test.ts",
+      "passed": 34,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/claude-code/test/claude-code-adapter.test.ts",
+      "passed": 104,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/codebuddy/test/acp-client.test.ts",
+      "passed": 3,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/codebuddy/test/codebuddy-adapter.test.ts",
+      "passed": 21,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/cursor-cli/test/cursor.test.ts",
+      "passed": 29,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/cursor-cli/test/transport.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/deepseek-harness/test/modern/remote-connection.test.ts",
+      "passed": 73,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/kiro-cli/test/acp-effort.test.ts",
+      "passed": 14,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/kiro-cli/test/acp-session-lifecycle.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/kiro-cli/test/kiro-adapter.test.ts",
+      "passed": 64,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/omp/test/omp-adapter.test.ts",
+      "passed": 21,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/omp/test/omp-rpc-session.test.ts",
+      "passed": 17,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/opencode/test/opencode-adapter.test.ts",
+      "passed": 54,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/opencode/test/sdk-transport.test.ts",
+      "passed": 13,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/pi/test/pi-adapter.test.ts",
+      "passed": 52,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/adapters/pi/test/pi-rpc-session.test.ts",
+      "passed": 43,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/harness-adapter/test/session-validation.test.ts",
+      "passed": 16,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/harness-discovery/test/owned-process-tree.test.ts",
+      "passed": 4,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/host-runtime/test/app-server-host.test.ts",
+      "passed": 161,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/host-runtime/test/delegation-cli.test.ts",
+      "passed": 30,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/host-runtime/test/delegation-skill.test.ts",
+      "passed": 9,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/host-runtime/test/external-thread-runtime.test.ts",
+      "passed": 11,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/host-runtime/test/harness-delegation-coordinator.test.ts",
+      "passed": 30,
+      "failed": 0,
+      "skipped": 0
+    },
+    {
+      "file": "packages/host-runtime/test/managed-harness-session.test.ts",
+      "passed": 7,
+      "failed": 0,
+      "skipped": 0
+    }
+  ]
+}

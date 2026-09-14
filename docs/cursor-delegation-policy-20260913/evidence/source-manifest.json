@@ -1,0 +1,24 @@
+{
+  "baseHead": "38964658185bd090b4044f0cc9f5b575d8284b87",
+  "branch": "codex/full-review-remediation-20260912",
+  "files": {
+    "packages/adapters/cursor-cli/src/adapter.ts": "8ec3fd820bfb846c701261cc768fe3e2b5f0a0ddb6e55acf4e95c1be72345626",
+    "packages/adapters/cursor-cli/src/command.ts": "ae83d9a720ed60db8102bba86e05d4be7c19a4a0bc984b7f907d8d26420b73e1",
+    "packages/adapters/cursor-cli/src/index.ts": "a2f377eaf81670282fab17bae094b96a7451a0f35a65c587898293011e32ece3",
+    "packages/adapters/cursor-cli/src/interactions.ts": "39bd9474d3480d45caefe4abd19482e24ccb75f01b9be57e5bebce83b3230a20",
+    "packages/adapters/cursor-cli/src/model-parameters.ts": "8b1fde1c10b7d53e899cc251d69d269bebbcd07a4267520d4fa203d290992d69",
+    "packages/adapters/cursor-cli/src/models.ts": "7857824ab0740049a328b5e6f054e37f09a8609ba271fa962f428e2d794c4368",
+    "packages/adapters/cursor-cli/src/native-history.ts": "f417a140d98ac09799cab1db9537bf5f93c6fa1a43efa3377ae6503cb94413e8",
+    "packages/adapters/cursor-cli/src/plugin.ts": "6b859fca7b1ffcadc5d19cf4492251e7e46a7c519b234e2511b22ccd127fd50e",
+    "packages/adapters/cursor-cli/src/projection.ts": "70b41a77b5a6311ba90f8e2b5d85122d04eb853bf01015be2676aaa6e0066ddb",
+    "packages/adapters/cursor-cli/src/subagents.ts": "0066a9a94cbc647b6206bb5c06f3f73ba05b917a8977521275dd68a757edbe6a",
+    "packages/adapters/cursor-cli/src/transport.ts": "167f91cfb7a9e2a6e3c1ec3ea7b6b57334778288ff89321f7a1a8ccbd33d5522",
+    "packages/host-runtime/src/app-server-host.ts": "df15bfe3787dbf701a7bbd680192f3447bedcaaf6c5398ee60e21df67c8ca446",
+    "packages/host-runtime/src/delegation-cli-help.ts": "77b27804c8098d48856f8a02ac95af6206b925844bd68046a9975aefc4334530",
+    "packages/host-runtime/src/delegation-cli.ts": "d09f088c38d473293323349bebcbdca1b75e972eaaac5a1eb483bcb7c7264708",
+    "packages/host-runtime/src/delegation-control-server.ts": "120e9bfd1d7276ca6c1c97307ee66649d00efe8406361e1e72f6d4100b4f1408",
+    "packages/host-runtime/src/delegation-types.ts": "1c033434c7743144d8af9ef5dea6779eb5d42d40b7798fa3b8197341662ffeb5",
+    "packages/host-runtime/src/external-thread-runtime.ts": "fe8a756e79af263656b899114cfa4c918a1d92bf43f56af02cfcd82357824f67",
+    "packages/host-runtime/src/harness-delegation-coordinator.ts": "92df78483aec4b3959b2b8d6122bef05a491daf5d2db81ac49f4ea476e10e6f4"
+  }
+}

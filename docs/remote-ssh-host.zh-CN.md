@@ -77,6 +77,14 @@ JavaScript；正在执行的 Claude Harness 请求会在重启期间失败关闭
 
 原地升级期间，socket 初始化仍会跨版本串行。当前 listener 使用每个 owner 独立的寄存器，并在解绑或绑定 control socket 前额外发布一份已加载旧版托管 Shim 也能识别的活跃兼容标记。已失效的旧版共享标记会保留为被动栅栏，不会再通过共享路径删除。
 
+## 插件与 Broker 恢复边界
+
+每个远程 Host 连接从实际 Runtime 相邻的 `plugins/` 加载预装插件，并读取远端的用户插件配置。Picker 和 Sidebar 使用目标 Host 的目录，客户端本地安装的插件不会自动成为远端插件。复制 Runtime 时须同时携带相邻插件 Bundle、Manifest 和资源；原生 CLI 与登录态仍在远端独立安装和管理。
+
+Broker 的认证或连接故障会终结旧 Session。Host 收到唯一 fault 后关闭旧 wrapper，下一次使用该 Thread 时通过 fresh resume 恢复已确认的 Native Ref；不会在旧 wrapper 内重放失败 Turn，也不会绕过仍未恢复的原生认证。
+
+macOS Broker 升级替换失败时会尝试恢复已验证的旧 plist / generation。恢复 ready 必须观察到新的 descriptor 指纹，不能把失败 generation 遗留的 descriptor 当作成功。主操作与恢复都失败时保留两项诊断。有关自动化证据与实机未覆盖项见[整改记录](full-project-review-2026-09-12/remediation/README.md)。
+
 ## 从 Codex Desktop 使用
 
 在客户端通过 codexhost 启动 Codex Desktop，打开 SSH 工作区，然后在该远程输入框的 Agent/Model 选择器中选择目标 Harness。模型发现、Thread、Turn、工具、审批和历史都会由 SSH 开发机上的 codexhost 处理。本地 Harness 可用性会始终独立初始化和缓存，因此 SSH 连接不可用时，切回本地输入框不会被远程检查阻塞。
@@ -100,7 +108,7 @@ codexhost remote status
 codexhost remote uninstall
 ```
 
-`start` 可重复执行并启动已安装的无头 Remote Host；`stop` 只停止经过校验的 codexhost listener，不影响其他 Codex 进程。`status` 除了报告运行状态和协议身份，也会报告原生入口、启动配置、runtime 或数据目录缺失/被修改；托管启动配置块只剩一侧标记或存在其他格式损坏时，会返回 degraded，而 install 与 uninstall 仍会拒绝自动改写；遇到会阻塞 bootstrap 的旧 Shell 入口时，也会明确提示重新安装迁移。`uninstall` 会先核对 manifest 中记录的入口摘要，再只移除托管入口、manifest 和启动配置块，并保留 profile 备份及 `~/.codexhost/remote/data`，便于恢复 Thread 映射。卸载后同样需要重新连接远程工作区。
+`start` 可重复执行并启动已安装的无头 Remote Host；`stop` 只停止经过校验的 codexhost listener，不影响其他 Codex 进程。`status` 除了报告运行状态和协议身份，也会报告原生入口、启动配置、runtime 或数据目录缺失/被修改；托管启动配置块只剩一侧标记或存在其他格式损坏时，会返回 degraded，而 install 与 uninstall 仍会拒绝自动改写；遇到会阻塞 bootstrap 的旧 Shell 入口时，也会明确提示重新安装迁移。`uninstall` 先探测 listener；运行中且协议确认为 codexhost 时，经过既有进程身份校验停止它并等待 socket 消失，再校验入口摘要并清理托管文件。stock 或未知 owner 会拒绝卸载。安装处于 degraded 时仍允许执行受保护的 stop，但 start 继续要求安装有效；这不放宽文件删除与 profile 归属检查。卸载只移除托管入口、manifest 和启动配置块，保留 profile 备份及 `~/.codexhost/remote/data`，便于恢复 Thread 映射。卸载后同样需要重新连接远程工作区。
 
 在 macOS 上，`remote status` 还会确认 Aqua broker LaunchAgent 正在运行、plist 仍指向当前安装的
 runtime，并且存在非空且仅当前用户可读的 descriptor。`remote uninstall` 会卸载并移除这个受管

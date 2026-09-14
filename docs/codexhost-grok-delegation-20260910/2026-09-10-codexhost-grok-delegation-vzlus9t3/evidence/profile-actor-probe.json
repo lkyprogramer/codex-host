@@ -1,0 +1,25 @@
+[
+  {
+    "model": "gpt-5.6-sol",
+    "reasoning_effort": "high",
+    "accepted": true,
+    "input_errors": []
+  },
+  {
+    "model": "grok-4.6",
+    "reasoning_effort": "xhigh",
+    "accepted": false,
+    "input_errors": [
+      {
+        "code": "REVIEWER_EXECUTION_PROFILE_INVALID",
+        "field": "actors.code.dispatch",
+        "message": "must record gpt-5.6-sol with high reasoning effort"
+      },
+      {
+        "code": "REVIEWER_EXECUTION_PROFILE_INVALID",
+        "field": "actors.legacy.dispatch",
+        "message": "must record gpt-5.6-sol with high reasoning effort"
+      }
+    ]
+  }
+]

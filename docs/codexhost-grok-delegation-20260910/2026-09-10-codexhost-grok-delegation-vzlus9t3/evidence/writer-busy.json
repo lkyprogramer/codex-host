@@ -1,0 +1,15 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "thread",
+    "send",
+    "f7a1cc32-e8cf-4d1f-911e-a03bbfdbab6c",
+    "--message",
+    "BUSY_PROBE: if this was admitted after completion, reply only BUSY_PROBE_RACE and do not modify files."
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 1,
+  "elapsed_seconds": 0.161,
+  "stdout": "",
+  "stderr": "{\n  \"error\": {\n    \"code\": \"THREAD_BUSY\",\n    \"message\": \"Thread already has an active Turn\"\n  }\n}\n"
+}

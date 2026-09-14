@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "python3",
+    "-B",
+    "-m",
+    "unittest",
+    "-v"
+  ],
+  "cwd": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-delegation-assessment-20260910-vzlus9t3/writer",
+  "exit_code": 0,
+  "stdout": "",
+  "stderr": "test_batch_does_not_complete_dependency (test_scheduler.SelectionTest.test_batch_does_not_complete_dependency) ... ok\ntest_completed_dependency (test_scheduler.SelectionTest.test_completed_dependency) ... ok\ntest_empty (test_scheduler.SelectionTest.test_empty) ... ok\ntest_missing_dependency (test_scheduler.SelectionTest.test_missing_dependency) ... ok\ntest_no_mutation (test_scheduler.SelectionTest.test_no_mutation) ... ok\ntest_occupied (test_scheduler.SelectionTest.test_occupied) ... ok\ntest_order (test_scheduler.SelectionTest.test_order) ... ok\ntest_pairwise_conflict (test_scheduler.SelectionTest.test_pairwise_conflict) ... ok\ntest_skip_completed_self (test_scheduler.SelectionTest.test_skip_completed_self) ... ok\n\n----------------------------------------------------------------------\nRan 9 tests in 0.000s\n\nOK\n"
+}

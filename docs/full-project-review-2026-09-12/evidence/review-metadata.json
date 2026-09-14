@@ -1,0 +1,250 @@
+{
+  "reviewDate": "2026-09-12",
+  "repository": "/Users/luo/Documents/github/codex-host",
+  "branch": "local/all-fixes",
+  "head": "38964658185bd090b4044f0cc9f5b575d8284b87",
+  "sourceModified": false,
+  "reviewAgents": 8,
+  "agentModel": "gpt-5.6-sol",
+  "agentReasoning": "high",
+  "findings": [
+    {
+      "id": "F01",
+      "priority": "P1",
+      "title": "Claude 执行时跳过项目规则与 project/local settings"
+    },
+    {
+      "id": "F02",
+      "priority": "P1",
+      "title": "Grok 回退先原地截断历史，后续失败不能恢复源"
+    },
+    {
+      "id": "F03",
+      "priority": "P1",
+      "title": "Antigravity 派生历史可能只有 sidecar 正确，原生副本失败仍报成功"
+    },
+    {
+      "id": "F04",
+      "priority": "P1",
+      "title": "Kiro 未知 Permission Mode 被静默映射为 autopilot"
+    },
+    {
+      "id": "F05",
+      "priority": "P1",
+      "title": "输出消费异常缺少终结处理，会留下永远 busy 的 Thread"
+    },
+    {
+      "id": "F06",
+      "priority": "P1",
+      "title": "创建中断后残留的委派去重记录指向已删除 Thread"
+    },
+    {
+      "id": "F07",
+      "priority": "P2",
+      "title": "配置成功响应不保证持久化，Model 路径甚至没有更新 carrier"
+    },
+    {
+      "id": "F08",
+      "priority": "P2",
+      "title": "无人值守委派的执行意图没有跨重启保存"
+    },
+    {
+      "id": "F09",
+      "priority": "P2",
+      "title": "OMP 恢复/派生的首个进程丢失逐 Thread 环境"
+    },
+    {
+      "id": "F10",
+      "priority": "P2",
+      "title": "OpenCode 取消请求失败后污染真实 Turn 终态"
+    },
+    {
+      "id": "F11",
+      "priority": "P2",
+      "title": "OpenCode 权限更新成功但回读不匹配时仍保留旧公开状态"
+    },
+    {
+      "id": "F12",
+      "priority": "P2",
+      "title": "Grok 在父 Turn 结束后丢弃后台 Subagent 更新"
+    },
+    {
+      "id": "F13",
+      "priority": "P2",
+      "title": "native steering 的产品声明硬编码 Grok，与实际 Session 能力分裂"
+    },
+    {
+      "id": "F14",
+      "priority": "P2",
+      "title": "原生 Codex endpoint 不支持扩展 RPC 时，官方 steer 被截断"
+    },
+    {
+      "id": "F15",
+      "priority": "P2",
+      "title": "Pi/OMP/OpenCode fault 后结束输出但未自动清理原生资源"
+    },
+    {
+      "id": "F16",
+      "priority": "P2",
+      "title": "Kiro 取消通知未送达也返回已受理"
+    },
+    {
+      "id": "F17",
+      "priority": "P2",
+      "title": "Kiro Adapter.close 后仍可创建新 transport"
+    },
+    {
+      "id": "F18",
+      "priority": "P2",
+      "title": "二次异步派发绕过 Thread 队列，command 与回退/删除可交错"
+    },
+    {
+      "id": "F19",
+      "priority": "P2",
+      "title": "外部 turn/start 静默过滤掉混合输入中的图像"
+    },
+    {
+      "id": "F20",
+      "priority": "P2",
+      "title": "多个 Runtime 的委派列表截断后无法翻页"
+    },
+    {
+      "id": "F21",
+      "priority": "P3",
+      "title": "快速完成的外部委派首次响应仍硬编码 running"
+    },
+    {
+      "id": "F22",
+      "priority": "P2",
+      "title": "OMP 18.1.18 默认关闭子代理转发，Adapter 未订阅却声明可观测"
+    },
+    {
+      "id": "F23",
+      "priority": "P2",
+      "title": "Usage 通知永久绑定首个 client，切换 Host 后不重订阅"
+    },
+    {
+      "id": "F24",
+      "priority": "P2",
+      "title": "DeepSeek Modern 共享 Web 不接收逐 Session 环境，递归委派身份无法隔离"
+    },
+    {
+      "id": "F25",
+      "priority": "P1",
+      "title": "Linux npm 自更新的 TS/Rust 状态目录不一致"
+    },
+    {
+      "id": "F26",
+      "priority": "P2",
+      "title": "Unix Shim 将信号退出压成普通 exit 1"
+    },
+    {
+      "id": "F27",
+      "priority": "P2",
+      "title": "remote uninstall 不停止运行中的 managed listener"
+    },
+    {
+      "id": "F28",
+      "priority": "P2",
+      "title": "更新下载缺少应用级期限与取消通道，可长期占有更新锁"
+    },
+    {
+      "id": "F29",
+      "priority": "P2",
+      "title": "macOS Broker 升级失败后无法恢复上一运行 generation"
+    }
+  ],
+  "architectureRecommendations": 7,
+  "validation": {
+    "typescript": {
+      "files": 34,
+      "passed": 763,
+      "skipped": 1
+    },
+    "rust": {
+      "passed": 12
+    },
+    "isolatedReproductions": 5,
+    "checks": [
+      {
+        "label": "TypeScript typecheck",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH npm run typecheck",
+        "exit": 2,
+        "result": "15 test type errors: Grok optional workMode/steering 11; DelegationControlApi fixture missing listHarnesses 1; external-work-mode HarnessSession assertions 3.",
+        "log": "typecheck.log"
+      },
+      {
+        "label": "ESLint + declared boundary script",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH npm run lint",
+        "exit": 1,
+        "result": "2 ESLint errors; chained boundary command not reached.",
+        "log": "lint.log"
+      },
+      {
+        "label": "Independent boundary",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH node tools/check-boundaries.mjs",
+        "exit": 0,
+        "result": "PASS; no output.",
+        "log": "boundaries.log"
+      },
+      {
+        "label": "Production TypeScript and 10 plugin bundles",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH npm run build:typescript",
+        "exit": 0,
+        "result": "PASS; includes tsc -b and npm run build:plugins.",
+        "log": "build-typescript.log"
+      },
+      {
+        "label": "Core focused Vitest",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH ./node_modules/.bin/vitest run --config tests/vitest.config.js packages/harness-adapter/test/text-session.test.ts packages/host-runtime/test/harness-plugin-loader.test.ts packages/host-runtime/test/installed-harness-plugins.test.ts packages/host-runtime/test/external-turn-steering.test.ts packages/host-runtime/test/harness-delegation-coordinator.test.ts packages/mapping-store/test/index.test.ts packages/mapping-store/test/session-replacement.test.ts packages/renderer-extension/test/renderer-external-steering.test.ts packages/renderer-extension/test/renderer-external-steering-rpc.test.ts packages/renderer-extension/test/renderer-external-queue.test.ts packages/renderer-extension/test/renderer-binding-probe-host-catalog.test.ts",
+        "exit": 0,
+        "result": "11 files, 182 passed.",
+        "log": "focused-core-tests.log"
+      },
+      {
+        "label": "Adapter/restore/Broker Vitest",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH ./node_modules/.bin/vitest run --config tests/vitest.config.js packages/adapters/claude-code/test/claude-code-adapter.test.ts packages/adapters/claude-code/test/sdk-transport.test.ts packages/adapters/grok/test/grok-adapter.test.ts packages/adapters/grok/test/grok-rewind.test.ts packages/adapters/pi/test/pi-adapter.test.ts packages/adapters/omp/test/omp-adapter.test.ts packages/adapters/opencode/test/opencode-adapter.test.ts packages/adapters/antigravity/test/antigravity-adapter.test.ts packages/adapters/kiro-cli/test/kiro-adapter.test.ts packages/adapters/kiro-cli/test/acp-session-lifecycle.test.ts packages/adapters/codebuddy/test/codebuddy-adapter.test.ts packages/adapters/cursor-cli/test/adapter.test.ts packages/adapters/deepseek-harness/test/modern/deepseek-harness-adapter.test.ts packages/host-runtime/test/external-thread-runtime.test.ts packages/host-runtime/test/external-thread-rollback.test.ts packages/harness-broker/test/broker-recovery.test.ts",
+        "exit": 0,
+        "result": "15 files, 513 passed. Cursor adapter.test.ts does not exist and was not selected; actual cursor.test.ts run separately below.",
+        "log": "focused-adapter-tests.log"
+      },
+      {
+        "label": "Cursor actual file",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH ./node_modules/.bin/vitest run --config tests/vitest.config.js packages/adapters/cursor-cli/test/cursor.test.ts",
+        "exit": 0,
+        "result": "1 file, 16 passed.",
+        "log": "focused-cursor-tests.log"
+      },
+      {
+        "label": "Update/Desktop/Bundle Vitest",
+        "command": "PATH=/Users/luo/.nvm/versions/node/v22.20.0/bin:$PATH ./node_modules/.bin/vitest run --config tests/vitest.config.js packages/update-manager/test/update-manager.test.ts packages/update-manager/test/distribution.test.ts packages/host-runtime/test/update-coordinator.test.ts packages/desktop-control/test/production-controller.test.ts packages/desktop-control/test/renderer-control-session.test.ts tests/release/host-bundle.test.mjs tests/release/desktop-controller-bundle.test.mjs",
+        "exit": 0,
+        "result": "7 files, 52 passed, 1 skipped: Windows-only update process detachment test on macOS.",
+        "log": "focused-native-boundary-tests.log"
+      },
+      {
+        "label": "Rust updater",
+        "command": "cargo test --locked -p codexhost-updater",
+        "exit": 0,
+        "result": "7 passed.",
+        "log": "rust-updater.log"
+      },
+      {
+        "label": "Rust launcher update",
+        "command": "cargo test --locked -p codexhost-launcher active_update",
+        "exit": 0,
+        "result": "5 passed; other targets filtered, no full crate suite.",
+        "log": "rust-launcher-active-update.log"
+      }
+    ]
+  },
+  "notExecuted": [
+    "full repository test/check",
+    "full Renderer build/E2E",
+    "real Harness/model",
+    "real Desktop",
+    "SSH/Remote Control live",
+    "install/update/deploy",
+    "push/commit"
+  ]
+}

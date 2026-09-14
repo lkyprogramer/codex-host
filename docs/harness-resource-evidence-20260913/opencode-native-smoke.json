@@ -1,0 +1,30 @@
+{
+  "nativeVersion": "1.18.30",
+  "modelCalls": 0,
+  "isolatedDirectory": "/tmp/codexhost-idle-smoke-RA6JwJ",
+  "cycles": [
+    {
+      "pid": 83715,
+      "result": {
+        "status": "suspended",
+        "scope": "native-session-and-managed-process-group"
+      },
+      "groupAliveAfterSuspend": false,
+      "turnCount": 0
+    },
+    {
+      "pid": 83766,
+      "result": {
+        "status": "suspended",
+        "scope": "native-session-and-managed-process-group"
+      },
+      "groupAliveAfterSuspend": false,
+      "turnCount": 0
+    }
+  ],
+  "sameNativeIdentity": true,
+  "status": "passed",
+  "remainingOwnedGroups": [],
+  "verificationScope": "Native empty-session create, resource suspension and same-identity resume; no model Turn was run.",
+  "sdkVersion": "1.18.25"
+}

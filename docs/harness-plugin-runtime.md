@@ -1,19 +1,20 @@
 # Harness 插件运行时：动态加载与预装发行
 
-> 状态：七个既有 Harness 和用户目录插件已统一使用动态加载器；**完整插件化尚未完成**。本文描述当前代码，不替代[架构与迁移方案](harness-plugin-architecture.md)。
+> 状态：当前源码已实现动态插件加载、独立 Bundle 和目录驱动的通用 Desktop 接入。本文说明使用与运行合同；包职责和调用链见[当前架构](harness-plugin-architecture.md)。发布版与原生运行结果按实际版本分别确认。
 
 ## 当前范围
 
 当前源码启动路径可以加载原先不认识的外部 Harness ID，通过 `codexhost/harness/plugins/list` 返回描述，并通过公共 Harness 检查接口和 `thread/start` 调用该插件。
 
-七个既有 Adapter 通过同样的 `manifest.json` 和 `createHarnessAdapter` 工厂加载；`adapter-composition.ts` 已删除，Host 源码、包依赖和 TypeScript references 不再直接引用具体 Adapter 包。预装集合仅由发行清单 [`scripts/release/harness-plugins.json`](../scripts/release/harness-plugins.json) 决定。原生构造参数、预取和 Claude Code 的直接/Broker 选择仍由相应插件负责。
+当前预装 Adapter 通过同样的 `manifest.json` 和 `createHarnessAdapter` 工厂加载；`adapter-composition.ts` 已删除，Host 源码、包依赖和 TypeScript references 不再直接引用具体 Adapter 包。预装集合仅由发行清单 [`scripts/release/harness-plugins.json`](../scripts/release/harness-plugins.json) 决定。原生构造参数、预取和 Claude Code 的直接/Broker 选择仍由相应插件负责。
 
-本地会话导入已使用公共 `sessionImport` 契约、Host 映射事务与动态设置页；Pi 和 DSH 是两个实际实现。DSH 仅支持精确 `0.1.2-rc.1` / `0.1.5-rc.1` 的托管 Web，Legacy 协议已移除。完整原生引用只在 Adapter 与 Host 间流转，详见[会话导入](harness-session-import.md)。这不代表普通 Agent Picker 已完成动态接入。
+本地会话导入使用公共 `sessionImport` 契约、Host 映射事务与动态设置页；Pi 和 DSH 是两个实际实现。DSH 仅支持精确 `0.1.2-rc.1` / `0.1.5-rc.1` 的托管 Web，Legacy 协议已移除。完整原生引用只在 Adapter 与 Host 间流转，详见[会话导入](harness-session-import.md)。
 
-尚未实现的目标包括：
+Renderer 的 Picker、图标、Composer 配置草稿、偏好和 Sidebar 使用目标 Host 的目录；配置按 Harness ID 保存。新写入统一使用共享插件 route，既有专用 route 保留读取。目录存在与原生 ready 分开处理；缺失插件不会将已存在的外部 Thread 转给官方 Codex。旧 Host 明确不支持目录 RPC 时才使用兼容名单。
 
-- Renderer Picker、图标、Composer 状态、偏好及 Sidebar 全部改由目标 Host 目录驱动。目前只提供经过校验、按连接发送的 Renderer 目录查询客户端，**新插件不会自动出现在现有 Picker 中**。
-- 删除 Renderer 等公共层的剩余 Harness 静态名单、旧路由和按名称区分的恢复策略。Host 的 Adapter 静态 import 和注册名单已移除。
+仍需单独验证或规划的目标包括：
+
+- 历史专用 route、旧 Host 的兼容展示和部分原生恢复策略仍有专属代码；它们不再作为新插件的主接入路径。
 - 会话 Credits 旧 duck-typed 路径的统一迁移、远程/Broker Session Import 接入、插件拥有的旧数据迁移。设置页已有公共只读账号额度接口（见下文），不代表所有 Credits 路径已迁移。
 - 插件独立发布/升级/依赖安装机制，以及 Broker、远程配置和委派周边的完整去专属化。现有 npm/Installer 发行已携带独立插件 Bundle 和应用资源预装目录；Broker 协议和 CLI 入口仍保留现有 Claude Code 语义。
 - 原生 Harness、历史版本、协议代际、远程执行及安装产物的完整行为验收。
@@ -132,7 +133,7 @@ Context 包含环境变量快照、平台、是否为受管远程 Host，以及�
 }
 ```
 
-结果中的 `plugins` 包含该连接加载的所有插件描述，包括七个预装 Harness：`id`、`name`、`version`、可选数据 URL `icon` 和 `links`。查询结果没有后端入口、文件路径、环境变量或 SDK 对象；是否可用和能力仍通过 `codexhost/harness/inspect` 获取。
+结果中的 `plugins` 包含该连接加载的所有插件描述，包括当前预装 Harness：`id`、`name`、`version`、可选数据 URL `icon` 和 `links`。查询结果没有后端入口、文件路径、环境变量或 SDK 对象；是否可用和能力仍通过 `codexhost/harness/inspect` 获取。
 
 Renderer 的 `listHarnessPlugins()` 使用绑定的 RequestManager 发送此固定请求并校验结果；路由代理使用当前目标 Host，显式 `clientForHost` 使用对应 Host 的客户端。旧 Host 不支持此方法时，错误会传回调用者，不伪装成空目录。
 
@@ -150,13 +151,37 @@ Renderer 的 `listHarnessPlugins()` 使用绑定的 RequestManager 发送此固�
 
 外部 Thread 的「调整方向」优先使用可选 `session.steering`；Grok 走原生插话，未实现该接口的插件仍使用 `turn.cancel` → 等待旧轮终态 → `turn.start`。官方 Codex Thread 保留原生 steer。执行、版本化绑定、输入限制和验证边界见[外部 Thread 调整方向](external-thread-steering.md)。Grok Plan / Steer 见 [Grok Plan 与运行中 Steer](grok-plan-and-steer.md)。
 
+## Session 故障、配置与恢复
+
+Host 在插件 Session 进入运行时前校验公共合同；非法结果返回稳定的 `protocolError`，拒绝后的 close 等待有期限，清理失败单独诊断。Host 是 outputs 的唯一消费者，read / wait 使用投影状态。正常关闭仍由 Adapter 证明原生资源已经停止，不能把 output iterator 结束当作进程退出的替代证明。
+
+Model / Thinking / Permission 更新以原生确认的完整 effective state 为准，持久化 carrier 后才响应成功。已应用但落盘失败会明确报错，后续成功更新仍保存完整实际配置。`executionPolicy` 随 Thread 保存并沿 create / resume / fork / rollback 传递；显式权限优先，旧记录不自动推断 full-access。
+
+Broker 认证失败依次传递失败 Turn、唯一 `session.faulted` 并结束 outputs。Host 退休旧 wrapper，后续同一 Thread 创建新的 resume Session；认证条件仍未恢复时，原生可再次拒绝。连接恢复不表示原失败 Turn 被自动重放。
+
+委派 CLI 支持 `--execution-policy default|unattended-full-access`；省略保留既有无人值守默认。策略覆盖需要目标 Adapter 支持，官方 Codex 当前明确拒绝 `default` 覆盖。Cursor 的无人值守映射、原生权限保留与 xhigh 模型变体见[Cursor 接入](cursor-cli-experimental.md#delegation-policy-and-reasoning-variants)。
+
+跨 Harness 委派与 Harness 原生 Subagent 是两种能力。委派复用公共 Adapter 路径；provisional 创建结果未知时，同一 requestId 返回 `outcomeUnknown` 而不重做任务。多个 Runtime 的委派列表需要明确 parent scope，避免返回无法继续分页的截断结果。
+
+## 空闲原生资源
+
+可选 `HarnessSession.resourceLifecycle.suspend(signal)` 接入 Host 统一的空闲计时、并发保护和按需恢复。插件缺省不启用，不能根据 Harness 名称或主 Turn 结束猜测原生后台任务已静默。挂起保留 Thread 身份和历史；状态轮询不唤醒，完整历史读取及后续操作按需恢复。合同、进程所有权和 `resourcesReleased` / `quiescence` 的区别见[资源生命周期](harness-resource-lifecycle.md)。
+
 ## 构建、发行与远程路径
 
 `npm run build:typescript` 在 TypeScript 编译后执行 `npm run build:plugins`，按发行清单生成 Host 的相邻插件目录。`npm start` 沿用这个构建路径；`--no-build` 需要之前已生成插件产物。根目录普通发行构建包含预装插件，核心 Host 自身则不依赖这些 Adapter 包。
 
 [`build-plugin.mjs`](../packages/harness-adapter/scripts/build-plugin.mjs) 将每个插件入口及其经审查的 JavaScript 运行依赖分别打成 `plugin.mjs`，并复制 Manifest 和图标；不打包原生 Harness 可执行文件或登录态。[`harness-plugins.mjs`](../scripts/release/harness-plugins.mjs) 负责发行集合编排、文件清单与启用配置。构建输出是可重建的产物目录，不应指向用户插件目录。
 
-Host release Bundle 不再包含 Adapter 或 Harness SDK；Bundle 审计拒绝它们重新泄漏进核心。npm 和 Installer 的文件白名单包含每个插件的入口、Manifest、图标及根目录启用文件，现有第三方许可声明继续随发行版交付。
+Host release Bundle 不再包含 Adapter 或 Harness SDK；Bundle 审计拒绝它们重新泄漏进核心。npm 和 Installer 的文件白名单包含每个插件的入口、Manifest、图标、`build-receipt.json` 及根目录启用文件，现有第三方许可声明继续随发行版交付。
+
+发行清单中的 `runtimePackages` 按插件 ID 声明许可依赖，不再把其他插件需要的 SDK 自动批准给全部 Bundle。构建逐一核对实际依赖闭包；任何未列入该插件的依赖都使构建失败。`build-receipt.json` 记录插件/API 版本、Bundle SHA-256 和实际打入的运行依赖版本、许可标识及构建目标；其中 `nativeVersion: null` 明确表示打包没有探测用户的原生 CLI/服务。收据不包含构建绝对路径、环境值或认证内容。
+
+当前公共 SDK 与 `adapterApiVersion: 1` 使用相同的 API v1 合同。加性可选字段（例如 `turnControl`、恢复路径的 `executionPolicy`）保留旧插件读取；新增必填字段、改变事件含义或删去旧格式需要新的 API 版本，不能只升级 Bundle 版本。发行中的 SDK 版本来自锁文件和构建收据；这与用户安装的原生 Harness 版本独立。插件不安装原生 CLI 或代办登录，也不引入市场、热替换或自动依赖安装。
+
+Session 进入 Host 前通过 `validateHarnessSession` 校验身份、NativeRef、配置、能力、Usage、方法与输出迭代器；校验不提前消费事件、不改变方法接收者。`turnControl` 缺失时兼容旧 Session 的可选控制接口；存在时，声明的 native steering/plan 必须有对应实现。事件身份和时序仍由 Protocol Core 与 Store 的提交约束检查，输出异常由 Host 的唯一终态收口处理。
+
+执行策略属于 Thread 的持久化意图，create/resume/fork/rollback 均可携带。显式 Permission Mode 的优先级由公共调用合同约束，Adapter 必须以原生回读证明其有效范围。每次 open 的 `environment` 必须到达原生工具执行载体；例如 DSH 的工具继承 Web 进程环境，因此为带逐 Session 环境的 open 建立独立 managed Web，检查/目录连接不会接收该 Thread 的委派身份。
 
 DeepSeek 插件通过自身的 HTTP/WebSocket 实现连接受支持的本机 DSH，不打包 DSH CLI。Legacy 专用的 `@deepseek-ai/dsh-apiproxy`、`@deepseek-ai/dsh-session` SDK 及其打包项已移除；Modern 仍使用的 `schemastery` 随插件构建保留。V0/V3 profile 和 Assistant 流解析属于插件，不进入 Host 或 Renderer。
 
@@ -170,8 +195,11 @@ DeepSeek 插件通过自身的 HTTP/WebSocket 实现连接受支持的本机 DSH
 - Manifest/入口/图标 symlink 逃逸、大小限制、主动 SVG 拒绝、工厂身份不符、超时返回清理与幂等关闭。
 - Host 中未知插件的目录查询、检查、Thread 创建、持久化身份、关闭；未安装和非法路由不泄漏到官方流；官方请求继续转发。
 - 共享路由的配置往返、规范性、长度及输入验证；Renderer 目录结果校验和不同客户端隔离；共享契约 browser bundle。
-- 七个预装插件的真实工厂加载、独立实例、显式 CLI 参数、后台预取和 macOS Broker 无直接回退；通用会话导入入口在动态加载后绑定 Adapter，旧 DSH RPC 复用同一事务。
-- 分离构建并搬移到仓库外的 Host/插件产物：加载七个预装插件、额外用户插件，以及移除所有插件后官方请求继续转发。
+- 当前预装插件的真实工厂加载、独立实例、显式 CLI 参数、后台预取和 macOS Broker 无直接回退；通用会话导入入口在动态加载后绑定 Adapter，旧 DSH RPC 复用同一事务。
+- 分离构建并搬移到仓库外的 Host/插件产物：加载当前预装插件、额外用户插件，以及移除所有插件后官方请求继续转发。
 - 恢复、Pi/DeepSeek 导入、委派、协议路由和 Renderer 的定向回归。
+- 未知插件与无 Model carrier 的真实提交事件；默认 Codex 输入/提交、Host 切换与旧异步回调隔离。
+- Host + 实际 Broker server/client 的认证故障 → 旧 wrapper 关闭 → 同 Thread fresh resume 组合测试。
+- 十个实际 Adapter 的 native fixture conformance；deadline、迟到资源、唯一终态、身份读回和单一 outputs 消费者。未覆盖能力的收据为 `incomplete`，不会因核心生命周期通过而变成全能力通过。
 
-这些是合成测试、构建和分离 Bundle 冒烟检查，不等同于真实 Codex Desktop、七个原生 Harness、macOS Broker、SSH 远端或完整安装/升级验收。后续仍须按架构方案的能力基线和发布 Gate 完成迁移与验证。
+这些是合成测试、构建和分离 Bundle 冒烟检查，不等同于真实 Codex Desktop、各原生 Harness、macOS Broker、SSH 远端或完整安装/升级验收。具体原生版本、平台和安装态仍需独立验收；验证方法见[公共 conformance](adapter-conformance.md)，既有结果见[固定快照整改记录](full-project-review-2026-09-12/remediation/README.md)。

@@ -1,0 +1,63 @@
+{
+  "delivery_sha": "e108154c550e38ab9662d67cf60af4c71eeb46b5",
+  "checks": [
+    {
+      "argv": [
+        "git",
+        "status",
+        "--porcelain=v1"
+      ],
+      "cwd": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-delegation-assessment-20260910-vzlus9t3/writer",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "diff",
+        "--name-only",
+        "90ff79528e30bf39e1e245c4b5e72a107861908a..HEAD"
+      ],
+      "cwd": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-delegation-assessment-20260910-vzlus9t3/writer",
+      "exit_code": 0,
+      "stdout": "scheduler.py\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "show",
+        "--format=fuller",
+        "--stat",
+        "HEAD"
+      ],
+      "cwd": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-delegation-assessment-20260910-vzlus9t3/writer",
+      "exit_code": 0,
+      "stdout": "commit e108154c550e38ab9662d67cf60af4c71eeb46b5\nAuthor:     Delegation Test <delegation-test@localhost>\nAuthorDate: Thu Sep 10 10:16:49 2026 +0800\nCommit:     Delegation Test <delegation-test@localhost>\nCommitDate: Thu Sep 10 10:16:49 2026 +0800\n\n    Implement select_ready for mutually disjoint ready batches.\n    \n    Select tasks in input order when dependencies are already completed,\n    the task itself is not completed, and resources conflict with neither\n    occupied nor earlier selections in the same batch.\n\n scheduler.py | 15 ++++++++++++++-\n 1 file changed, 14 insertions(+), 1 deletion(-)\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "diff",
+        "--check"
+      ],
+      "cwd": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-delegation-assessment-20260910-vzlus9t3/writer",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "git",
+        "status",
+        "--porcelain=v1"
+      ],
+      "cwd": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-delegation-assessment-20260910-vzlus9t3/fixture-repo",
+      "exit_code": 0,
+      "stdout": "",
+      "stderr": ""
+    }
+  ]
+}

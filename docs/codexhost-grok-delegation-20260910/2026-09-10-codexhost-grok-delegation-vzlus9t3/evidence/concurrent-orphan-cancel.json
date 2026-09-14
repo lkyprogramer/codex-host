@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "thread",
+    "cancel",
+    "67308aba-8ce7-48ca-9ca8-eb6da79638f6"
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 1,
+  "elapsed_seconds": 0.15,
+  "stdout": "",
+  "stderr": "{\n  \"error\": {\n    \"code\": \"INTERNAL_ERROR\",\n    \"message\": \"Official Thread '67308aba-8ce7-48ca-9ca8-eb6da79638f6' has no Codex Account binding\"\n  }\n}\n"
+}

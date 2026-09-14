@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "delegate",
+    "start",
+    "--harness",
+    "grok",
+    "--parent-thread",
+    "01a08908-80dd-7d60-aadc-550c7ac52d4e",
+    "--request-id",
+    "npm-path-recheck-20260910-0248",
+    "--task",
+    "这是用户授权的 npm CLI 路径修复复验。只执行以下只读检查：输出本任务 CODEXHOST_CLI_PATH 的值（不要输出其它环境变量），然后通过该变量的原始路径运行 delegate --help。不得覆盖变量、搜索或切换CLI、读写文件、修改配置、创建子任务或运行其它命令。最终简短报告 PATH_RECHECK_OK 或失败原因，以及实际CLI路径与help退出码。"
+  ],
+  "cli_path": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js",
+  "exit_code": 0,
+  "elapsed_seconds": 1.115,
+  "stdout": "{\n  \"delegationId\": \"36a49697-2822-4671-8327-27743e272cfd\",\n  \"threadId\": \"0560586f-7af7-42ca-a278-87b1a1ba2d52\",\n  \"turnId\": \"04ab56dd-c46f-4f24-8071-e1cb2a066179\",\n  \"harnessId\": \"grok\",\n  \"deepLink\": \"codex://threads/0560586f-7af7-42ca-a278-87b1a1ba2d52\",\n  \"status\": \"running\",\n  \"configuration\": {\n    \"requested\": {},\n    \"effective\": {\n      \"effectiveModel\": {\n        \"id\": \"grok-4.6\"\n      },\n      \"effectiveThinkingOptionId\": \"medium\"\n    }\n  },\n  \"next\": {\n    \"read\": \"/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js thread read 0560586f-7af7-42ca-a278-87b1a1ba2d52\",\n    \"wait\": \"/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js thread wait 0560586f-7af7-42ca-a278-87b1a1ba2d52 --timeout-ms 30000\"\n  }\n}\n",
+  "stderr": ""
+}

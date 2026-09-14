@@ -24,6 +24,16 @@ Bug 尽可能包含：
 - 涉及 Desktop、Renderer 或真实 Harness 的变化，分别记录自动测试和实机结果，并说明版本、平台和未验证部分。UI 变化尽可能提供脱敏截图。
 - 作者负责理解改动、回应反馈、补充验证和维护自己的分支。维护者不默认接管整个修复工作。
 
+## Harness 与架构相关改动
+
+先阅读[当前架构](docs/harness-plugin-architecture.md)、[插件运行时](docs/harness-plugin-runtime.md)和 [Harness Skill](.agents/skills/codexhost-add-harness/SKILL.md)。公共接口以 `shared-contracts` schema 和 `harness-adapter` exports 为准；预装集合与逐插件依赖由 `scripts/release/harness-plugins.json` 拥有。新增插件不能通过 Host 静态 import、Renderer 名字分支或跨包私有源码导入接入。
+
+验证真实 Adapter 的 native transport / journal fixture，不能只让 FakeHarness 本身通过。公共[conformance driver](docs/adapter-conformance.md)负责输出观察、期限和收据；回调使用它的 observer，不再迭代同一个 Session.outputs。原生不支持的能力保留 unsupported / skipped，已声明但未测试的能力保留 notCovered / incomplete。
+
+按改动选择 `package.json` 中的类型、lint、构建与定向测试命令。`npm start` 是构建并启动 Desktop 的入口，在 macOS / Windows 会先停止现有 Desktop；不要把它当作普通检查命令。纯文档修改检查链接、命令、格式与源码一致性即可。
+
+报告真实运行结果时，记录 Host 代码版本或工作树指纹、插件 Bundle hash、原生版本、平台和运行模式；未知字段写明未知。历史评审和验证记录绑定其原始快照，更新 README 不改写旧收据或沿用其通过状态冒充本次测试。
+
 ## 自动提示与人工决策
 
 `Repository maintenance` 只做两件事：

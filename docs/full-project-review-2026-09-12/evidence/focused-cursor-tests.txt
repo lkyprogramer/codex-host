@@ -1,0 +1,9 @@
+
+ RUN  v4.1.10 /Users/luo/Documents/github/codex-host
+
+
+ Test Files  1 passed (1)
+      Tests  16 passed (16)
+   Start at  12:01:31
+   Duration  786ms (transform 188ms, setup 0ms, import 311ms, tests 375ms, environment 0ms)
+

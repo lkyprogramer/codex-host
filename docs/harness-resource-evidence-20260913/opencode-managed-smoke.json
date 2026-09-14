@@ -1,0 +1,32 @@
+{
+  "nativeVersion": "1.18.30",
+  "modelCalls": 0,
+  "isolatedDirectory": "/tmp/codexhost-idle-smoke-RA6JwJ",
+  "cycles": [
+    {
+      "pid": 91906,
+      "result": {
+        "status": "suspended",
+        "scope": "native-session-and-managed-process-group"
+      },
+      "groupAliveAfterSuspend": false,
+      "turnCount": 0
+    },
+    {
+      "pid": 91908,
+      "result": {
+        "status": "suspended",
+        "scope": "native-session-and-managed-process-group"
+      },
+      "groupAliveAfterSuspend": false,
+      "turnCount": 0
+    }
+  ],
+  "managedProxy": true,
+  "faults": [],
+  "sameNativeIdentity": true,
+  "status": "passed",
+  "remainingOwnedGroups": [],
+  "verificationScope": "ManagedHarnessSession plus native OpenCode empty-session suspension and lazy read resume; no model Turn was run.",
+  "sdkVersion": "1.18.25"
+}

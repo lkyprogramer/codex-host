@@ -145,23 +145,30 @@ If `gh` is missing, unauthenticated, or fails, discovery falls back to the publi
 
 ## Feature Status
 
-| Capability | <a href="https://openai.com/codex/"><img alt="Codex" src="imgs/badge-codex.svg" /></a> | <a href="https://pi.dev/"><img alt="Pi" src="https://img.shields.io/badge/Pi-000000?logo=pi&logoColor=white" /></a> | <a href="https://github.com/can1357/oh-my-pi"><img alt="Oh My Pi" src="imgs/badge-omp-v5.svg" /></a> | <a href="https://code.claude.com/docs/en/quickstart"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-D97757?logo=claudecode&logoColor=white" /></a> | <a href="https://opencode.ai/docs/"><img alt="OpenCode" src="imgs/badge-opencode.svg" /></a> | <a href="https://grok.com/"><img alt="Grok" src="https://img.shields.io/badge/Grok-000000?logo=x&logoColor=white" /></a> | <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DeepSeek Harness" src="https://img.shields.io/badge/DeepSeek-4D6BFE?logo=deepseek&logoColor=white" /></a> | <a href="https://antigravity.google/product/antigravity-cli"><img alt="AGY" src="imgs/badge-agy.svg" /></a> | <a href="https://www.codebuddy.cn/home/"><img alt="CodeBuddy" src="imgs/badge-codebuddy.svg" /></a> | <a href="https://cursor.com/docs/cli/overview"><img alt="Cursor" src="imgs/badge-cursor.svg" /></a> |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| Streaming responses | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Tool status | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Edit Diff | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Questions / cancellation | Native | ✅ | — / ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Model / Thinking selection | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ / — |
-| Tool approvals | Native | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Permission modes | Native | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Cross-Agent task collaboration | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| Usage | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| Fork | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| Context compaction | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — |
-| Slash commands | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| Edit previous message | Native | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
+Official Codex keeps its native app-server path. The current source [preinstalled distribution manifest](../scripts/release/harness-plugins.json) lists ten external Harnesses. Plugins, native CLIs, and authentication are managed separately; installing codexhost does not install or sign in to each Harness.
+
+This is an integration overview, not certification of every native version. Configuration and interactions follow the target Host's current inspection and Session capabilities. Adapters project streaming, tools, diffs, and usage from native facts.
+
+| Harness | Native interface | Fork / edit previous message | Main boundary |
+| --- | --- | --- | --- |
+| Pi | JSONL RPC | Supported, including cross-directory Fork | No equivalent Permission Mode; local native Session import |
+| Oh My Pi (OMP) | JSONL RPC | Supported, including cross-directory Fork | Subagent observation depends on this transport's subscription probe |
+| Claude Code | Agent SDK | Supported, same directory | Native project settings; Aqua Broker for managed macOS remote execution |
+| OpenCode | SDK / Server / SSE | Supported, same directory | Configuration requires native readback; failed cancellation requests do not rewrite Turn outcomes |
+| Grok | ACP + native extensions | Supported, including cross-directory Fork | Native interject and Plan; permission at creation; rollback derives a new Session |
+| DeepSeek Harness | Managed Web / journal | Supported, same directory | Exact `0.1.2-rc.1` / `0.1.5-rc.1` support; local native Session import |
+| Antigravity CLI | stream-json / Hook / native history | Supported, including cross-directory Fork | Skip permissions only; derivation validates existing native history and resources |
+| Kiro CLI | ACP agent engine v3 | Supported, including cross-directory Fork | Invalid permission values are rejected; subagent observation without transcript reads |
+| CodeBuddy | ACP | Unsupported | Native configuration and interactions; no Host-simulated history derivation |
+| Cursor CLI | ACP + native history | Unsupported | Reasoning through native model variants; unattended execution uses native `--force` |
+
+**Antigravity:** uses native `--dangerously-skip-permissions` only. codexhost does not add tool approvals or workspace access restrictions; see [permissions](antigravity-tool-approval.md) and [subagents](antigravity-subagents.md).
+
+**Steering:** Sessions with native steering use interjection; other supported paths cancel, wait for the old Turn to finish, then start a new Turn. These are different operations. A ready fixed-model Harness can submit with an empty Model Catalog and keeps its own route. See [external Thread steering](external-thread-steering.md).
 
 ## Cross-Agent collaboration
+
+**Idle resources:** the Host uses a shared lifecycle contract to suspend supported Harnesses after 60 idle seconds while retaining resumable Threads. Active work and unknown background jobs are not forcibly reclaimed. See [resource lifecycle and support limits](harness-resource-lifecycle.md).
 
 You can ask the current Agent to hand an independent task to another Harness. For example:
 
@@ -219,18 +226,14 @@ This path does not add a public service or TCP port. Harness credentials remain 
 <details>
 <summary><h3>How it works</h3></summary>
 
-Most multi-agent clients connect different Harnesses through the [ACP](https://agentclientprotocol.com/) protocol. Integration is fast, but native capabilities such as tools, approvals, permissions, diffs, and questions are first flattened.
+codexhost integrates through each Harness's native interface: SDK for Claude Code, RPC for Pi / OMP, ACP for Grok / Kiro / CodeBuddy / Cursor, managed Web for DeepSeek, and CLI / Hook for Antigravity.
 
-CodexHost tries not to take that path:
+- **Desktop:** retain the official shell and enhance selection and presentation through CDP / Electron Inspector and the Renderer Extension.
+- **Host:** forward official Codex requests; own external protocol projection, operation reservations, persistence, and recovery.
+- **Plugins:** load explicitly enabled plugins on the target Host. Manifests describe identity and resources; Adapter / Session contracts report actual capabilities and state.
+- **Native execution:** each Adapter owns native history, permission confirmation, cancellation, and cleanup.
 
-- **Desktop side:** Use CDP / Electron Inspector to enhance Agent selection and the session UI on official Codex Desktop. The chat shell is not rebuilt, and the official installer is not modified.
-- **Protocol side:** Use a CLI Shim to transparently connect to the official app-server; Codex requests are forwarded unchanged.
-- **Harness side:** Integrate each Harness through its native interface. Pi uses official RPC, Claude Code uses the Agent SDK / CLI, then results are projected into Desktop’s existing streaming output, tools, diffs, approvals, and questions.
-- **Orchestration side:** Create a separate Native Session and regular writable Thread for the delegated Harness, and store the delegation relation separately. Creation and result observation stay separate, so the initiator explicitly chooses to read, wait, or leave the task running in the background.
-
-For sustained observation, `thread observe` renews bounded waits internally and filters ordinary progress before returning actionable changes. See [observer usage and outer-tool limitations](thread-observer.md).
-
-The goal is fidelity, not merely making the conversation work. Streaming, tool status, reliable patches, native approvals, and questions should come from the Harness itself whenever possible, rather than being guessed or fabricated by the Host.
+See the [current architecture](harness-plugin-architecture.md) for boundaries and source entry points.
 
 </details>
 
@@ -257,7 +260,7 @@ The goal is fidelity, not merely making the conversation work. Streaming, tool s
 
 ## Development
 
-Requirements: official Codex Desktop, Node.js 22.19+ or 24, and Rust.
+Requirements: official Codex Desktop, Node.js 22.x (≥22.19) or 24.x, and Rust.
 
 ```bash
 git clone https://github.com/BytePioneer-AI/codex-host
@@ -268,16 +271,31 @@ npm start
 
 ### Runtime architecture
 
-Using Pi as the example. Left to right is one request’s call chain: Desktop → shared layer → Pi plugin → native process.
+Codex Desktop → CLI Shim / Host Runtime → official Codex app-server or plugin Loader → Harness Adapter / Session → native SDK, RPC, ACP, CLI, or Web process. The target Host's plugin directory supplies Renderer identity and presentation.
 
-<div align="center">
-  <img width="100%" src="imgs/pi-runtime-architecture.png" alt="Runtime architecture using Pi: Desktop to the shared layer, then the Pi plugin and native process">
-</div>
+See [architecture](harness-plugin-architecture.md), [plugin runtime and trust](harness-plugin-runtime.md), and the [documentation index](index.md).
 
 ### Adding a Harness
 
-The main work is implementing the plugin Manifest, factory, Adapter, Session, and the native communication and conversion logic. The Renderer still has some static wiring, so full Desktop integration needs additional work.
-When adding a Harness, you can have a coding Agent use the in-repo [codexhost-add-harness Skill](../.agents/skills/codexhost-add-harness/SKILL.md). It covers plugin structure, the public Adapter interface, capability implementation, and test requirements.
+Implement its Manifest, factory, Adapter, Session, and native protocol. Explicitly enable it in the user plugin directory and restart the Host. A new ID following the public contracts is discoverable by the Picker, configuration drafts, and Sidebar without adding per-name Renderer branches. Preinstallation is a separate distribution-manifest decision.
+
+Declare real capability scopes, preserve environment and lifecycle semantics, and use the [conformance driver](adapter-conformance.md). The [codexhost-add-harness Skill](../.agents/skills/codexhost-add-harness/SKILL.md) provides implementation guidance.
+
+### Validation
+
+Choose checks for the change from [package.json](../package.json):
+
+```bash
+npm run typecheck
+npm run lint
+npm run test:typescript -- --maxWorkers=2
+npm run test:rust
+npm run test:e2e -- --workers=2
+```
+
+TypeScript tests build the workspace and plugins. Browser E2E uses synthetic pages and requires an available browser. Use focused tests when appropriate. `npm start` builds and launches Desktop, stopping existing Codex Desktop processes on macOS / Windows; `npm start -- --no-build` reuses artifacts.
+
+The [2026-09-12 remediation record](full-project-review-2026-09-12/remediation/README.md) contains results for its frozen code snapshot: 3,771 TypeScript, 172 Rust, and 73 browser tests passed. These are prior results, not tests rerun for this documentation update or live Harness / Desktop / deployment certification.
 
 ## Acknowledgements
 

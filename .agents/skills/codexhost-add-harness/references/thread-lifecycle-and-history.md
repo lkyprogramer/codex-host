@@ -45,6 +45,17 @@ Native Ref 使用当前 Harness ID、稳定原生 ID 和需要时的可持久化
 
 当前能力 schema 没有独立 resume 开关，也没有自动 ephemeral Thread 路径。原生不支持 resume 时，分支返回 unsupported，并明确这只是受限后端；不能声称支持持久化产品或完整 Agent 协调。
 
+## 空闲资源回收
+
+可选 `HarnessSession.resourceLifecycle.suspend(signal)` 接入 Host 统一的空闲生命周期。它是原子操作，不能拆成 Host 先查询 idle 再调用 `close()`：原生自主任务可能在两次调用之间启动。
+
+- 成功返回 `suspended` 与准确 `scope`，关闭受管资源并结束该原生 Session 实例的输出；持久化原生身份、配置和历史仍必须可恢复。
+- 存在活动 Turn、配置、待回答交互、后台子代理或无法证明的工作时拒绝挂起，不能通过取消工作换取 idle。
+- 响应取消信号；挂起调用未真正结束前不得让新操作与迟到的关闭并发。超时不等于取消完成。
+- Host 保留轻量 Thread、统一计时并按需恢复，完整历史读取仍读原生数据。状态轮询不应启动原生进程。
+- `resourcesReleased` 不等于全量 owned-job quiescence。不要把进程组证明扩张到独立进程组、远端、容器或业务资源。
+- 验证空闲、忙碌、交互、后台子任务、并发恢复、关闭失败和同一身份继续；未知能力保持不启用。
+
 ## Fork：精确保留前缀并独立继续
 
 仅在 history.fork 为 true 时支持；forkAcrossCwd 为 true 必须同时支持 fork。

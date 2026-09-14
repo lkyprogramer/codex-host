@@ -1,0 +1,8 @@
+
+> codexhost@0.7.0 build:typescript
+> tsc -b && npm run build:plugins
+
+
+> codexhost@0.7.0 build:plugins
+> node scripts/release/harness-plugins.mjs --output packages/host-runtime/dist/plugins
+

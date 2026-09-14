@@ -84,6 +84,14 @@ Detachment is deliberately narrow. The command must contain exactly one default 
 
 Socket initialization remains serialized across an in-place upgrade. The current listener uses per-owner registers and also publishes a live compatibility marker understood by an already-loaded earlier managed Shim before it unlinks or binds the control socket. An abandoned legacy marker is retained as a passive fence instead of being deleted through its shared pathname.
 
+## Plugin and Broker recovery boundaries
+
+Each remote Host connection loads preinstalled plugins beside its actual Runtime and reads the remote user plugin configuration. The Picker and Sidebar use the target Host's directory; locally installed plugins do not automatically become remote plugins. Copy adjacent plugin Bundles, manifests, and resources with the Runtime. Native CLIs and authentication remain independently managed on the remote machine.
+
+Broker authentication or connection faults terminate the old Session. Host closes its wrapper and uses a fresh resume with the confirmed Native Ref on the next use of that Thread. It does not replay the failed Turn or bypass native authentication.
+
+If a macOS Broker replacement fails, recovery attempts to restore the verified previous plist and generation. Readiness requires a new descriptor fingerprint, not one left by the failed candidate. Failure of both replacement and recovery preserves both diagnostics. See the [remediation record](full-project-review-2026-09-12/remediation/README.md) for automated evidence and untested live paths.
+
 ## Use from Codex Desktop
 
 Start the client-side Codex Desktop through codexhost, open the SSH workspace, and use the Agent/Model selector in that remote composer. Harness discovery, model selection, Threads, Turns, tools, approvals, and history then use the codexhost process on the SSH host. Multiple Desktop clients may attach to the same running native Codex Thread through the shared stock app-server; native subscription and writer/observer behavior remains authoritative. Local Harness availability remains initialized and cached independently, so an unavailable SSH connection cannot block local controls after switching back to a local Composer.
@@ -107,7 +115,7 @@ codexhost remote status
 codexhost remote uninstall
 ```
 
-`start` is idempotent and starts the installed headless Remote Host. `stop` stops only a verified codexhost listener and leaves unrelated Codex processes running. `status` reports runtime state and protocol identity in addition to a missing or modified native entrypoint, startup block, runtime, or data directory. A partially edited or otherwise malformed managed startup block is reported as degraded; install and uninstall still refuse to rewrite it automatically. Status also identifies the legacy blocking shell entrypoint and asks for a reinstall migration. `uninstall` verifies the recorded entrypoint digest before removing only the managed entrypoint, manifest, and startup block. It preserves profile backups and `~/.codexhost/remote/data` so Thread mappings remain recoverable. Reconnect the remote workspace after uninstalling.
+`start` is idempotent and starts the installed headless Remote Host. `stop` stops only a verified codexhost listener and leaves unrelated Codex processes running. `status` reports runtime state and protocol identity in addition to a missing or modified native entrypoint, startup block, runtime, or data directory. A partially edited or otherwise malformed managed startup block is reported as degraded; install and uninstall still refuse to rewrite it automatically. Status also identifies the legacy blocking shell entrypoint and asks for a reinstall migration. `uninstall` first probes the listener. A running codexhost-owned listener is stopped through process identity verification and socket-disappearance readback before file cleanup; stock or unknown owners are refused. A degraded installation may still be stopped through this protected path, while start requires a valid installation. File ownership and profile checks remain enforced. Uninstall then verifies the recorded entrypoint digest before removing only the managed entrypoint, manifest, and startup block. It preserves profile backups and `~/.codexhost/remote/data` so Thread mappings remain recoverable. Reconnect the remote workspace after uninstalling.
 
 On macOS, `remote status` also verifies that the Aqua broker LaunchAgent is running, that its
 property list still matches the installed runtime, and that a non-empty owner-only descriptor is

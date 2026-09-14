@@ -4,11 +4,11 @@
 
 ## 现状与约束
 
-Host 已有插件目录和通用路由，但 Renderer 尚未完全目录驱动：
+Host 的插件目录与共享路由已经接入 Renderer：
 
 - `packages/renderer-extension/src/renderer-model-client.ts` 提供按目标 Host 查询且校验结果的 `listHarnessPlugins()`。
-- `agent-selection-state.ts` 仍以 `KNOWN_RENDERER_AGENTS` 推导联合类型，并按 Harness 保存部分配置。
-- `versioned-renderer-adapter.ts`、Picker、图标、偏好、ownership 和 Desktop Control 仍有静态接线。
+- `agent-selection-state.ts` 使用 Harness ID 与 `externalConfigurationByAgent`；旧名单仅供旧 Host 兼容。
+- `versioned-renderer-adapter.ts` 统一写共享 route；Picker、图标、偏好、ownership 与 Desktop Control 消费目标 Host 的目录和公共状态。
 
 本页未带目录前缀的 Renderer 源文件均位于 `packages/renderer-extension/src/`。实施前重新核对上述源码；若某处已动态化，则验证通用路径，不重新加入固定分支。
 
@@ -43,7 +43,7 @@ Host 已有插件目录和通用路由，但 Renderer 尚未完全目录驱动�
 | 权限偏好与展示 | `renderer-permission-mode-preference.ts`、`renderer-harness-localization.ts` | 只表达真实原生模式和作用域，不机械复制历史特例 |
 | Settings | `settings/pages.ts` | Connections 状态、安装入口、刷新与错误提示一致 |
 
-当前接入可能需要扩展 Renderer 的固定联合类型及映射；列出实际修改位置和原因，而不是全仓库机械补名字。Host 的加载/委派名单和专用 codec 不随之扩展。
+新增插件验证既有通用路径，不扩展 Renderer 固定名单、Host 注册表或专用 codec。只有公共合同无法表达的实际能力才评估共享扩展。
 
 插件 Manifest 是新插件展示元数据来源。目录图标是经过校验的数据 URL，使用 img 展示，不把 SVG/描述字符串内联为 HTML。若当前静态 UI 仍需构建期资源，明确这是过渡产品接线，并保证与插件声明一致。
 
@@ -52,16 +52,16 @@ Host 已有插件目录和通用路由，但 Renderer 尚未完全目录驱动�
 - Catalog/能力来自目标 Host 的 inspect，effective 状态来自原生确认后的 Thread 状态。
 - selectModel、selectThinkingOption 和 selectPermissionMode 决定相应控件；权限 atCreate 不显示为任意 live 切换。
 - Thread 配置通过公共 select 请求更新，失败时不把 requested 值当作已生效。
-- 固定 Model 或空 Catalog 是合法原生情况，但当前 Composer 就绪判断未必支持；必须验证不会永久禁用提交，不能编造模型绕过。
+- 固定 Model 或空 Catalog 是合法原生情况；必须先写无 Model 的 Harness carrier 再允许提交，不能编造模型绕过。
 - Usage 初始值、刷新、通知、Commands、压缩走既有公共路径，验证换 Thread/Host 后不残留前一个实例的数据。
 - Credits 仍是 Host 结构检查加 UI 策略，不是 Manifest/Adapter 正式 capability；新增额度需求单独核对接口和使用方。
-- Session Import 候选接口不等于通用导入 UI。当前 DeepSeek 导入、本地 Web UI 等路径按实际支持范围接入并报告限制。
+- Session Import 通过公共导入 UI 消费候选与 resolve 接口；只提供 list 的旧插件不能导入。Native Web UI 仍按实际能力接入并报告限制。
 
 目录查询结果包含已加载的描述，也可能对应 unavailable Adapter；目录存在不代表原生安装、认证或运行就绪。旧 Host 不支持目录方法时显式显示兼容限制，不把错误伪装成空目录。
 
 ## 运行中调整方向
 
-外部 Thread 的「调整方向」复用公共 Host／Renderer 路径：`turn.cancel` → 等旧轮终态 → `turn.start`。插件提供[取消与后续 Turn](output-and-interactions.md#取消与后续-turn)的基础行为，不另建 steer 命令、capability 或 Harness 专用 Renderer 分支；官方 Codex Thread 保留原生 steer。
+外部 Thread 的「调整方向」由实际 `session.steering` 与 `capabilities.turnControl` 决定：native interject 保留原生能力；restart 路径使用 `turn.cancel` → 等旧轮终态 → `turn.start`。插件验证[取消与后续 Turn](output-and-interactions.md#取消与后续-turn)的基础行为，不添加按 Harness 名称猜测的 Renderer 分支；官方 Codex Thread 保留原生 steer。workModes 只显示当前 Session 真实支持的模式。
 
 对目标 Harness 验证新输入只展示、执行一次，成功后可继续跟进；失败时保留输入，既有队列和旧轮消息不会被错误恢复或重复发送。分别验证取消失败、超时和交付结果未确认，不能把客户端超时当作输入未被接受。共享实现、当前输入限制和版本化绑定见[外部 Thread 调整方向](../../../../docs/external-thread-steering.md)，不在插件中复制协调逻辑。
 

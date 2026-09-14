@@ -135,23 +135,30 @@ Codex Desktop을 완전히 종료한 뒤, 새 터미널을 열고 codexhost를 �
 
 ## 기능 상태
 
-| 기능 | <a href="https://openai.com/codex/"><img alt="Codex" src="imgs/badge-codex.svg" /></a> | <a href="https://pi.dev/"><img alt="Pi" src="https://img.shields.io/badge/Pi-000000?logo=pi&logoColor=white" /></a> | <a href="https://github.com/can1357/oh-my-pi"><img alt="Oh My Pi" src="imgs/badge-omp-v5.svg" /></a> | <a href="https://code.claude.com/docs/en/quickstart"><img alt="Claude Code" src="https://img.shields.io/badge/Claude_Code-D97757?logo=claudecode&logoColor=white" /></a> | <a href="https://opencode.ai/docs/"><img alt="OpenCode" src="imgs/badge-opencode.svg" /></a> | <a href="https://grok.com/"><img alt="Grok" src="https://img.shields.io/badge/Grok-000000?logo=x&logoColor=white" /></a> | <a href="https://github.com/deepseek-ai/deepseek-harness"><img alt="DeepSeek Harness" src="https://img.shields.io/badge/DeepSeek-4D6BFE?logo=deepseek&logoColor=white" /></a> | <a href="https://antigravity.google/product/antigravity-cli"><img alt="AGY" src="imgs/badge-agy.svg" /></a> | <a href="https://www.codebuddy.cn/home/"><img alt="CodeBuddy" src="imgs/badge-codebuddy.svg" /></a> | <a href="https://cursor.com/docs/cli/overview"><img alt="Cursor" src="imgs/badge-cursor.svg" /></a> |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 스트리밍 응답 | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 도구 상태 | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Edit Diff | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 질문 / 취소 | 기본 제공 | ✅ | — / ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Model / Thinking 선택 | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ / — |
-| 도구 승인 | 기본 제공 | ✅ | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| 권한 모드 | 기본 제공 | — | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Agent 간 작업 협업 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| Usage | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — |
-| Fork | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| 컨텍스트 압축 | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — | — |
-| 슬래시 명령 | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
-| 이전 메시지 수정 | 기본 제공 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | — | — |
+공식 Codex는 네이티브 app-server 경로를 유지합니다. 현재 소스의 [사전 설치 배포 목록](../scripts/release/harness-plugins.json)에는 외부 Harness 10개가 있습니다. 플러그인, 네이티브 CLI, 로그인 상태는 별도로 관리하며 codexhost 설치가 각 Harness의 설치나 로그인을 대신하지 않습니다.
+
+아래 표는 연동 방식과 제한 사항이며 모든 네이티브 버전의 실기기 검증을 뜻하지 않습니다. 설정과 상호작용은 대상 Host의 현재 inspection 및 Session 기능을 따릅니다. 스트리밍, 도구, Diff, Usage는 네이티브 데이터에서 투영합니다.
+
+| Harness | 네이티브 인터페이스 | Fork / 이전 메시지 수정 | 주요 제한 |
+| --- | --- | --- | --- |
+| Pi | JSONL RPC | 지원, 다른 디렉터리 Fork 포함 | 동등한 Permission Mode 없음; 로컬 네이티브 Session 가져오기 |
+| Oh My Pi (OMP) | JSONL RPC | 지원, 다른 디렉터리 Fork 포함 | 현재 transport의 구독 확인 결과에 따라 하위 에이전트 관찰 |
+| Claude Code | Agent SDK | 같은 디렉터리에서 지원 | 네이티브 프로젝트 설정; macOS 관리형 원격 실행은 Aqua Broker 사용 |
+| OpenCode | SDK / Server / SSE | 같은 디렉터리에서 지원 | 설정은 네이티브 재조회로 확인; 취소 요청 실패가 Turn 결과를 덮어쓰지 않음 |
+| Grok | ACP + 네이티브 확장 | 지원, 다른 디렉터리 Fork 포함 | 네이티브 삽입 및 Plan; 생성 시 권한 설정; rollback은 새 Session 파생 |
+| DeepSeek Harness | 관리형 Web / journal | 같은 디렉터리에서 지원 | `0.1.2-rc.1` / `0.1.5-rc.1`만 지원; 로컬 네이티브 Session 가져오기 |
+| Antigravity CLI | stream-json / Hook / 네이티브 기록 | 지원, 다른 디렉터리 Fork 포함 | Skip permissions만 제공; 파생 시 기존 네이티브 기록 및 리소스 검증 |
+| Kiro CLI | ACP agent engine v3 | 지원, 다른 디렉터리 Fork 포함 | 잘못된 권한 값 거부; 하위 에이전트 관찰 지원, 과정 본문 읽기 미지원 |
+| CodeBuddy | ACP | 미지원 | 네이티브 설정 및 상호작용; Host에서 기록 파생을 모방하지 않음 |
+| Cursor CLI | ACP + 네이티브 기록 | 미지원 | 추론 강도는 네이티브 모델 변형으로 선택; 무인 실행은 네이티브 `--force` 사용 |
+
+**Antigravity:** 네이티브 `--dangerously-skip-permissions`만 사용합니다. codexhost는 도구 승인이나 작업 공간 접근 제한을 추가하지 않습니다. [권한](antigravity-tool-approval.md)과 [하위 에이전트](antigravity-subagents.md) 설명을 참조하세요.
+
+**실행 중 방향 조정:** 네이티브 steering이 있는 Session은 삽입을 사용하고, 다른 지원 경로는 취소 → 이전 Turn 종료 대기 → 새 Turn 시작 순서를 사용합니다. 고정 모델 Harness는 Model Catalog가 비어 있어도 준비 상태라면 자신의 경로로 제출할 수 있습니다. [외부 Thread steering](external-thread-steering.md)을 참조하세요.
 
 ## Agent 간 협업
+
+**유휴 리소스:** Host는 공통 생명주기 계약으로 안전한 일시 중단을 지원하는 Harness의 네이티브 리소스를 유휴 60초 후 해제하고, Thread는 유지하여 필요할 때 복원합니다. 실행 중이거나 상태를 확인할 수 없는 백그라운드 작업은 강제로 종료하지 않습니다. [리소스 생명주기와 지원 범위](harness-resource-lifecycle.md)를 참조하세요.
 
 현재 Agent에게 독립 작업을 다른 Harness로 넘기도록 요청할 수 있습니다. 예를 들면 다음과 같습니다.
 
@@ -209,16 +216,14 @@ Windows가 제어 대상 Host인 경우, Codex Desktop의 공식 페어링, 계�
 <details>
 <summary><h3>작동 방식</h3></summary>
 
-대부분의 멀티 에이전트 클라이언트는 [ACP](https://agentclientprotocol.com/) 프로토콜을 통해 여러 Harness를 연결합니다. 통합은 빠르지만 도구, 승인, 권한, Diff, 질문과 같은 기본 기능이 먼저 평탄화됩니다.
+codexhost는 각 Harness의 네이티브 인터페이스를 사용합니다. Claude Code는 SDK, Pi / OMP는 RPC, Grok / Kiro / CodeBuddy / Cursor는 ACP, DeepSeek은 관리형 Web, Antigravity는 CLI / Hook으로 연동합니다.
 
-CodexHost는 가능한 한 이 길을 피합니다.
+- **Desktop:** 공식 외형을 유지하고 CDP / Electron Inspector와 Renderer Extension으로 선택 및 표시 기능을 보완합니다.
+- **Host:** 공식 Codex 요청을 전달하며 외부 프로토콜 투영, 작업 예약, 영속화와 복구를 담당합니다.
+- **플러그인:** 대상 Host에서 명시적으로 활성화된 플러그인을 로드합니다. Manifest는 식별과 리소스, Adapter / Session은 실제 기능과 상태를 제공합니다.
+- **네이티브 실행:** 기록, 권한 확인, 취소 및 자원 정리는 각 Adapter가 담당합니다.
 
-- **Desktop 측**: CDP / Electron Inspector를 사용해 공식 Codex Desktop에 Agent 선택과 세션 UI를 더합니다. 채팅 셸을 다시 만들지 않으며 공식 설치 프로그램도 수정하지 않습니다.
-- **프로토콜 측**: CLI Shim을 사용해 공식 app-server에 투명하게 연결하고 Codex 요청을 그대로 전달합니다.
-- **Harness 측**: 각 Harness의 기본 인터페이스로 연동합니다. Pi는 공식 RPC를, Claude Code는 Agent SDK / CLI를 사용한 뒤 Desktop의 기존 스트리밍 출력, 도구, Diff, 승인 및 질문에 투영합니다.
-- **오케스트레이션 측**: 위임할 Harness를 위한 별도 Native Session과 일반 쓰기 가능 Thread를 만들고 위임 관계를 따로 저장합니다. 생성과 결과 관찰을 분리하므로, 시작한 쪽이 읽기, 대기, 또는 백그라운드 실행을 명시적으로 선택합니다.
-
-목표는 단순히 대화가 가능하게 만드는 것이 아니라 충실도를 유지하는 것입니다. 스트리밍, 도구 상태, 안정적인 Patch, 기본 승인과 질문은 가능한 한 Host가 추측하거나 만들어 내지 않고 Harness 자체에서 제공됩니다.
+경계와 소스 진입점은 [현재 아키텍처](harness-plugin-architecture.md)를 참조하세요.
 
 </details>
 
@@ -245,7 +250,7 @@ CodexHost는 가능한 한 이 길을 피합니다.
 
 ## 개발
 
-환경 요구 사항: 공식 Codex Desktop, Node.js 22.19+ 또는 24, Rust.
+환경 요구 사항: 공식 Codex Desktop, Node.js 22.x(≥22.19) 또는 24.x, Rust.
 
 ```bash
 git clone https://github.com/BytePioneer-AI/codex-host
@@ -256,16 +261,31 @@ npm start
 
 ### 실행 아키텍처
 
-Pi를 예로 듭니다. 왼쪽에서 오른쪽이 한 번의 요청 호출 체인입니다: Desktop → 공용 계층 → Pi 플러그인 → 네이티브 프로세스.
+Codex Desktop → CLI Shim / Host Runtime → 공식 Codex app-server 또는 플러그인 Loader → Harness Adapter / Session → 네이티브 SDK, RPC, ACP, CLI 또는 Web 프로세스 순서입니다. 대상 Host의 플러그인 목록이 Renderer의 식별과 표시 정보를 제공합니다.
 
-<div align="center">
-  <img width="100%" src="imgs/pi-runtime-architecture.png" alt="Pi를 예로 든 실행 아키텍처: Desktop에서 공용 계층, 이어서 Pi 플러그인과 네이티브 프로세스">
-</div>
+[아키텍처](harness-plugin-architecture.md), [플러그인 실행 및 신뢰 경계](harness-plugin-runtime.md), [문서 목록](index.md)을 참조하세요.
 
 ### Harness 추가
 
-주요 작업은 플러그인의 Manifest, 팩토리, Adapter, Session 및 네이티브 통신과 변환 로직을 구현하는 것입니다. 현재 Renderer에는 여전히 정적 연결이 있어, 완전한 Desktop 연동은 별도로 처리해야 합니다.
-Harness를 추가할 때는 코딩 Agent가 저장소의 [codexhost-add-harness Skill](../.agents/skills/codexhost-add-harness/SKILL.md)을 사용하도록 할 수 있습니다. 플러그인 구조, 공용 Adapter 인터페이스, 기능 구현과 테스트 요구 사항을 설명합니다.
+Manifest, 팩토리, Adapter, Session과 네이티브 프로토콜을 구현하고 사용자 플러그인 디렉터리에서 명시적으로 활성화한 뒤 Host를 재시작합니다. 공용 계약을 따르는 새 ID는 이름별 Renderer 분기를 추가하지 않아도 Picker, 설정 초안, Sidebar에 표시됩니다. 사전 설치는 배포 목록에서 별도로 결정합니다.
+
+실제 기능 범위, 환경 격리와 수명 주기를 구현하고 [conformance driver](adapter-conformance.md)로 검증하세요. [codexhost-add-harness Skill](../.agents/skills/codexhost-add-harness/SKILL.md)에 구현 지침이 있습니다.
+
+### 검증
+
+변경 범위에 맞춰 [package.json](../package.json)의 명령을 선택하세요.
+
+```bash
+npm run typecheck
+npm run lint
+npm run test:typescript -- --maxWorkers=2
+npm run test:rust
+npm run test:e2e -- --workers=2
+```
+
+TypeScript 테스트는 Workspace와 플러그인을 빌드합니다. 브라우저 E2E는 합성 페이지를 사용하며 이용 가능한 브라우저가 필요합니다. 필요한 경우 관련 테스트만 실행하세요. `npm start`는 빌드 후 Desktop을 시작하며 macOS / Windows에서는 기존 Codex Desktop을 종료합니다. `npm start -- --no-build`는 기존 산출물을 재사용합니다.
+
+[2026-09-12 수정 기록](full-project-review-2026-09-12/remediation/README.md)은 당시 코드 스냅샷의 TypeScript 3,771개, Rust 172개, 브라우저 73개 통과 결과를 보관합니다. 이번 문서 수정에서 재실행한 결과나 실제 Harness / Desktop / 배포 검증을 뜻하지 않습니다.
 
 ## 감사의 글
 

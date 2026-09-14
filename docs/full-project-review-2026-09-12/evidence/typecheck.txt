@@ -1,0 +1,22 @@
+
+> codexhost@0.7.0 typecheck
+> tsc -b --pretty false && tsc -p tests/tsconfig.json --noEmit --pretty false
+
+packages/adapters/grok/test/grok-adapter.test.ts(2656,12): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2657,18): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2659,12): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2674,18): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2681,12): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2682,18): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2687,18): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2698,12): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2700,18): error TS18048: 'session.workMode' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2717,7): error TS18048: 'session.steering' is possibly 'undefined'.
+packages/adapters/grok/test/grok-adapter.test.ts(2725,7): error TS18048: 'session.steering' is possibly 'undefined'.
+packages/host-runtime/test/delegation-control-server.test.ts(203,5): error TS2741: Property 'listHarnesses' is missing in type '{ waitMany: Mock<(_input: any, signal?: AbortSignal) => Promise<never>>; status: Mock<Procedure>; evidence: Mock<Procedure>; configuration: Mock<...>; ... 8 more ...; list: Mock<...>; }' but required in type 'DelegationControlApi'.
+packages/host-runtime/test/external-work-mode.test.ts(18,21): error TS2352: Conversion of type '{ workMode: { current: "plan"; set: Mock<() => Promise<{ ok: true; value: undefined; }>>; }; }' to type 'HarnessSession' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type '{ workMode: { current: "plan"; set: Mock<() => Promise<{ ok: true; value: undefined; }>>; }; }' is missing the following properties from type 'HarnessSession': harnessId, capabilities, initialState, initialUsage, and 4 more.
+packages/host-runtime/test/external-work-mode.test.ts(31,21): error TS2352: Conversion of type '{ workMode: { current: "default"; set: Mock<() => Promise<{ ok: true; value: undefined; }>>; }; }' to type 'HarnessSession' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type '{ workMode: { current: "default"; set: Mock<() => Promise<{ ok: true; value: undefined; }>>; }; }' is missing the following properties from type 'HarnessSession': harnessId, capabilities, initialState, initialUsage, and 4 more.
+packages/host-runtime/test/external-work-mode.test.ts(35,25): error TS2352: Conversion of type '{ workMode: { current: "plan"; set: Mock<() => Promise<{ ok: true; value: undefined; }>>; }; }' to type 'HarnessSession' may be a mistake because neither type sufficiently overlaps with the other. If this was intentional, convert the expression to 'unknown' first.
+  Type '{ workMode: { current: "plan"; set: Mock<() => Promise<{ ok: true; value: undefined; }>>; }; }' is missing the following properties from type 'HarnessSession': harnessId, capabilities, initialState, initialUsage, and 4 more.

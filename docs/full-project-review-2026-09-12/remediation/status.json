@@ -1,0 +1,425 @@
+{
+  "branch": "codex/full-review-remediation-20260912",
+  "base": "38964658185bd090b4044f0cc9f5b575d8284b87",
+  "head": "38964658185bd090b4044f0cc9f5b575d8284b87",
+  "status": "completed_local_remediation",
+  "generatedAt": "2026-09-12T05:43:54.138309+00:00",
+  "committed": false,
+  "pushed": false,
+  "deployed": false,
+  "originalFindingCount": 29,
+  "architectureItemCount": 7,
+  "items": [
+    {
+      "id": "F01",
+      "title": "Claude 执行时跳过项目规则与 project/local settings",
+      "status": "implemented_and_locally_verified",
+      "result": "Claude 执行 Query 恢复 SDK 默认 user/project/local settings；只读检查仍隔离。",
+      "source": "packages/adapters/claude-code/src/sdk-transport.ts",
+      "regression_evidence": "packages/adapters/claude-code/test/sdk-transport.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F02",
+      "title": "Grok 回退先原地截断历史，后续失败不能恢复源",
+      "status": "implemented_and_locally_verified",
+      "result": "Grok rollback 先原生 fork，校验新 ID、源不变与精确前缀；load 或后续设置失败清理派生 Session。",
+      "source": "packages/adapters/grok/src/grok-rewind.ts",
+      "regression_evidence": "packages/adapters/grok/test/acp-fork-cleanup.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F03",
+      "title": "Antigravity 派生历史可能只有 sidecar 正确，原生副本失败仍报成功",
+      "status": "implemented_and_locally_verified",
+      "result": "Antigravity 按实际 HOME 克隆/裁剪/读回 DB、brain、summary；畸形或不完整原生状态失败关闭，派生失败清理且保持源。",
+      "source": "packages/adapters/antigravity/src/fork.ts",
+      "regression_evidence": "packages/adapters/antigravity/test/fork.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F04",
+      "title": "Kiro 未知 Permission Mode 被静默映射为 autopilot",
+      "status": "implemented_and_locally_verified",
+      "result": "Kiro 未知权限值在任何原生副作用前返回 invalidRequest，不映射为 autopilot。",
+      "source": "packages/adapters/kiro-cli/src/permission-modes.ts",
+      "regression_evidence": "packages/adapters/kiro-cli/test/models-and-commands.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F05",
+      "title": "输出消费异常缺少终结处理，会留下永远 busy 的 Thread",
+      "status": "implemented_and_locally_verified",
+      "result": "Host 集中终结输出异常，释放 Turn、response gate、change/attention waiter 并关闭 Session；终结本身失败也收敛。",
+      "source": "packages/host-runtime/src/app-server-host.ts",
+      "regression_evidence": "packages/host-runtime/test/app-server-host.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F06",
+      "title": "创建中断后残留的委派去重记录指向已删除 Thread",
+      "status": "implemented_and_locally_verified",
+      "result": "恢复时保留成对 provisional Thread/委派去重记录；相同 requestId 返回 outcomeUnknown，不重新执行。",
+      "source": "packages/mapping-store/src/mapping-store.ts",
+      "regression_evidence": "packages/host-runtime/test/harness-delegation-coordinator.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F07",
+      "title": "配置成功响应不保证持久化，Model 路径甚至没有更新 carrier",
+      "status": "implemented_and_locally_verified",
+      "result": "Model/Thinking/Permission 以原生完整 observed state 更新 carrier 和持久化；写入失败明确报错，后续成功不复活旧配置。",
+      "source": "packages/host-runtime/src/app-server-host.ts",
+      "regression_evidence": "packages/host-runtime/test/app-server-host.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F08",
+      "title": "无人值守委派的执行意图没有跨重启保存",
+      "status": "implemented_and_locally_verified",
+      "result": "executionPolicy 作为 Thread 意图持久化并传递 create/resume/fork/rollback；显式权限优先，旧记录不推断提升权限。",
+      "source": "packages/harness-adapter/src/text-session.ts",
+      "regression_evidence": "packages/host-runtime/test/app-server-host.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F09",
+      "title": "OMP 恢复/派生的首个进程丢失逐 Thread 环境",
+      "status": "implemented_and_locally_verified",
+      "result": "OMP 恢复/派生首个 transport 接收本次 Thread environment。",
+      "source": "packages/adapters/omp/src/omp-adapter.ts",
+      "regression_evidence": "packages/adapters/omp/test/omp-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F10",
+      "title": "OpenCode 取消请求失败后污染真实 Turn 终态",
+      "status": "implemented_and_locally_verified",
+      "result": "OpenCode 取消区分请求成功/失败/结果未知，保留真实 Turn 终态；未知结果且 authoritative idle 无消息时 fault/close。",
+      "source": "packages/adapters/opencode/src/opencode-adapter.ts",
+      "regression_evidence": "packages/adapters/opencode/test/opencode-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F11",
+      "title": "OpenCode 权限更新成功但回读不匹配时仍保留旧公开状态",
+      "status": "implemented_and_locally_verified",
+      "result": "OpenCode 权限写入后回读不匹配时公布实际值并返回协议错误，不保留错误的旧公开状态。",
+      "source": "packages/adapters/opencode/src/opencode-adapter.ts",
+      "regression_evidence": "packages/adapters/opencode/test/opencode-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F12",
+      "title": "Grok 在父 Turn 结束后丢弃后台 Subagent 更新",
+      "status": "implemented_and_locally_verified",
+      "result": "Grok 父 Turn 结束后仍接收后台 child 更新，发布独立 subagent 事件，不改写父轮终态。",
+      "source": "packages/adapters/grok/src/grok-subagent-lifecycle.ts",
+      "regression_evidence": "packages/adapters/grok/test/grok-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F13",
+      "title": "native steering 的产品声明硬编码 Grok，与实际 Session 能力分裂",
+      "status": "implemented_and_locally_verified",
+      "result": "native steering/work mode 从实际 Session 能力投影，移除按 Grok 名称猜测能力。",
+      "source": "packages/shared-contracts/src/harness-models.ts",
+      "regression_evidence": "packages/host-runtime/test/external-work-mode.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F14",
+      "title": "原生 Codex endpoint 不支持扩展 RPC 时，官方 steer 被截断",
+      "status": "implemented_and_locally_verified",
+      "result": "仅明确扩展 RPC unavailable 时，在同一连接证明官方 Thread 身份后透传 Codex steer；其他错误不降级。",
+      "source": "packages/renderer-extension/src/renderer-external-steering.ts",
+      "regression_evidence": "packages/renderer-extension/test/renderer-external-steering.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F15",
+      "title": "Pi/OMP/OpenCode fault 后结束输出但未自动清理原生资源",
+      "status": "implemented_and_locally_verified",
+      "result": "Pi/OMP/OpenCode fault 收口自动幂等关闭原生 transport/connection。",
+      "source": "packages/adapters/pi/src/pi-adapter.ts",
+      "regression_evidence": "packages/adapters/pi/test/pi-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F16",
+      "title": "Kiro 取消通知未送达也返回已受理",
+      "status": "implemented_and_locally_verified",
+      "result": "Kiro cancel 校验活动 Turn ID；通知发送失败返回错误，不声称已受理。",
+      "source": "packages/adapters/kiro-cli/src/kiro-adapter.ts",
+      "regression_evidence": "packages/adapters/kiro-cli/test/kiro-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F17",
+      "title": "Kiro Adapter.close 后仍可创建新 transport",
+      "status": "implemented_and_locally_verified",
+      "result": "Kiro close 封闭入口并追踪 opening/active 资源，关闭后拒绝 inspect/open，不发布已关闭 Session。",
+      "source": "packages/adapters/kiro-cli/src/kiro-adapter.ts",
+      "regression_evidence": "packages/adapters/kiro-cli/test/kiro-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F18",
+      "title": "二次异步派发绕过 Thread 队列，command 与回退/删除可交错",
+      "status": "implemented_and_locally_verified",
+      "result": "command、fork/revert/rollback/delete 共享 per-Thread reservation，在首个 await 前取得并在 finally 释放，覆盖双向竞态。",
+      "source": "packages/host-runtime/src/app-server-host.ts",
+      "regression_evidence": "packages/host-runtime/test/app-server-host.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F19",
+      "title": "外部 turn/start 静默过滤掉混合输入中的图像",
+      "status": "implemented_and_locally_verified",
+      "result": "外部 Turn 输入含未支持非文本部分时明确拒绝，不再悄悄丢弃图像后执行文本。",
+      "source": "packages/host-runtime/src/app-server-host.ts",
+      "regression_evidence": "packages/host-runtime/test/app-server-host.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F20",
+      "title": "多个 Runtime 的委派列表截断后无法翻页",
+      "status": "implemented_and_locally_verified",
+      "result": "跨 Runtime 委派列表要求明确 parent scope，不再截断后返回无法继续翻页的结果。",
+      "source": "packages/host-runtime/src/delegation-control-registry.ts",
+      "regression_evidence": "packages/host-runtime/test/delegation-control-registry.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F21",
+      "title": "快速完成的外部委派首次响应仍硬编码 running",
+      "status": "implemented_and_locally_verified",
+      "result": "委派 start 返回当前已持久化状态，快速完成不再固定返回 running。",
+      "source": "packages/host-runtime/src/harness-delegation-coordinator.ts",
+      "regression_evidence": "packages/host-runtime/test/harness-delegation-coordinator.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F22",
+      "title": "OMP 18.1.18 默认关闭子代理转发，Adapter 未订阅却声明可观测",
+      "status": "implemented_and_locally_verified",
+      "result": "OMP 当前 Session transport 显式探测/订阅 subagent；create eager 确认能力，兼容不支持版本，opening 资源纳入 close-once。",
+      "source": "packages/adapters/omp/src/omp-rpc-session.ts",
+      "regression_evidence": "packages/adapters/omp/test/omp-rpc-session.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F23",
+      "title": "Usage 通知永久绑定首个 client，切换 Host 后不重订阅",
+      "status": "implemented_and_locally_verified",
+      "result": "Usage relay 在 client/Host 更换时解绑重订阅，按 generation 与 Host/Thread 身份过滤旧回调。",
+      "source": "packages/renderer-extension/src/renderer-model-client.ts",
+      "regression_evidence": "packages/renderer-extension/test/renderer-model-client.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F24",
+      "title": "DeepSeek Modern 共享 Web 不接收逐 Session 环境，递归委派身份无法隔离",
+      "status": "implemented_and_locally_verified",
+      "result": "DeepSeek 每次带 environment 的 open 创建独立 managed Web；共享 Native ID reservation、按源 owner flush、close 等待子资源。",
+      "source": "packages/adapters/deepseek-harness/src/modern/deepseek-harness-adapter.ts",
+      "regression_evidence": "packages/adapters/deepseek-harness/test/modern/deepseek-harness-adapter.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F25",
+      "title": "Linux npm 自更新的 TS/Rust 状态目录不一致",
+      "status": "implemented_and_locally_verified",
+      "result": "TS 与 Rust 都从实际 runtime descriptor 同级目录推导 updates 状态路径。",
+      "source": "packages/update-manager/src/distribution.ts",
+      "regression_evidence": "packages/update-manager/test/distribution.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F26",
+      "title": "Unix Shim 将信号退出压成普通 exit 1",
+      "status": "implemented_and_locally_verified",
+      "result": "Unix Shim 保留信号退出约定 128+signal，正常 stdin EOF 仍为零。",
+      "source": "crates/shim/src/lib.rs",
+      "regression_evidence": "crates/shim/tests/proxy.rs",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F27",
+      "title": "remote uninstall 不停止运行中的 managed listener",
+      "status": "implemented_and_locally_verified",
+      "result": "remote uninstall 先验证并停止 managed listener，再删除文件；degraded 安装仍可安全 stop，stock/unknown 拒绝。",
+      "source": "packages/host-runtime/src/remote-host-cli.ts",
+      "regression_evidence": "packages/host-runtime/test/remote-host-cli.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F28",
+      "title": "更新下载缺少应用级期限与取消通道，可长期占有更新锁",
+      "status": "implemented_and_locally_verified",
+      "result": "Artifact 下载总时限与空闲时限通过 AbortSignal 取消；清理 partial、持久化失败并释放更新锁。",
+      "source": "packages/update-manager/src/update-manager.ts",
+      "regression_evidence": "packages/host-runtime/test/update-coordinator.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "F29",
+      "title": "macOS Broker 升级失败后无法恢复上一运行 generation",
+      "status": "implemented_and_locally_verified",
+      "result": "macOS Broker 升级失败恢复已验证旧 plist/generation；恢复必须读到新 descriptor 指纹，双重失败保留诊断。",
+      "source": "crates/platform/src/macos_native_harness_broker.rs",
+      "regression_evidence": "crates/platform/src/macos_native_harness_broker.rs",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A01",
+      "title": "动态产品身份目录",
+      "status": "implemented_and_locally_verified",
+      "result": "目标 Host manifest 目录驱动 Picker、图标、Sidebar、偏好和 HarnessId 配置映射；新 route 统一写，旧 route 兼容读。",
+      "source": "packages/renderer-extension/src/agent-selection-state.ts",
+      "regression_evidence": "tests/e2e/renderer-dynamic-plugin.spec.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A02",
+      "title": "真实操作方式与能力范围",
+      "status": "implemented_and_locally_verified",
+      "result": "turnControl 明确 native/restart 与 workModes；空 Model catalog 的固定模型 Harness 使用无 Model carrier，并保持官方 Codex 提交。",
+      "source": "packages/shared-contracts/src/harness-models.ts",
+      "regression_evidence": "packages/renderer-extension/test/renderer-binding-probe.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A03",
+      "title": "Session 校验与公共一致性验证",
+      "status": "implemented_and_locally_verified",
+      "result": "公共 Session validator 与 Host 有期限的拒绝清理；十个真实 Adapter fixture 消费公共 conformance driver。",
+      "source": "packages/harness-adapter/src/session-validation.ts",
+      "regression_evidence": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A04",
+      "title": "生命周期与持久化提交边界",
+      "status": "implemented_and_locally_verified",
+      "result": "Host 统一 reservation、配置提交、未知结果恢复和异常终结；Adapter 保留 native clone/readback/stop/close；Broker fault 后 fresh resume。",
+      "source": "packages/host-runtime/src/app-server-host.ts",
+      "regression_evidence": "packages/harness-broker/test/harness-broker.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A05",
+      "title": "版本、协议 profile 与验证收据",
+      "status": "implemented_and_locally_verified",
+      "result": "Conformance 收据记录 Host/Bundle/native version/profile、身份、环境、逐场景和资源清理；未知或未覆盖结果不能伪装完整通过。",
+      "source": "packages/harness-adapter/src/conformance-receipt.ts",
+      "regression_evidence": "packages/adapters/codebuddy/test/conformance.test.ts",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A06",
+      "title": "插件独立依赖与发行元数据",
+      "status": "implemented_and_locally_verified",
+      "result": "每插件独立声明运行依赖；Bundle 构建收据记录版本、许可、Node target、SHA 与 API v1 政策，发行白名单携带收据。",
+      "source": "scripts/release/harness-plugins.json",
+      "regression_evidence": "tests/release/plugin-dependencies.test.mjs",
+      "runtime_certification": "not_claimed"
+    },
+    {
+      "id": "A07",
+      "title": "依赖边界及接入文档一致性",
+      "status": "implemented_and_locally_verified",
+      "result": "边界门禁覆盖 package dependencies、tsconfig references/paths；更新当前十个 Harness 接入文档与 skill，保留 native 差异。",
+      "source": "tools/check-boundaries.mjs",
+      "regression_evidence": "tools/check-boundaries.test.mjs",
+      "runtime_certification": "not_claimed"
+    }
+  ],
+  "validation": [
+    {
+      "command": "npm run typecheck",
+      "result": "通过（Workspace + tests）",
+      "evidence": "typecheck.log",
+      "status": "passed"
+    },
+    {
+      "command": "npm run lint",
+      "result": "通过（ESLint + dependency/source boundaries）",
+      "evidence": "lint.log",
+      "status": "passed"
+    },
+    {
+      "command": "npm run test:typescript -- --maxWorkers=2",
+      "result": "307 文件通过；3771 passed、22 skipped；包含 TS 与十插件构建",
+      "evidence": "typescript-tests.log",
+      "status": "passed"
+    },
+    {
+      "command": "npm run build:renderer",
+      "result": "通过（最终 Renderer 产物）",
+      "evidence": "build-renderer.log",
+      "status": "passed"
+    },
+    {
+      "command": "npm run test:e2e -- --workers=2",
+      "result": "73 passed（系统 Chrome）",
+      "evidence": "e2e.log",
+      "status": "passed"
+    },
+    {
+      "command": "playwright test tests/e2e/renderer-dynamic-plugin.spec.ts --config tests/e2e/playwright.config.js --workers=1",
+      "result": "增补 unknown Harness 实际提交回归 1 passed",
+      "evidence": "dynamic-submit.log",
+      "status": "passed"
+    },
+    {
+      "command": "npm run test:rust -- -- --test-threads=1",
+      "result": "完整工作区 172 passed、0 failed",
+      "evidence": "rust-tests.log",
+      "status": "passed"
+    },
+    {
+      "command": "cargo fmt --all --check",
+      "result": "通过",
+      "evidence": "rust-format.log",
+      "status": "passed"
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --locked --features codexhost-shim/test-utils,codexhost-gate-a-native/gate-tools -- -D warnings",
+      "result": "通过，无 warning",
+      "evidence": "clippy.log",
+      "status": "passed"
+    },
+    {
+      "command": "prettier --check <本次修改的138个文件>",
+      "result": "通过；另有最终文档格式检查",
+      "evidence": "format.log",
+      "status": "passed"
+    },
+    {
+      "command": "git diff --check",
+      "result": "通过",
+      "evidence": "diff-check.log",
+      "status": "passed"
+    }
+  ],
+  "typescript": {
+    "passed": 3771,
+    "failed": 0,
+    "skipped": 22,
+    "total": 3793
+  },
+  "rust": {
+    "result": "passed",
+    "suites": 17,
+    "passed": 172,
+    "failed": 0,
+    "ignored": 0
+  },
+  "runtimeBoundaries": [
+    "No real Codex Desktop launch or private binding validation",
+    "No paid/live model calls or real user history mutations",
+    "No real launchctl upgrade rollback, Linux/Windows install update, or deployed remote listener acceptance",
+    "Conformance fixtures retain incomplete when advertised capability scenarios or native evidence are not covered"
+  ]
+}

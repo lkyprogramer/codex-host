@@ -1,0 +1,46 @@
+{
+  "stages": [
+    {
+      "stage": "initialize",
+      "status": "passed"
+    },
+    {
+      "stage": "authenticate",
+      "status": "passed"
+    },
+    {
+      "stage": "session/new",
+      "status": "passed",
+      "config": [
+        {
+          "id": "mode",
+          "currentValue": "agent"
+        },
+        {
+          "id": "model",
+          "currentValue": "grok-4.6"
+        },
+        {
+          "id": "effort",
+          "currentValue": "high"
+        },
+        {
+          "id": "fast",
+          "currentValue": "true"
+        }
+      ]
+    },
+    {
+      "stage": "cursor/list_available_models",
+      "status": "passed",
+      "modelCount": 0
+    }
+  ],
+  "promptSent": false,
+  "failure": {
+    "stage": "set/model",
+    "code": -32602,
+    "message": "Invalid params",
+    "detailCategory": "not recorded"
+  }
+}

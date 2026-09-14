@@ -6,6 +6,17 @@ connects it to the Desktop Agent
 Picker, configuration preferences, sidebar ownership and Connections page. Live
 Desktop adoption remains separate from packaging and Host protocol validation.
 
+The [2026-09-14 native failure investigation](cursor-acp-failure-20260914/README.md)
+reproduced an authentication socket failure and unconfirmed Grok 4.6 xhigh
+configuration with Cursor `2026.09.10-fd3934a`. Catalog visibility is not evidence
+of successful inference. Source diagnostics now retain the ACP stage and sanitized
+native `data.details`. Avoiding redundant writes of already confirmed parameters
+then passed a real Grok 4.6 xhigh/non-fast tool task, output readback and normal
+turn completion. History-only replay skips unrelated model catalog requests.
+Installed CLI start/wait/final-read acceptance also passed in an isolated Host
+with an explicitly labeled official-parent fixture. Native connectivity failures still remain possible; they do not
+permit bypassing exact model confirmation.
+
 ## Transport choice
 
 The adapter launches `cursor-agent acp` and uses the official ACP SDK over stdio.
@@ -24,8 +35,11 @@ integration. [CLI ACP](https://cursor.com/docs/cli/acp) is the selected interfac
 - Native create, text prompt, streaming text/reasoning, tool progress and cancellation.
 - Structured Edit Diff for successful tools carrying native ACP diff content,
   including new files and updates, in live output and native history replay.
-- Dynamic native model catalog. Full bracketed model variants are encoded into
-  transport-safe Host refs without losing native model parameters.
+- Dynamic native model catalog. Parameter-aware Cursor versions negotiate
+  `parameterizedModelPicker` and expose native choices through
+  `cursor/list_available_models`; bounded combinations become full bracketed model
+  variants in transport-safe Host refs. Older versions retain their advertised
+  variant catalog. No reasoning level or speed option is guessed.
 - Native Agent, Plan and Ask configuration, confirmed by the ACP response before
   changing Host state. These are execution modes, not fabricated approval levels.
 - Native tool approvals and Cursor's blocking question/plan extensions, with
@@ -64,11 +78,12 @@ contract investigation before release acceptance.
 
 ## Current limitations
 
-- The Desktop Agent Picker is still based on a static Harness list. This integration
-  adds Cursor explicitly and uses the shared plugin carrier. Its independent model
-  and mode preferences do not inherit another Harness's Thinking selection.
+- The target Host's plugin directory drives Desktop identity, the Picker and Sidebar.
+  Cursor uses the shared plugin carrier and per-Harness configuration drafts; its
+  preferences do not inherit another Harness's Thinking selection. Native capability
+  and history limitations remain independent of directory discovery.
 - Fork, rollback, independent thinking selection, usage/account reporting, native
-  session import, unattended full access and internal subagent transcript browsing are not
+  session import and internal subagent transcript browsing are not
   advertised. Image/audio prompt inputs are outside the current Host text contract.
 - Edit Diff is partial: it requires native ACP diff content. Delete/rename semantics,
   shell edits and missing historical diffs are not inferred. Other Cursor notification
@@ -214,3 +229,19 @@ also verified local Desktop subagents, Windows-to-Mac remote sessions, and
 Mac-to-Windows Remote Control. These deployed-candidate/user checks are distinct
 from automated tests of this branch, and do not establish compatibility with
 unobserved future versions of Cursor's private history format.
+
+## Lifecycle conformance
+
+The [Adapter fixture](../packages/adapters/cursor-cli/test/conformance.test.ts) consumes the public conformance driver for create, cancellation, environment isolation, fresh resume, follow-up and cleanup. Independent Thinking requests are rejected before opening a transport. Unattended create and resume map to native `--force`; default policy does not add it. Native Agent mode is compatible with force, while explicit Plan/Ask modes suppress adding force and are confirmed before the Session is exposed. A successful core fixture does not certify private SQLite compatibility or every native capability; uncovered scenarios retain `incomplete`. See [conformance evidence](adapter-conformance.md).
+
+## Delegation policy and reasoning variants
+
+`delegate start --execution-policy default|unattended-full-access` selects the persisted Host execution intent. Omitting it preserves the existing unattended default. Cursor maps unattended intent to native `--force` on create and resume; it does not auto-answer ACP approvals or questions. Native explicit denials and team restrictions still apply and may block execution. `default` means no additional force request, not guaranteed revocation of earlier native authorization. In Cursor `2026.09.10-fd3934a`, native `isRunEverything` metadata can survive resume; changing Agent/Plan/Ask or omitting force does not clear that metadata. Mode restrictions still apply.
+
+Cursor's native `agent`, `plan`, and `ask` modes are separate from force. Restored modes reach Adapter open before a persisted execution policy is resolved. Agent mode retains unattended intent; Plan/Ask suppress adding force. Host does not edit Cursor's private authorization metadata to simulate a downgrade.
+
+Model selection applies the native base model and parameters with readback. A rejected or unconfirmed partial selection retires the transport and faults the Session; it cannot continue under stale Host configuration.
+
+Use `harness inspect cursor-cli` and pass the returned opaque Model ref for the desired native variant, such as Grok 4.6 Extra High. Do not pass `--thinking xhigh`: Cursor exposes reasoning through model variants, not a separate Thinking selector. The native CLI model ID and the Host opaque ref are different identifiers.
+
+The [2026-09-13 policy and xhigh record](cursor-delegation-policy-20260913/README.md) separates passing source tests from the blocked native run. The exact xhigh/standard-speed variant was discovered, but native empty-directory and parameter errors prevented successful delegation; real task execution and fresh-Host resume are not certified.

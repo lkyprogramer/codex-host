@@ -28,9 +28,9 @@ Host
 原生 SDK / RPC / 服务 / CLI
 ```
 
-- 七个既有 Harness 和用户插件共用动态加载器，Host 不静态依赖具体 Adapter 包。新 ID 使用共享插件路由。
+- 当前预装 Harness 和用户插件共用动态加载器，Host 不静态依赖具体 Adapter 包。新 ID 使用共享插件路由。
 - 公共工具仍可复用：例如 `harness-discovery` 实现搜索机制，插件声明命令名、环境变量和安装目录策略。
-- **完整产品去专属化尚未完成**：Renderer 仍有固定 Agent 名单、配置字段和展示接线；旧路由、部分恢复策略、Credits、导入、Broker 与远程配置仍有历史特例。插件加载成功不等于自动出现在 Desktop。
+- Renderer 的产品身份由目标 Host 目录驱动，配置按 Harness ID 保存；旧 Host 兼容名单、旧路由读取、部分恢复策略、Credits、Broker 与远程配置仍有历史特例。加载成功不代表原生执行与真实 Desktop 验收通过。
 - 既有特例是兼容负担，不是新 Harness 的实现模板。公共契约无法表达真实需求时，记录缺口并在当前任务范围内设计公共扩展；不得通过新 Harness 专用 Host 分支绕过契约。
 
 ## 1. 确定交付范围和能力
@@ -78,11 +78,15 @@ Host
 | Manifest | `manifestVersion`、`id`、`name`、`version`、`adapterApiVersion`、`entry` | `icon`、文档/安装链接 |
 | 工厂模块 | `createHarnessAdapter(context)`，返回身份匹配的实例 | `warmup(adapter)` |
 | `HarnessAdapter` | `harnessId`、`inspect()`、`open()`、`close()` | `sessionImport`、`subagents`、`webUi` |
-| `HarnessSession` | `harnessId`、`capabilities`、`initialState`、`initialUsage`、`outputs`、`readSnapshot()`、`execute()`、`close()` | `commands`、`refreshUsage()` |
+| `HarnessSession` | `harnessId`、`capabilities`、`initialState`、`initialUsage`、`outputs`、`readSnapshot()`、`execute()`、`close()` | `commands`、`refreshUsage()`、`steering`、`workMode`、`resourceLifecycle` |
 
 `execute()` 必须处理公共命令的分派：`turn.start`、`turn.cancel`、`interaction.respond`、`model.select`、`thinking.select`、`permissionMode.select`。`open()` 必须识别 create、resume、fork、rollbackLastTurn。存在接口不代表必须支持所有原生操作：不支持的分支返回类型化 `unsupported`，不伪造成功。
 
+声明 `capabilities.turnControl` 时，`steering: native` 必须有真实 `session.steering`，`workModes` 包含 `plan` 必须有 `session.workMode`；缺省元数据仅为旧插件兼容，不作为新插件猜能力的依据。所有 open 路径均支持传递 `executionPolicy` 与逐 Session `environment`，不能只在 create 或首次工厂构造时消费。Loader/Host 会校验 Session 合同；无需在 Adapter 内复制同一入口校验。
+
 所有新插件都读取并满足：
+
+- 空闲资源回收使用公共 `resourceLifecycle.suspend(signal)`，由 Host 统一计时和恢复，不在各 Adapter 复制 TTL 或在 Host 添加 Harness ID 分支。Adapter 必须原子检查原生工作、交互和子任务后再释放受管资源；不能证明安全时返回 `busy` / `unknown` / `unsupported`。完整要求见下面的身份与历史参考。
 
 - [公共行为](references/public-adapter-contract.md)：检查、配置、并发、错误、环境和可选接口。
 - [输出与交互](references/output-and-interactions.md)：Turn/Item 时序、原生输出映射、取消和故障。
@@ -97,8 +101,9 @@ Host
 
 - **所有插件**：按[加载、发行与验证](references/registration-and-validation.md)构建可搬移的插件，在隔离根目录显式启用，通过真实 Loader 验证；直接 `new Adapter()` 的测试不能替代插件加载。
 - **仓库内实现或预装发行**：读取该参考中的 Workspace/发行分支。用户独立插件不需要修改预装清单；Host 包不得增加具体 Adapter 依赖。
-- **Desktop 产品接入**：读取[Renderer 产品接入](references/renderer-product-integration.md)，处理当前静态 UI 边界；新插件路由仍用共享 codec，不新增专用编码。「调整方向」沿用公共路径，插件侧验证[取消与后续 Turn](references/output-and-interactions.md#取消与后续-turn)。
+- **Desktop 产品接入**：读取[Renderer 产品接入](references/renderer-product-integration.md)，验证目录、共享配置与原生能力消费；新插件不新增静态 UI 名单或专用编码。「调整方向」沿用公共路径，插件侧验证[取消与后续 Turn](references/output-and-interactions.md#取消与后续-turn)。
 - **接收委派、继续向下委派或声明完整 Agent 协调**：读取[跨 Harness 委派](references/cross-harness-delegation.md)。它复用普通可写 Thread，不另建一套执行接口。
+- **修改委派参数或模型选择合同**：同步 `delegation-cli-help.ts` 与 `delegation-skill.ts` 中的发行 Skill 正文；更新托管 Skill 时保留旧摘要升级识别。Cursor 等参数化模型要保留原生推理/速度组合，不将 CLI 别名当作 Host opaque ref，也不把目录可发现当作实机通过。
 - **新增公共能力**：同时核对类型、schema、Host 投影、使用方和测试。浏览器共享契约保持 Node-free，Renderer 不导入原生 SDK 或 Electron 私有 API。
 
 本步完成条件：每个范围都有对应产物和验收证据；未启用的范围不做机械接线。现有 Harness 无需知道新 Harness 的私有信息。

@@ -1,0 +1,79 @@
+{
+  "officialParent": "fixture-no-inference",
+  "cursorHarness": "real-native",
+  "dataDirectory": "/var/folders/yt/10k_hqkn30x18d7lbn28_gnc0000gn/T/codexhost-cursor-isolated-live-23766-1789318665630",
+  "model": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd",
+  "commands": {
+    "inspect": {
+      "status": "ready",
+      "model": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd",
+      "label": "Cursor Grok 4.6 (Effort: Extra High, Fast: Off)"
+    },
+    "start": {
+      "delegationId": "f0ef3f07-e08a-4fcb-9e1c-7a6c0fc9358c",
+      "threadId": "137802fd-3c1c-4b99-9eb9-6b1071246ec2",
+      "turnId": "21aecb8d-f78a-4fbc-9806-fcd6f046db84",
+      "harnessId": "cursor-cli",
+      "deepLink": "codex://threads/137802fd-3c1c-4b99-9eb9-6b1071246ec2",
+      "status": "running",
+      "configuration": {
+        "requested": {
+          "model": {
+            "id": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd"
+          }
+        },
+        "effective": {
+          "effectiveModel": {
+            "id": "cursor.Z3Jvay00LjZbZWZmb3J0PXhoaWdoLGZhc3Q9ZmFsc2Vd"
+          }
+        }
+      },
+      "next": {
+        "read": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js thread read 137802fd-3c1c-4b99-9eb9-6b1071246ec2",
+        "wait": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js thread wait 137802fd-3c1c-4b99-9eb9-6b1071246ec2 --timeout-ms 30000"
+      },
+      "cwd": "/Users/luo/.codex/evidence/cursor-host-cli-local4-20260914",
+      "parentThreadId": "00000000-0000-4000-8000-000000000001"
+    },
+    "initialRead": {
+      "threadId": "137802fd-3c1c-4b99-9eb9-6b1071246ec2",
+      "harnessId": "cursor-cli",
+      "status": "running",
+      "turn": {
+        "turnId": "21aecb8d-f78a-4fbc-9806-fcd6f046db84",
+        "status": "running"
+      },
+      "progress": [],
+      "result": {
+        "availability": "pending"
+      },
+      "nextCursor": "codexhost:thread-messages:v1:eyJ2ZXJzaW9uIjoxLCJmaW5nZXJwcmludCI6ImY2OGM0NzhjYjI5NDVjZDVhNWMyYWUxZWRiZjkwMzQzYmMzN2UzMjBjMmZiYmY5Mzk4NDZiMTZmMzdkYWZhMjQiLCJvZmZzZXQiOjF9"
+    },
+    "wait": {
+      "threadId": "137802fd-3c1c-4b99-9eb9-6b1071246ec2",
+      "harnessId": "cursor-cli",
+      "status": "completed",
+      "turn": {
+        "turnId": "21aecb8d-f78a-4fbc-9806-fcd6f046db84",
+        "status": "completed"
+      },
+      "progress": [
+        {
+          "id": "cursor-f280f0fb-5138-4461-80a1-d7262aeb8405-2",
+          "turnId": "21aecb8d-f78a-4fbc-9806-fcd6f046db84",
+          "text": "开始执行最小真实工具验证：读取当前目录的 `probe-input.json`，计算总和与 SHA256，写出并回读 `probe-result.json`。"
+        }
+      ],
+      "result": {
+        "availability": "available",
+        "text": "已完成。`probe-result.json` 实际读取结果：\n\n- **sum**: `99`\n- **sha256**: `28dc52483d3d4834b9fc61ad60df69d364118d0eb9931a5eff3abb8804053c06`\n- **cwd**: `/Users/luo/.codex/evidence/cursor-host-cli-local4-20260914`\n\n输入为 `numbers: [17, 29, 53]`，17+29+53=99。"
+      },
+      "nextCursor": "codexhost:thread-messages:v1:eyJ2ZXJzaW9uIjoxLCJmaW5nZXJwcmludCI6ImY2OGM0NzhjYjI5NDVjZDVhNWMyYWUxZWRiZjkwMzQzYmMzN2UzMjBjMmZiYmY5Mzk4NDZiMTZmMzdkYWZhMjQiLCJvZmZzZXQiOjN9",
+      "timedOut": false
+    }
+  },
+  "error": "thread read (final) returned invalid JSON: {\n  \"error\": {\n    \"code\": \"INTERNAL_ERROR\",\n    \"message\": \"External Harness is unavailable\"\n  }\n}\n",
+  "runtimeCleanup": {
+    "cleanupErrors": []
+  }
+}

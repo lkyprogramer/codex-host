@@ -1,0 +1,13 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "harness",
+    "inspect",
+    "grok"
+  ],
+  "cwd": "/Users/luo/Documents/program/lishu-v2",
+  "exit_code": 0,
+  "elapsed_seconds": 0.157,
+  "stdout": "{\n  \"harnessId\": \"grok\",\n  \"inspection\": {\n    \"status\": \"ready\",\n    \"catalog\": {\n      \"models\": [\n        {\n          \"ref\": {\n            \"id\": \"grok-4.6\"\n          },\n          \"label\": \"Grok 4.6\",\n          \"supportedThinkingOptionIds\": [\n            \"xhigh\",\n            \"high\",\n            \"medium\",\n            \"low\"\n          ]\n        },\n        {\n          \"ref\": {\n            \"id\": \"grok-4.5\"\n          },\n          \"label\": \"Grok 4.5\",\n          \"supportedThinkingOptionIds\": [\n            \"high\",\n            \"medium\",\n            \"low\"\n          ]\n        }\n      ],\n      \"defaultModel\": {\n        \"id\": \"grok-4.6\"\n      },\n      \"thinkingOptions\": [\n        {\n          \"id\": \"xhigh\",\n          \"label\": \"Extra High Effort\"\n        },\n        {\n          \"id\": \"high\",\n          \"label\": \"High Effort\"\n        },\n        {\n          \"id\": \"medium\",\n          \"label\": \"Medium Effort\"\n        },\n        {\n          \"id\": \"low\",\n          \"label\": \"Low Effort\"\n        }\n      ],\n      \"defaultThinkingOptionId\": \"medium\"\n    },\n    \"permissionModes\": {\n      \"modes\": [\n        {\n          \"id\": \"ask\",\n          \"label\": \"Ask\",\n          \"description\": \"Ask before protected tool actions.\"\n        },\n        {\n          \"id\": \"auto\",\n          \"label\": \"Auto\",\n          \"description\": \"Let Grok Build decide which tool actions may run automatically.\"\n        },\n        {\n          \"id\": \"always-approve\",\n          \"label\": \"Always approve\",\n          \"description\": \"Approve all tool actions without prompting.\",\n          \"dangerous\": true\n        }\n      ],\n      \"defaultModeId\": \"ask\"\n    },\n    \"capabilities\": {\n      \"configuration\": {\n        \"selectModel\": true,\n        \"selectThinkingOption\": true,\n        \"selectPermissionMode\": true,\n        \"permissionModeScope\": \"atCreate\"\n      },\n      \"history\": {\n        \"fork\": true,\n        \"forkAcrossCwd\": true,\n        \"rollbackLastTurn\": true\n      }\n    }\n  }\n}\n",
+  "stderr": ""
+}

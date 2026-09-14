@@ -1,0 +1,20 @@
+{
+  "argv": [
+    "$CODEXHOST_CLI_PATH",
+    "delegate",
+    "start",
+    "--harness",
+    "grok",
+    "--parent-thread",
+    "01a08908-80dd-7d60-aadc-550c7ac52d4e",
+    "--request-id",
+    "migration-delegation-smoke-20260910-01a08908",
+    "--task",
+    "这是用户授权的 codex-host 委派连通性测试。只回复一行 GROK_DELEGATION_OK token=lishu-20260910。不要调用工具、读写文件、运行命令、访问网络或派发任务。保留 token 供后续同一会话测试。"
+  ],
+  "cwd": "/Users/luo/Documents/github/codex-host",
+  "exit_code": 0,
+  "elapsed_seconds": 0.145,
+  "stdout": "{\n  \"delegationId\": \"6fef99bb-457d-4c3b-970a-313a0feaa443\",\n  \"threadId\": \"be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n  \"turnId\": \"e0bc467d-426b-4d63-a190-1a1d6d70fed3\",\n  \"harnessId\": \"grok\",\n  \"deepLink\": \"codex://threads/be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n  \"status\": \"completed\",\n  \"next\": {\n    \"read\": \"/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli-darwin-arm64/bin/codexhost thread read be4e7c2d-4836-4127-bcd5-d027d2319cd6\",\n    \"wait\": \"/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli-darwin-arm64/bin/codexhost thread wait be4e7c2d-4836-4127-bcd5-d027d2319cd6 --timeout-ms 30000\"\n  }\n}\n",
+  "stderr": ""
+}

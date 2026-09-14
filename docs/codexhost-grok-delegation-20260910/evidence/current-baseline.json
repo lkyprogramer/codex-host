@@ -1,0 +1,90 @@
+{
+  "sources": [
+    {
+      "root": "/Users/luo/Documents/github/codex-host",
+      "head": "80f3116530c47e05ec24b97f267c011bbf7be982",
+      "branch": "local/all-fixes",
+      "status": "",
+      "files": [
+        {
+          "path": "packages/host-runtime/src/run-host-runtime.ts",
+          "sha256": "aefd659f3798a386f5c5ea24f218a76de045afabbf8f71e5b5ba0286878111e6",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/host-runtime/src/delegation-cli.ts",
+          "sha256": "1757779a33792d21671359eb51a7c4e0c5891eb9b7bc9e2bfc5bc8421e35e3ef",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/host-runtime/src/harness-delegation-coordinator.ts",
+          "sha256": "de3e5de28ad8f402444b5cf65a5200db60b6404e705d28890c4555ddfc0831e4",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/host-runtime/src/delegation-snapshot.ts",
+          "sha256": "fd15eaacc21c43c382c8fc9c230b43aac364f60a5a4925b51ae0c97d85c4fd4b",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/mapping-store/src/mapping-store.ts",
+          "sha256": "aad09b6494986985ba01ccbe3ff31dfc0637315e9993a9018eeae748b6139b83",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/adapters/grok/src/grok-adapter.ts",
+          "sha256": "5eb5a80efaa98bc982e49f3c40396eecb85ceebfffb103f962de0f10ab48c933",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "packages/adapters/grok/src/acp-transport.ts",
+          "sha256": "d1ad87e7f1b9e3acd3b3e25fe205c5759bc152186d401095930545682dfb9815",
+          "unchanged_since_research": true
+        }
+      ]
+    },
+    {
+      "root": "/Users/luo/Documents/program/lishu-v2",
+      "head": "ff87a3564b0f7455266cd1291c7455543f61ca82",
+      "branch": "develop-w7",
+      "status": "M .agents/skills/lishu-migration-orchestrator/SKILL.md\n M .agents/skills/lishu-migration-orchestrator/references/parallelism-and-leases.md\n M docs/migration/post-core-4week-v1/README.md\n M docs/migration/post-core-4week-v1/contracts/w7-contract-decisions.md\n M docs/migration/post-core-4week-v1/weekly/W7/05-parallel-test-and-fixture-plan.md\n M docs/migration/post-core-4week-v1/weekly/W7/README.md\n M docs/migration/post-core-4week-v1/weekly/W7/active/README.md\n M \"docs/tech/DDD\\345\\210\\206\\345\\261\\202\\346\\236\\266\\346\\236\\204\\346\\226\\271\\346\\241\\210\\350\\257\\264\\346\\230\\216\\346\\226\\207\\346\\241\\243_\\346\\226\\260\\347\\263\\273\\347\\273\\237\\347\\211\\210.md\"\n M docs/tech/codeRule.md\n M \"docs/tech/\\346\\225\\260\\346\\215\\256\\345\\272\\223\\344\\270\\216Flyway\\350\\247\\204\\350\\214\\203.md\"\n M \"docs/tech/\\347\\253\\213\\346\\225\\260\\346\\225\\231\\350\\202\\262_Java25\\346\\226\\260\\347\\263\\273\\347\\273\\237_\\346\\212\\200\\346\\234\\257\\346\\226\\271\\346\\241\\210.md\"\n M \"docs/tech/\\347\\253\\213\\346\\225\\260\\346\\225\\231\\350\\202\\262_\\346\\226\\260\\347\\263\\273\\347\\273\\237\\351\\241\\271\\347\\233\\256\\345\\274\\200\\345\\217\\221\\350\\247\\204\\350\\214\\203.md\"",
+      "files": [
+        {
+          "path": "AGENTS.md",
+          "sha256": "8dd7532ac27571cf7e18d5ace73c3767ff127b9c071b2a9a8ff82ce148dd8b60",
+          "unchanged_since_research": true
+        },
+        {
+          "path": ".agents/skills/lishu-migration-orchestrator/SKILL.md",
+          "sha256": "fd441c192652c2e1e4316c1cdfe08e64edcf6f29049bab67c747c4ee354b90a7",
+          "unchanged_since_research": true
+        },
+        {
+          "path": ".agents/skills/lishu-migration-orchestrator/references/parallelism-and-leases.md",
+          "sha256": "1184b9bb449278eff52650fb664fe2e9fdb56bf0d4d88ffdeb83dbc95bb77965",
+          "unchanged_since_research": true
+        },
+        {
+          "path": ".agents/skills/lishu-migration-orchestrator/references/profile-review-contract.md",
+          "sha256": "79ffccd29e9f9a5371421fce0a3d54c048a4407dc13da6e90f7d698f312af6f3",
+          "unchanged_since_research": true
+        },
+        {
+          "path": ".agents/skills/lishu-migration-orchestrator/scripts/profile_review.py",
+          "sha256": "e51015f2cdc38371ad45cc61e0f48ae7418628d997f18348941ede7e6bc4f973",
+          "unchanged_since_research": true
+        },
+        {
+          "path": "docs/migration/post-core-4week-v1/weekly/W7/migration-profile.json",
+          "sha256": "13a27b5eb693d9df73f15699260766421e568fc3de97c54d22991927a71263a9",
+          "unchanged_since_research": true
+        }
+      ]
+    }
+  ],
+  "cli_path": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli/bin/codexhost.js",
+  "parent_thread": "01a08908-80dd-7d60-aadc-550c7ac52d4e",
+  "observed_node": "v22.16.0",
+  "build_node": "/Users/luo/.nvm/versions/node/v22.20.0/bin/node",
+  "prior_evidence": "/Users/luo/Documents/Codex/reports/2026-09-10-codexhost-grok-delegation-vzlus9t3/evidence/source-binding.json"
+}

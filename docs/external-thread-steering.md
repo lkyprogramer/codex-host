@@ -1,6 +1,6 @@
 # 外部 Thread 的「调整方向」
 
-codexhost 按 Thread 归属分流 `turn/steer`，外部请求不会落到官方 Codex。提供 `session.steering` 的 Harness（当前为 Grok 原生 `_x.ai/interject`）在同一活动回合中插话，返回当前 `turnId`。未实现该接口的外部 Harness 仍使用 **取消当前 Turn，等待它终结，再自动执行本次新输入**。官方 Codex Thread 透传原生 `turn/steer`。Grok 的 Plan 与 Steer 细节见 [Grok Plan 与运行中 Steer](grok-plan-and-steer.md)。
+codexhost 按 Thread 归属分流 `turn/steer`，外部请求不会落到官方 Codex。Host 从实际 Session 的 `turnControl.steering` 投影原生插话能力；值为 `native` 的 Harness 在同一活动回合中插话并返回当前 `turnId`，值为 `restart` 的 Harness 使用 **取消当前 Turn，等待它终结，再自动执行本次新输入**。官方 Codex Thread 透传原生 `turn/steer`。Grok 的 Plan 与 Steer 细节见 [Grok Plan 与运行中 Steer](grok-plan-and-steer.md)。
 
 ## 所有权与执行
 
@@ -21,13 +21,17 @@ codexhost 按 Thread 归属分流 `turn/steer`，外部请求不会落到官方 
 
 接入流程：
 
-1. 查询当前连接的 Thread 所有权；官方 Thread 走原函数，follower 窗口继续使用 Desktop 原有 owner 转发。
+1. 查询当前连接的 Thread 所有权；官方 Thread 走原函数，follower 窗口继续使用 Desktop 原有 owner 转发。仅当 `ownership/list` 明确表示扩展 method 不可用（`-32601` 或已知的 unknown-variant `-32600`）时，才在**同一连接**读取 `thread/read`；Thread ID、非空的非 `codexhost` `modelProvider` 和非空的非 `codexhost` `cliVersion` 都匹配，才原样透传官方 steer。连接错误、解析失败、未知归属或任何其他 RPC 错误均不降级为 Codex。
 2. 外部输入使用 Desktop 自己的 `startTurn` 展示流程。新输入从一开始就属于新 Turn 占位，保留 `clientUserMessageId`、输入及附件展示上下文；不创建旧轮 `steeringUserMessage`，不修改官方 transcript 内部实体。
 3. 仅将本次 `threadId + clientUserMessageId` 对应的出站 `turn/start` 转成 `turn/steer`，携带原先捕获的 `expectedTurnId`。把 Host 的 `{turnId}` 回执转换成正常 start 展示流程需要的 Turn envelope。其他 start、请求选项及官方 steer 不变。
 4. 成功后解除本次旧轮 interrupted 引入的队列暂停，保留此前已暂停的消息。失败不自动重试或偷偷排队；Desktop 原有失败提交展示负责保留输入。
 5. 绑定卸载时停止新的替换，恢复包装过的方法；尚未发出的替换不能因卸载而意外成为普通 start。
 
 Host 和 Renderer 接入必须配套发布；仅升级 Host、让旧 Renderer 仍创建旧轮乐观 steer 消息，不属于经过接入的产品路径。
+
+### Host 切换与额度更新
+
+Renderer 的 Usage relay 绑定当前请求客户端。Host 或请求客户端变化时，先取消旧订阅、再绑定新订阅；旧回调以连接 generation 丢弃，通知还必须与挂载 Composer 的 Host ID 一致。这样远端 A 的迟到额度事件不会覆盖已切到 B 的 Composer，也不会把外部 Harness 的状态误显示为 Codex。
 
 ### 当前兼容边界
 
@@ -57,10 +61,11 @@ Codex Desktop **26.903.61454 / build 8378** 在功能开关及 app-server 版本
 
 - `packages/host-runtime/test/external-turn-steering.test.ts`：延迟/同步终态、去重、冲突、过期目标、输入预检、超时迟到、fault、关闭、显式停止、自主 Turn 及启动失败。
 - `packages/host-runtime/test/app-server-host.test.ts`：真实 Host 路由、外部不泄漏官方流、取消与启动顺序、响应 gate、同 Thread start 竞争、官方透传。
-- `packages/renderer-extension/test/renderer-external-steering.test.ts`：正常 start 占位、唯一输入、无旧轮 steer Item、去重、队列暂停恢复、owner/follower、失败和卸载。
+- `packages/renderer-extension/test/renderer-external-steering.test.ts`：正常 start 占位、唯一输入、无旧轮 steer Item、去重、队列暂停恢复、owner/follower、失败、卸载，以及 stock Codex 的 `-32601`、known unknown-variant `-32600`、同连接 `thread/read` 验证和未验证 Thread 的 fail-closed 路径。
 - `packages/renderer-extension/test/renderer-external-steering-rpc.test.ts`：类方法的 RPC 可访问性、模型／权限列表读取、官方与外部 steer、实例隔离、卸载和重复安装，以及卸载期间待定请求的清理。
 - `packages/renderer-extension/test/renderer-external-queue.test.ts`：经生产 Adapter 安装路径验证外部入队、已有暂停消息、队列清空后再次入队、同连接官方队列、Manager 隔离、元数据更新、旧版后端和卸载恢复。
 - `packages/renderer-extension/test/versioned-renderer-adapter.test.ts`：现有版本化绑定与清理回归。
+- `packages/renderer-extension/test/renderer-model-client.test.ts`：Host A→B 重绑定、旧订阅迟到事件隔离和 dispose。
 
 实现时还在 Node VM 中回放了上述 Desktop Bundle 的真实 `lun`（普通 start）、`GS`（占位写入）和 `Irn`（旧轮消息恢复）helper：legacy / canonical 历史各验证启动成功与启动失败，检查单条新输入、无旧轮 steer 恢复、失败输入保留。该回放仍模拟了准备器与传输，不是实际窗口或原生 Session 测试。
 

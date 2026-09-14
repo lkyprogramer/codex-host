@@ -29,7 +29,9 @@
 - 调用方省略 Model/Thinking 时，open(create) 仍省略对应字段，让原生决定默认配置；不从 Renderer 最近偏好、其他 Thread 或静态表代填。
 - 显式配置使用 inspect 返回的 opaque Ref/ID；Host 可前置校验，但原生 open 是最终确认点。
 - 仅指定 Thinking 时，Host 可以用默认 Model 校验组合，这不授权把默认 Model 写成调用方显式 requested 值。
-- create 正确处理 `unattended-full-access` 执行意图，规则见[公共行为](public-adapter-contract.md)，不为无人值守自动回答任意交互。
+- `delegate start --execution-policy default|unattended-full-access` 可覆盖委派策略；省略与显式 `unattended-full-access` 使用同一幂等身份，显式 `default` 是不同策略。策略持久化；`default` 不保证只读，也不撤销 Native Session 的历史授权。官方 Codex 目前明确拒绝 `default` 覆盖。
+- Cursor 的推理与速度通过 Model 变体选择；使用当前 `harness inspect` 返回的完整 opaque ref，不传 `--thinking xhigh`，不把 `cursor-grok-4.6-xhigh` 这样的原生 CLI 别名当作 Host ref。目录没有对应组合时明确报告不可用，不替换为 High/Fast。
+- create / resume / fork / rollback 正确传递持久化的 `executionPolicy`；显式权限优先，旧记录不推断提升权限。原生不支持 `unattended-full-access` 时明确拒绝，规则见[公共行为](public-adapter-contract.md)，不为无人值守自动回答任意交互。
 - 首次和后续 Turn 使用 Host 提供的 turnId，标准事件发布可见文本与真实终态。
 
 需要对外观察的进度和最终回答使用 agentMessage；Reasoning、工具输出、命令与文件变化保留各自类型。观察结果来自公共投影，不让 Coordinator 读取新 Harness 的私有 Transcript。
@@ -37,6 +39,7 @@
 ## CLI 观察输出
 
 - `harness list` 从当前 Adapter Map 发现目标，不启动 Session 或查询 Model Catalog。
+- 多 Runtime 委派列表要求明确 parent scope；不要把截断的跨 Runtime 合并结果声明为完整分页。相同 requestId 的 provisional 结果未知时返回 `outcomeUnknown`，不自动重放原生任务。
 - `--format json` 保留完整 JSON（默认），`--format compact` 提供精简 JSON，使用可操作的任务链接代替内部追踪 ID。用户汇报只展示目标、状态、结果和任务链接。
 - compact 的 result 视图展示结果，运行中附带最新非空进度；messages 视图只展示当前消息页与状态，不重复进度和最终答案。正文不截断。
 - 消息分页的 `hasMore` 表示当前是否还有下一页；`nextCursor` 仍可保存为后续增量读取起点。过滤空白消息时保持原序列游标位置，不能使旧游标跳过新消息。

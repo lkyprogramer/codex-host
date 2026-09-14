@@ -1,0 +1,10 @@
+{
+  "cli": "/Users/luo/.nvm/versions/node/v22.16.0/lib/node_modules/@codexhost/cli-darwin-arm64/bin/codexhost",
+  "argv": [
+    "delegate",
+    "--help"
+  ],
+  "exit_code": 1,
+  "stdout": "",
+  "stderr": "codexhost launcher: No such file or directory (os error 2)\n"
+}

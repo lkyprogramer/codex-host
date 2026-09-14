@@ -1,0 +1,53 @@
+{
+  "typecheck": {
+    "command": "npm run typecheck",
+    "status": "passed"
+  },
+  "lint": {
+    "command": "npm run lint",
+    "status": "passed"
+  },
+  "diff": {
+    "command": "git diff --check",
+    "status": "passed"
+  },
+  "tests": [
+    {
+      "scope": "Host delegation CLI, control server, coordinator, AppServerHost",
+      "files": 4,
+      "passed": 226
+    },
+    {
+      "scope": "ExternalThreadRuntime",
+      "files": 1,
+      "passed": 9
+    },
+    {
+      "scope": "Cursor adapter package",
+      "command": "node node_modules/vitest/vitest.mjs run --config tests/vitest.config.js packages/adapters/cursor-cli/test --maxWorkers=2",
+      "files": 9,
+      "passed": 80
+    }
+  ],
+  "live": {
+    "status": "blocked",
+    "requestedModel": "cursor-grok-4.6-xhigh",
+    "resolvedNativeModel": "grok-4.6[effort=xhigh,fast=false]",
+    "candidateCliAttempted": true,
+    "nativePromptSent": false,
+    "createReadback": false,
+    "resumeReadback": false,
+    "failure": "Cursor returned no parameterized models"
+  },
+  "installedNpmPackageChanged": false,
+  "desktopLaunched": false,
+  "documentation": {
+    "documents": 8,
+    "localLinksChecked": 127,
+    "markdownParse": "passed"
+  },
+  "format": {
+    "scope": "modified TypeScript and fixture files",
+    "status": "passed"
+  }
+}
