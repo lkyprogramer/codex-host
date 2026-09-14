@@ -143,7 +143,7 @@ describe("DelegationControlRegistry", () => {
     ).rejects.toMatchObject({ code: "PARENT_THREAD_AMBIGUOUS" });
     await expect(
       registry.list({ cwd: "/synthetic", limit: 25, sort: "created-desc" }),
-    ).resolves.toEqual({ threads: [], nextCursor: null });
+    ).rejects.toMatchObject({ code: "PARENT_THREAD_AMBIGUOUS" });
   });
 
   it("unregisters closed Host sessions", async () => {

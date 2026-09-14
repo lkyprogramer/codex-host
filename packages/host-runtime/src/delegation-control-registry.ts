@@ -114,14 +114,11 @@ export class DelegationControlRegistry implements DelegationControlApi {
       );
     }
     if (registrations.length === 1) return only(registrations, "unreachable").list(input);
-    const results = await Promise.all(
-      registrations.map((registration) => registration.list(input)),
+    throw new DelegationControlError(
+      "PARENT_THREAD_AMBIGUOUS",
+      "Thread list across multiple Host Runtime sessions requires parentThreadId",
+      { matchingRuntimeCount: registrations.length },
     );
-    const threads = results
-      .flatMap((result) => result.threads)
-      .sort((left, right) => this.#compareThreads(left, right, input.sort))
-      .slice(0, input.limit);
-    return { threads, nextCursor: null };
   }
 
   async #registrationForStart(input: DelegationStartInput): Promise<DelegationControlRegistration> {
@@ -159,18 +156,6 @@ export class DelegationControlRegistry implements DelegationControlApi {
       "Thread is not owned by exactly one active Host Runtime session",
       { matchingRuntimeCount: 0 },
     );
-  }
-
-  #compareThreads(
-    left: Awaited<ReturnType<DelegationControlApi["list"]>>["threads"][number],
-    right: Awaited<ReturnType<DelegationControlApi["list"]>>["threads"][number],
-    sort: ThreadListInput["sort"],
-  ): number {
-    const field = sort.startsWith("created") ? "createdAt" : "updatedAt";
-    const direction = sort.endsWith("asc") ? 1 : -1;
-    const leftValue = left[field] ? Date.parse(left[field]) : 0;
-    const rightValue = right[field] ? Date.parse(right[field]) : 0;
-    return (leftValue - rightValue) * direction || left.threadId.localeCompare(right.threadId);
   }
 
   async #matching(

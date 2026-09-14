@@ -54,6 +54,9 @@ describe("delegation Skill installation", () => {
       await writeFile(destination, previous, "utf8");
     }
     const { createHash } = await import("node:crypto");
+    expect(PREVIOUS_MANAGED_DIGESTS).toContain(
+      "84cfe818a4925a5be853ab6e0d955e46daf82d3a6976494fbfe05d84e8e3e5d1",
+    );
     const results = await installDelegationSkills({
       homeDirectory: root,
       previousManagedDigests: [createHash("sha256").update(previous).digest("hex")],
@@ -83,7 +86,7 @@ describe("delegation Skill installation", () => {
   });
 
   it("routes natural agent requests and points execution to the authoritative help", () => {
-    expect(CODEXHOST_DELEGATION_SKILL).toContain("version: 8");
+    expect(CODEXHOST_DELEGATION_SKILL).toContain("version: 10");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("@agent) to independently perform a task");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("session's content, progress, or results");
     expect(CODEXHOST_DELEGATION_SKILL).toContain("Not for recapping the current conversation");
@@ -118,6 +121,9 @@ describe("delegation Skill installation", () => {
 
   it("keeps every previously shipped digest recognized as a managed copy", async () => {
     const { createHash } = await import("node:crypto");
+    expect(PREVIOUS_MANAGED_DIGESTS).toContain(
+      "c48c0cd991c7ce8b7347e3c3dc02511d01e23e84a93ced34427f10ba14a20eb8",
+    );
     // v4 shipped in 0.6.0; its digest was previously absent, which pinned those
     // installations to a stale Skill because updates were reported as conflicts.
     expect(PREVIOUS_MANAGED_DIGESTS).toContain(

@@ -61,14 +61,58 @@ describe("delegation control server", () => {
 
       const response = await fetch(
         `${server.endpoint}/v1/delegate/start`,
-        authorized({ harnessId: "pi", task: "review", cwd: "/synthetic" }),
+        authorized({
+          harnessId: "pi",
+          task: "review",
+          cwd: "/synthetic",
+          executionPolicy: "default",
+        }),
       );
       expect(response.status).toBe(200);
       await expect(response.json()).resolves.toMatchObject({ threadId: "thread-1" });
-      expect(start).toHaveBeenCalledWith({ harnessId: "pi", task: "review", cwd: "/synthetic" });
+      expect(start).toHaveBeenCalledWith({
+        harnessId: "pi",
+        task: "review",
+        cwd: "/synthetic",
+        executionPolicy: "default",
+      });
       const harnesses = await fetch(`${server.endpoint}/v1/harness/list`, authorized({}));
       await expect(harnesses.json()).resolves.toEqual({ harnesses: ["codex", "pi"] });
       expect(start).toHaveBeenCalledTimes(1);
+    } finally {
+      await server.close();
+    }
+  });
+
+  it("rejects an invalid execution policy before dispatching start", async () => {
+    const start = vi.fn();
+    const server = await startDelegationControlServer({
+      token,
+      api: {
+        listHarnesses: vi.fn(),
+        inspect: vi.fn(),
+        start,
+        send: vi.fn(),
+        cancel: vi.fn(),
+        read: vi.fn(),
+        wait: vi.fn(),
+        list: vi.fn(),
+        ...extraApi(),
+      },
+    });
+    try {
+      const response = await fetch(
+        `${server.endpoint}/v1/delegate/start`,
+        authorized({ harnessId: "pi", task: "review", executionPolicy: "all-access" }),
+      );
+      expect(response.status).toBe(400);
+      await expect(response.json()).resolves.toMatchObject({
+        error: {
+          code: "INVALID_ARGUMENT",
+          message: "executionPolicy must be default or unattended-full-access",
+        },
+      });
+      expect(start).not.toHaveBeenCalled();
     } finally {
       await server.close();
     }
@@ -201,6 +245,7 @@ it("aborts the server wait when the HTTP observer disconnects", async () => {
   const server = await startDelegationControlServer({
     token,
     api: {
+      listHarnesses: vi.fn(),
       inspect: vi.fn(),
       start: vi.fn(),
       send: vi.fn(),

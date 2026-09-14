@@ -1,6 +1,7 @@
 import type { RoutedHarnessId } from "@codexhost/protocol-core";
 import type {
   HarnessInspection,
+  HarnessExecutionPolicy,
   HarnessModelRef,
   HarnessSessionState,
   HarnessThinkingOptionId,
@@ -10,6 +11,10 @@ export const DELEGATION_RUNTIME_ENDPOINT_ENV = "CODEXHOST_RUNTIME_ENDPOINT";
 export const DELEGATION_RUNTIME_TOKEN_ENV = "CODEXHOST_RUNTIME_TOKEN";
 export const DELEGATION_CLI_PATH_ENV = "CODEXHOST_CLI_PATH";
 export const DELEGATION_THREAD_ID_ENV = "CODEXHOST_THREAD_ID";
+
+export function isDelegationExecutionPolicy(value: unknown): value is HarnessExecutionPolicy {
+  return value === "default" || value === "unattended-full-access";
+}
 
 /** Paths built only from these characters need no quoting in any target shell. */
 const UNQUOTED_COMMAND_PATH = /^[A-Za-z0-9_.:\\/+@=-]+$/u;
@@ -88,6 +93,7 @@ export interface DelegationStartInput {
   cwd?: string;
   parentThreadId?: string;
   requestId?: string;
+  executionPolicy?: HarnessExecutionPolicy;
   model?: HarnessModelRef;
   thinkingOptionId?: HarnessThinkingOptionId;
 }
@@ -311,6 +317,8 @@ export interface ThreadReleaseInput {
 export interface ThreadReleaseResult {
   threadId: string;
   released: boolean;
+  /** Native Session/process resources were reclaimed, without claiming owned-job quiescence. */
+  resourcesReleased?: boolean;
   busy: boolean;
   quiescence: JobQuiescence;
   proof?: { pid?: number; pgid?: number; scope: string };

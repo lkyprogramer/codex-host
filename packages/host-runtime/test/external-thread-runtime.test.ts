@@ -6,6 +6,7 @@ import type {
 import { FakeHarnessAdapter, FakeHarnessSession } from "@codexhost/harness-adapter/testing";
 import type { StoredThreadRecordV1 } from "@codexhost/mapping-store";
 import {
+  encodeHarnessPluginRoute,
   harnessIdSchema,
   harnessPermissionModeCatalogSchema,
   harnessPermissionModeIdSchema,
@@ -53,6 +54,57 @@ function record(): StoredThreadRecordV1 {
 }
 
 describe("ExternalThreadRuntime register", () => {
+  it("passes restored mode before a plugin resolves persisted execution policy", async () => {
+    const id = harnessIdSchema.parse("policy-fixture");
+    const permissionModeId = harnessPermissionModeIdSchema.parse("plan");
+    const adapter = new FakeHarnessAdapter(
+      id,
+      undefined,
+      true,
+      true,
+      null,
+      harnessPermissionModeCatalogSchema.parse({
+        defaultModeId: "plan",
+        modes: [{ id: "plan", label: "Plan" }],
+      }),
+    );
+    const created = await adapter.open({ kind: "create", cwd: "/synthetic", permissionModeId });
+    if (!created.ok || !created.value.initialState.nativeRef)
+      throw new Error("Missing fixture session");
+    const stored: StoredThreadRecordV1 = {
+      ...record(),
+      harnessId: id,
+      nativeSessionRef: created.value.initialState.nativeRef,
+      executionPolicy: "unattended-full-access",
+      transportModelId: encodeHarnessPluginRoute({ harnessId: id, permissionModeId }),
+    };
+    const open = vi.spyOn(adapter, "open");
+    const execute = vi.spyOn(created.value, "execute");
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([[id, adapter]]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    try {
+      expect((await runtime.resolve(hostThreadId)).kind).toBe("external");
+      expect(open).toHaveBeenCalledWith(
+        expect.objectContaining({
+          kind: "resume",
+          permissionModeId,
+          executionPolicy: "unattended-full-access",
+        }),
+      );
+      expect(execute).not.toHaveBeenCalled();
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
   it("exposes the requested create Model before the Session publishes state", async () => {
     const adapter = new FakeHarnessAdapter(harnessId);
     const model = adapter.catalog.models[1]?.ref;
@@ -519,6 +571,83 @@ describe("bounded native history", () => {
       expect(alignSnapshot).not.toHaveBeenCalled();
     } finally {
       release();
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+});
+
+describe("idle native resource lifecycle", () => {
+  it("suspends only an idle Session through the public lifecycle contract", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok || !(opened.value instanceof FakeHarnessSession)) {
+      throw new Error("Missing fake Session");
+    }
+    const session = opened.value;
+    const suspend = vi.fn(async () => {
+      await session.close();
+      return { status: "suspended" as const, scope: "native-session" };
+    });
+    Object.defineProperty(session, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend },
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: {} as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      idleSuspendTimeoutMs: 5,
+    });
+    try {
+      runtime.register({
+        record: record(),
+        session,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId },
+        turns: [],
+      });
+      await vi.waitFor(() => expect(suspend).toHaveBeenCalledOnce());
+      expect(session.closed).toBe(true);
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("does not suspend when Host-owned activity makes the Thread ineligible", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok || !(opened.value instanceof FakeHarnessSession)) {
+      throw new Error("Missing fake Session");
+    }
+    const session = opened.value;
+    const suspend = vi.fn(async () => ({ status: "suspended" as const, scope: "native-session" }));
+    Object.defineProperty(session, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend },
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: {} as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      idleSuspendTimeoutMs: 5,
+      canSuspend: () => false,
+    });
+    try {
+      runtime.register({
+        record: record(),
+        session,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId },
+        turns: [],
+      });
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(suspend).not.toHaveBeenCalled();
+      expect(session.closed).toBe(false);
+    } finally {
       runtime.clear();
       await adapter.close();
     }

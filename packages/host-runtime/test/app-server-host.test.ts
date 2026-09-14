@@ -17,6 +17,7 @@ import { FakeHarnessAdapter, FakeHarnessSession } from "@codexhost/harness-adapt
 import { MappingStore } from "@codexhost/mapping-store";
 import {
   CLAUDE_CODE_NATIVE_TRANSPORT_MODEL_ID,
+  decodeExternalTransportSelection,
   encodeClaudeTransportModel,
   encodeGrokTransportModel,
   encodePiTransportModel,
@@ -29,6 +30,7 @@ import {
   harnessCommandDescriptorSchema,
   harnessIdSchema,
   harnessModelRefSchema,
+  harnessModelCatalogSchema,
   harnessPermissionModeCatalogSchema,
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
@@ -3040,6 +3042,30 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  it("rejects an unsupported explicit Codex execution policy before native requests", async () => {
+    let delegationApi: DelegationControlApi | undefined;
+    const fixture = createFixture({
+      onDelegationApi: (api) => {
+        delegationApi = api;
+        return undefined;
+      },
+    });
+    await fixture.ready;
+    if (!delegationApi) throw new Error("Delegation API was not registered");
+    await expect(
+      delegationApi.start({
+        harnessId: "codex",
+        task: "review auth",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+        executionPolicy: "default",
+      }),
+    ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+    expect(fixture.official.stdin.readableLength).toBe(0);
+    await expect(fixture.mappingStore.listDelegations()).resolves.toEqual([]);
+    await stopFixture(fixture);
+  });
+
   it("deletes a native Codex Thread when Delegation persistence fails", async () => {
     let delegationApi: DelegationControlApi | undefined;
     const directory = mkdtempSync(path.join(tmpdir(), "codexhost-delegation-write-failure-"));
@@ -4135,6 +4161,15 @@ describe("AppServerHost HarnessAdapter projection", () => {
       result: { effectiveModel: model, effectiveThinkingOptionId: "off" },
     });
     expect(claude.sessions[0]?.state.effectiveModel).toEqual(model);
+    await expect(
+      fixture.mappingStore.getThread(hostThreadIdSchema.parse(threadId)),
+    ).resolves.toMatchObject({
+      transportModelId: encodeClaudeTransportModel(
+        model,
+        undefined,
+        harnessThinkingOptionIdSchema.parse("off"),
+      ),
+    });
     expect(pi.sessions).toHaveLength(0);
     await stopFixture(fixture);
   });
@@ -4188,7 +4223,11 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await expect(
       fixture.mappingStore.getThread(hostThreadIdSchema.parse(threadId)),
     ).resolves.toMatchObject({
-      transportModelId: encodeClaudeTransportModel(model, auto),
+      transportModelId: encodeClaudeTransportModel(
+        model,
+        auto,
+        harnessThinkingOptionIdSchema.parse("high"),
+      ),
     });
     expect(pi.sessions).toHaveLength(0);
 
@@ -4212,6 +4251,155 @@ describe("AppServerHost HarnessAdapter projection", () => {
     });
     expect(claude.sessions[0]?.state.effectivePermissionModeId).toBe(auto);
     await stopFixture(fixture);
+  });
+
+  it("persists no-model permission state and rejects applied-but-unpersisted changes", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "codexhost-no-model-permission-"));
+    let failPersistence = false;
+    const mappingStore = new MappingStore({
+      directory,
+      beforeReplace(record) {
+        if (failPersistence && record.transportModelId !== CLAUDE_CODE_NATIVE_TRANSPORT_MODEL_ID) {
+          throw new Error("synthetic configuration persistence failure");
+        }
+      },
+    });
+    const permissionModes = harnessPermissionModeCatalogSchema.parse({
+      modes: [
+        { id: "default", label: "Default" },
+        { id: "auto", label: "Auto" },
+      ],
+      defaultModeId: "default",
+    });
+    const adapter = new FakeHarnessAdapter(
+      harnessIdSchema.parse("claude-code"),
+      harnessModelCatalogSchema.parse({ models: [], thinkingOptions: [] }),
+      false,
+      false,
+      null,
+      permissionModes,
+    );
+    const fixture = createFixture({
+      externalAdapters: new Map([["claude-code", adapter]]),
+      mappingStore,
+      mappingStoreDirectory: directory,
+    });
+    const threadId = await startExternalThread(fixture, CLAUDE_CODE_NATIVE_TRANSPORT_MODEL_ID, 39);
+    const auto = harnessPermissionModeIdSchema.parse("auto");
+    writeRequest(fixture.desktopInput, {
+      id: 40,
+      method: "codexhost/thread/permission-mode/select",
+      params: { threadId, permissionModeId: auto },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 40)),
+    ).resolves.toMatchObject({ result: { effectivePermissionModeId: auto } });
+    const saved = await mappingStore.getThread(hostThreadIdSchema.parse(threadId));
+    expect(saved?.transportModelId).not.toBe(CLAUDE_CODE_NATIVE_TRANSPORT_MODEL_ID);
+
+    failPersistence = true;
+    writeRequest(fixture.desktopInput, {
+      id: 41,
+      method: "codexhost/thread/permission-mode/select",
+      params: { threadId, permissionModeId: harnessPermissionModeIdSchema.parse("default") },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 41)),
+    ).resolves.toMatchObject({
+      error: { code: -32081, message: expect.stringContaining("applied by the Harness") },
+    });
+    expect(adapter.sessions[0]?.state.effectivePermissionModeId).toBe("default");
+    await expect(mappingStore.getThread(hostThreadIdSchema.parse(threadId))).resolves.toEqual(
+      saved,
+    );
+    await stopFixture(fixture);
+  });
+
+  it("rebuilds the full observed configuration after a failed durability write", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "codexhost-configuration-recovery-"));
+    let failNextSelection = false;
+    const mappingStore = new MappingStore({
+      directory,
+      beforeReplace(record) {
+        if (failNextSelection && record.state === "ready") {
+          failNextSelection = false;
+          throw new Error("synthetic configuration persistence failure");
+        }
+      },
+    });
+    const seed = new FakeHarnessAdapter(harnessIdSchema.parse("claude-code"));
+    const permissionModes = harnessPermissionModeCatalogSchema.parse({
+      modes: [
+        { id: "default", label: "Default" },
+        { id: "auto", label: "Auto" },
+      ],
+      defaultModeId: "default",
+    });
+    const adapter = new FakeHarnessAdapter(
+      harnessIdSchema.parse("claude-code"),
+      seed.catalog,
+      false,
+      false,
+      null,
+      permissionModes,
+    );
+    const fixture = createFixture({
+      externalAdapters: new Map([["claude-code", adapter]]),
+      mappingStore,
+      mappingStoreDirectory: directory,
+    });
+    const model = adapter.catalog.defaultModel;
+    if (!model) throw new Error("Fake Claude catalog has no default Model");
+    const defaultPermission = harnessPermissionModeIdSchema.parse("default");
+    const high = harnessThinkingOptionIdSchema.parse("high");
+    const off = harnessThinkingOptionIdSchema.parse("off");
+    const auto = harnessPermissionModeIdSchema.parse("auto");
+    const threadId = await startExternalThread(
+      fixture,
+      encodeClaudeTransportModel(model, defaultPermission, high),
+      42,
+    );
+
+    failNextSelection = true;
+    writeRequest(fixture.desktopInput, {
+      id: 43,
+      method: "codexhost/thread/permission-mode/select",
+      params: { threadId, permissionModeId: auto },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 43)),
+    ).resolves.toMatchObject({ error: { code: -32081 } });
+    expect(adapter.sessions[0]?.state).toMatchObject({
+      effectivePermissionModeId: auto,
+      effectiveThinkingOptionId: high,
+    });
+
+    writeRequest(fixture.desktopInput, {
+      id: 44,
+      method: "codexhost/thread/thinking/select",
+      params: { threadId, thinkingOptionId: off },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 44)),
+    ).resolves.toMatchObject({
+      result: { effectivePermissionModeId: auto, effectiveThinkingOptionId: off },
+    });
+    await expect(mappingStore.getThread(hostThreadIdSchema.parse(threadId))).resolves.toMatchObject(
+      {
+        transportModelId: encodeClaudeTransportModel(model, auto, off),
+      },
+    );
+    await closeFixture(fixture);
+    const recovered = new MappingStore({ directory });
+    await recovered.initialize();
+    const durable = await recovered.getThread(hostThreadIdSchema.parse(threadId));
+    expect(decodeExternalTransportSelection("claude-code", durable?.transportModelId)).toEqual({
+      model,
+      permissionModeId: auto,
+      thinkingOptionId: off,
+    });
+    await recovered.close();
+    rmSync(directory, { recursive: true, force: true });
   });
 
   it("rejects live Grok Permission Mode changes without rewriting mapping", async () => {
@@ -4623,6 +4811,15 @@ describe("AppServerHost HarnessAdapter projection", () => {
       params: { threadId, commandId: "fake.compact" },
     });
     await vi.waitFor(() => expect(list).toHaveBeenCalledOnce());
+    for (const [id, method, params] of [
+      [30, "thread/rollback", { threadId, numTurns: 1 }],
+      [31, "thread/delete", { threadId }],
+    ] as const) {
+      writeRequest(fixture.desktopInput, { id, method, params });
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, id)),
+      ).resolves.toMatchObject({ error: { code: -32072 } });
+    }
     writeRequest(fixture.desktopInput, {
       id: 3,
       method: "codexhost/thread/command/execute",
@@ -4649,6 +4846,336 @@ describe("AppServerHost HarnessAdapter projection", () => {
       fixture.collector.waitFor((message) => requestId(message, 4)),
     ).resolves.toMatchObject({ result: { accepted: true } });
     expect(execute).toHaveBeenCalledOnce();
+    await stopFixture(fixture);
+  });
+
+  it("reserves rollback before replacement open so a later command cannot target the source Session", async () => {
+    const adapter = rollbackCapableAdapter();
+    const fixture = createFixture({ externalAdapters: new Map([["pi", adapter]]) });
+    const threadId = await startPiThread(fixture);
+    await completePiTurn(fixture, threadId, 2);
+    const originalOpen = adapter.open.bind(adapter);
+    const entered = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    adapter.open = async (input) => {
+      if (input.kind === "rollbackLastTurn") {
+        entered.resolve(undefined);
+        await release.promise;
+      }
+      return originalOpen(input);
+    };
+
+    writeRequest(fixture.desktopInput, {
+      id: 45,
+      method: "thread/rollback",
+      params: { threadId, numTurns: 1 },
+    });
+    await entered.promise;
+    writeRequest(fixture.desktopInput, {
+      id: 46,
+      method: "codexhost/thread/command/execute",
+      params: { threadId, commandId: "fake.compact" },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 46)),
+    ).resolves.toMatchObject({ error: { code: -32072 } });
+
+    release.resolve(undefined);
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 45)),
+    ).resolves.toMatchObject({ result: { thread: { id: threadId } } });
+    await stopFixture(fixture);
+  });
+
+  it("reserves deletion before mapping removal so a later command cannot enter the retiring Session", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const originalRemove = fixture.mappingStore.removeThread.bind(fixture.mappingStore);
+    const entered = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    vi.spyOn(fixture.mappingStore, "removeThread").mockImplementation(async (hostThreadId) => {
+      entered.resolve(undefined);
+      await release.promise;
+      await originalRemove(hostThreadId);
+    });
+
+    writeRequest(fixture.desktopInput, {
+      id: 47,
+      method: "thread/delete",
+      params: { threadId },
+    });
+    await entered.promise;
+    writeRequest(fixture.desktopInput, {
+      id: 48,
+      method: "codexhost/thread/command/execute",
+      params: { threadId, commandId: "fake.compact" },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 48)),
+    ).resolves.toMatchObject({ error: { code: -32072 } });
+
+    release.resolve(undefined);
+    await expect(fixture.collector.waitFor((message) => requestId(message, 47))).resolves.toEqual({
+      id: 47,
+      result: {},
+    });
+    await stopFixture(fixture);
+  });
+
+  it("keeps delegated execution policy through Host fork, rollback, and restart resume", async () => {
+    class RecordingAdapter extends FakeHarnessAdapter {
+      readonly openInputs: Parameters<FakeHarnessAdapter["open"]>[0][] = [];
+
+      override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+        this.openInputs.push(input);
+        return super.open(input);
+      }
+    }
+
+    const directory = mkdtempSync(path.join(tmpdir(), "codexhost-execution-policy-host-"));
+    const firstStore = new MappingStore({ directory });
+    const firstAdapter = new RecordingAdapter(
+      harnessIdSchema.parse("pi"),
+      undefined,
+      true,
+      true,
+      null,
+      undefined,
+      true,
+    );
+    let delegationApi: DelegationControlApi | undefined;
+    const first = createFixture({
+      externalAdapters: new Map([["pi", firstAdapter]]),
+      mappingStore: firstStore,
+      mappingStoreDirectory: directory,
+      onDelegationApi: (api) => {
+        delegationApi = api;
+        return undefined;
+      },
+    });
+    await first.ready;
+    if (!delegationApi) throw new Error("Delegation API was not registered");
+    const started = await delegationApi.start({
+      harnessId: "pi",
+      task: "preserve execution policy",
+      cwd: "/synthetic",
+      parentThreadId: "parent-thread",
+    });
+    const source = firstAdapter.sessions[0];
+    if (!source) throw new Error("Delegated Session was not opened");
+    source.succeedTurn();
+    await first.collector.waitFor((message) =>
+      turnEvent(message, "turn/completed", started.turnId),
+    );
+
+    writeRequest(first.desktopInput, {
+      id: 49,
+      method: "thread/fork",
+      params: { threadId: started.threadId },
+    });
+    await expect(
+      first.collector.waitFor((message) => requestId(message, 49)),
+    ).resolves.toMatchObject({ result: { thread: { id: expect.any(String) } } });
+    expect(firstAdapter.openInputs).toContainEqual(
+      expect.objectContaining({ kind: "fork", executionPolicy: "unattended-full-access" }),
+    );
+
+    writeRequest(first.desktopInput, {
+      id: 50,
+      method: "thread/rollback",
+      params: { threadId: started.threadId, numTurns: 1 },
+    });
+    await expect(
+      first.collector.waitFor((message) => requestId(message, 50)),
+    ).resolves.toMatchObject({ result: { thread: { id: started.threadId } } });
+    expect(firstAdapter.openInputs).toContainEqual(
+      expect.objectContaining({
+        kind: "rollbackLastTurn",
+        executionPolicy: "unattended-full-access",
+      }),
+    );
+    const legacyThreadId = await startPiThread(first, "codexhost/pi-native");
+    const legacyRecord = await firstStore.getThread(hostThreadIdSchema.parse(legacyThreadId));
+    if (!legacyRecord?.nativeSessionRef)
+      throw new Error("Legacy Thread did not persist Native identity");
+    const legacyNativeSessionId = legacyRecord.nativeSessionRef.nativeSessionId;
+    await closeFixture(first);
+
+    const resumedAdapter = new RecordingAdapter(harnessIdSchema.parse("pi"));
+    const second = createFixture({
+      externalAdapters: new Map([["pi", resumedAdapter]]),
+      mappingStore: new MappingStore({ directory }),
+      mappingStoreDirectory: directory,
+    });
+    writeRequest(second.desktopInput, {
+      id: 51,
+      method: "thread/resume",
+      params: { threadId: started.threadId, excludeTurns: true },
+    });
+    await expect(
+      second.collector.waitFor((message) => requestId(message, 51)),
+    ).resolves.toMatchObject({ result: { thread: { id: started.threadId } } });
+    expect(resumedAdapter.openInputs).toContainEqual(
+      expect.objectContaining({ kind: "resume", executionPolicy: "unattended-full-access" }),
+    );
+    writeRequest(second.desktopInput, {
+      id: 52,
+      method: "thread/resume",
+      params: { threadId: legacyThreadId, excludeTurns: true },
+    });
+    await expect(
+      second.collector.waitFor((message) => requestId(message, 52)),
+    ).resolves.toMatchObject({ result: { thread: { id: legacyThreadId } } });
+    const legacyResume = resumedAdapter.openInputs.find(
+      (input) =>
+        input.kind === "resume" && input.nativeRef.nativeSessionId === legacyNativeSessionId,
+    );
+    expect(legacyResume).not.toHaveProperty("executionPolicy");
+    await stopFixture(second);
+  });
+
+  it("emits one failed terminal, releases waiters, closes, and can resume after output ends", async () => {
+    class EndingOutputAdapter extends FakeHarnessAdapter {
+      readonly endOutputs = Promise.withResolvers<undefined>();
+
+      override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+        if (input.kind === "resume") {
+          return {
+            ok: true as const,
+            value: new FakeHarnessSession(
+              this.harnessId,
+              this.catalog,
+              undefined,
+              {
+                harnessId: this.harnessId,
+                nativeSessionId: input.nativeRef.nativeSessionId,
+                formatVersion: input.nativeRef.formatVersion,
+              },
+              { turns: [] },
+              this.supportsFork,
+              "/synthetic",
+              this.supportsForkAcrossCwd,
+            ),
+          };
+        }
+        const opened = await super.open(input);
+        if (opened.ok) {
+          const endOutputs = this.endOutputs;
+          Object.defineProperty(opened.value, "outputs", {
+            value: {
+              [Symbol.asyncIterator]: async function* () {
+                await endOutputs.promise;
+              },
+            },
+          });
+        }
+        return opened;
+      }
+    }
+
+    const adapter = new EndingOutputAdapter(harnessIdSchema.parse("pi"));
+    const fixture = createFixture({ externalAdapters: new Map([["pi", adapter]]) });
+    const threadId = await startPiThread(fixture);
+    const session = adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const close = vi.spyOn(session, "close");
+    const turnId = await startPiTurn(fixture, threadId, 90);
+    adapter.endOutputs.resolve(undefined);
+    await expect(
+      fixture.collector.waitFor((message) => turnEvent(message, "turn/completed", turnId)),
+    ).resolves.toMatchObject({ params: { turn: { status: "failed" } } });
+    expect(
+      fixture.collector.messages.filter((message) => turnEvent(message, "turn/completed", turnId)),
+    ).toHaveLength(1);
+    await vi.waitFor(() => expect(close).toHaveBeenCalledOnce());
+
+    writeRequest(fixture.desktopInput, {
+      id: 91,
+      method: "thread/read",
+      params: { threadId, includeTurns: true },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 91)),
+    ).resolves.toMatchObject({ result: { thread: { id: threadId } } });
+    await stopFixture(fixture);
+  });
+
+  it("closes wait and wait-many subscriptions when terminal Delegation persistence fails", async () => {
+    class EndingDelegationOutputAdapter extends FakeHarnessAdapter {
+      readonly endOutputs = Promise.withResolvers<undefined>();
+
+      override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+        const opened = await super.open(input);
+        if (opened.ok && input.kind === "create") {
+          const endOutputs = this.endOutputs;
+          Object.defineProperty(opened.value, "outputs", {
+            value: {
+              [Symbol.asyncIterator]: async function* () {
+                await endOutputs.promise;
+              },
+            },
+          });
+        }
+        return opened;
+      }
+    }
+
+    const directory = mkdtempSync(path.join(tmpdir(), "codexhost-terminal-delegation-failure-"));
+    const mappingStore = new MappingStore({
+      directory,
+      beforeWriteDelegation(record) {
+        if (record.status === "failed") {
+          throw new Error("synthetic terminal delegation persistence failure");
+        }
+      },
+    });
+    const adapter = new EndingDelegationOutputAdapter(harnessIdSchema.parse("pi"));
+    let delegationApi: DelegationControlApi | undefined;
+    const fixture = createFixture({
+      externalAdapters: new Map([["pi", adapter]]),
+      mappingStore,
+      mappingStoreDirectory: directory,
+      onDelegationApi: (api) => {
+        delegationApi = api;
+        return undefined;
+      },
+    });
+    await fixture.ready;
+    if (!delegationApi) throw new Error("Delegation API was not registered");
+    const api = delegationApi;
+    const started = await api.start({
+      harnessId: "pi",
+      task: "exercise terminal persistence failure",
+      cwd: "/synthetic",
+      parentThreadId: "parent-thread",
+    });
+    const before = await api.status({ threadId: started.threadId });
+    const single = api.wait({
+      threadId: started.threadId,
+      view: "result",
+      timeoutMs: 1_500,
+    });
+    const many = api.waitMany({
+      targets: [{ threadId: started.threadId, afterRevision: before.revision }],
+      timeoutMs: 1_500,
+    });
+
+    const startedAt = Date.now();
+    adapter.endOutputs.resolve(undefined);
+    const [singleResult, manyResult] = await Promise.allSettled([single, many]);
+    expect(Date.now() - startedAt).toBeLessThan(750);
+    // The failed terminal write leaves no authoritative terminal snapshot, but both
+    // wait paths must be released promptly instead of holding the retired hub.
+    expect(singleResult).toMatchObject({ status: "rejected" });
+    expect(manyResult).toMatchObject({
+      status: "fulfilled",
+      value: {
+        timedOut: false,
+        results: [
+          expect.objectContaining({ outcome: expect.stringMatching(/^(changed|resync|error)$/u) }),
+        ],
+      },
+    });
     await stopFixture(fixture);
   });
 
@@ -7154,6 +7681,32 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  it("rejects mixed external turn input before sending a lossy text-only command", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const execute = vi.spyOn(session, "execute");
+    writeRequest(fixture.desktopInput, {
+      id: 103,
+      method: "turn/start",
+      params: {
+        threadId,
+        input: [
+          { type: "text", text: "read the attachment" },
+          { type: "image", url: "attachment" },
+        ],
+      },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 103)),
+    ).resolves.toMatchObject({
+      error: { code: -32602, message: "External Harness does not support non-text turn input" },
+    });
+    expect(execute).not.toHaveBeenCalled();
+    await stopFixture(fixture);
+  });
+
   it("passes an Account-bound official steer and its result through unchanged", async () => {
     const fixture = createFixture();
     await bindOfficialThread(fixture, "official-thread");
@@ -7285,7 +7838,7 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
-  it("advertises Grok native steering from Thread identity without a live Session", async () => {
+  it("does not claim native steering until the restored Session exposes it", async () => {
     const grok = new FakeHarnessAdapter(harnessIdSchema.parse("grok"));
     const first = createFixture({
       externalAdapters: new Map([["grok", grok]]),
@@ -7306,7 +7859,7 @@ describe("AppServerHost HarnessAdapter projection", () => {
       {
         id: 42,
         result: {
-          threads: [{ threadId, owner: "external", harnessId: "grok", nativeSteering: true }],
+          threads: [{ threadId, owner: "external", harnessId: "grok" }],
         },
       },
     );
@@ -7527,7 +8080,11 @@ describe("AppServerHost HarnessAdapter projection", () => {
     ).resolves.toMatchObject({
       result: {
         harnessId: "claude-code",
-        transportModelId: encodeClaudeTransportModel(secondModel),
+        transportModelId: encodeClaudeTransportModel(
+          firstModel,
+          undefined,
+          harnessThinkingOptionIdSchema.parse("off"),
+        ),
         effectiveModel: firstModel,
         resolvedModelLabel: "fake-runtime-primary",
       },

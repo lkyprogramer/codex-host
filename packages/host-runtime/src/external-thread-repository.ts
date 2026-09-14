@@ -552,6 +552,7 @@ export function createExternalThreadRecordInput(input: {
   transportModelId: string;
   ephemeral: boolean;
   historyMode: "legacy" | "paginated";
+  executionPolicy?: CreateProvisionalThreadInput["executionPolicy"];
   forkSource?: CreateProvisionalThreadInput["forkSource"];
   subagent?: CreateProvisionalThreadInput["subagent"];
 }): CreateProvisionalThreadInput {
@@ -564,6 +565,7 @@ export function createExternalThreadRecordInput(input: {
     transportModelId: input.transportModelId,
     ephemeral: input.ephemeral,
     historyMode: input.historyMode,
+    ...(input.executionPolicy ? { executionPolicy: input.executionPolicy } : {}),
     ...(input.forkSource ? { forkSource: input.forkSource } : {}),
     ...(input.subagent ? { subagent: input.subagent } : {}),
   };

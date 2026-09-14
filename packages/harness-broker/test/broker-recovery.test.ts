@@ -105,7 +105,7 @@ describe("broker recovery ownership", () => {
     await vi.waitFor(() => expect(ended).toBe(true));
     await drained;
   });
-  it("resumes the same live wrapper after broker restart with its confirmed native state", async () => {
+  it("does not revive a faulted wrapper after broker restart", async () => {
     const f = await fixture();
     const modes = harnessPermissionModeCatalogSchema.parse({
       defaultModeId: "ask",
@@ -164,24 +164,17 @@ describe("broker recovery ownership", () => {
       return { ok: true, value: session };
     });
     server = await startHarnessBrokerServer({ ...f, adapter: native });
-    expect((await session.readSnapshot()).ok).toBe(true);
+    expect((await session.readSnapshot()).ok).toBe(false);
     const accepted = await session.execute({
       type: "turn.start",
       turnId: hostTurnIdSchema.parse("after-restart"),
       input: [{ type: "text", text: "hello" }],
     });
-    expect(accepted.ok).toBe(true);
-    expect(open.mock.calls[0]?.[0]).toMatchObject({
-      kind: "resume",
-      nativeRef: ref,
-      cwd: f.root,
-      model,
-      permissionModeId: "plan",
-      environment: { CODEXHOST_THREAD_ID: "parent" },
-    });
+    expect(accepted.ok).toBe(false);
+    expect(open).not.toHaveBeenCalled();
   });
   it.each([true, false])(
-    "retains each Session's scoped environment on same-connection reopen (forward=%s)",
+    "does not reopen faulted Sessions on the same connection (forward=%s)",
     async (forwardDelegationEnvironment) => {
       const f = await fixture(),
         native = new FakeHarnessAdapter(id);
@@ -231,14 +224,8 @@ describe("broker recovery ownership", () => {
             turnId: hostTurnIdSchema.parse(`after-fault-${index}`),
             input: [{ type: "text", text: "continue" }],
           }),
-        ).toMatchObject({ ok: true });
-        const resumedInput = open.mock.calls[index + sessions.length]?.[0];
-        expect(resumedInput).toEqual({
-          kind: "resume",
-          cwd: f.root,
-          nativeRef: session.initialState.nativeRef,
-          ...(forwardDelegationEnvironment ? { environment: environments[index] } : {}),
-        });
+        ).toMatchObject({ ok: false, error: { code: "unavailable", retryable: false } });
+        expect(open).toHaveBeenCalledTimes(sessions.length);
       }
     },
   );

@@ -32,6 +32,11 @@ const readyInstallation: RemoteHostInstallationStatus = {
   issues: [],
   ...manifest,
 };
+const degradedInstallation: RemoteHostInstallationStatus = {
+  state: "degraded",
+  issues: ["Shim is unavailable"],
+  ...manifest,
+};
 
 let restore: (() => void) | undefined;
 
@@ -187,5 +192,41 @@ describe("remote Host lifecycle", () => {
       stopRemoteHost({ platform: "linux", environment: { HOME: home } }),
     ).rejects.toThrow("not owned by codexhost");
     expect(terminate).not.toHaveBeenCalled();
+  });
+
+  it("stops a protocol-verified managed listener even when installation repair is required", async () => {
+    const terminate = vi.fn();
+    restore = setRemoteHostLifecycleDependenciesForTest({
+      inspectInstallation: vi.fn().mockResolvedValue(degradedInstallation),
+      probeProtocol: vi.fn().mockResolvedValue(runtime("running", "codexhost")),
+      runTerminator: terminate,
+      socketExists: vi.fn().mockResolvedValue(false),
+    });
+
+    await expect(
+      stopRemoteHost({ platform: "linux", environment: { HOME: home } }),
+    ).resolves.toEqual({ state: "stopped", changed: true, socketPath });
+    expect(terminate).toHaveBeenCalledWith(
+      expect.objectContaining(manifest),
+      socketPath,
+      "managed",
+      { HOME: home },
+    );
+  });
+
+  it("keeps start fail-closed until a degraded installation is repaired", async () => {
+    const launch = vi.fn();
+    const probeProtocol = vi.fn();
+    restore = setRemoteHostLifecycleDependenciesForTest({
+      inspectInstallation: vi.fn().mockResolvedValue(degradedInstallation),
+      launch,
+      probeProtocol,
+    });
+
+    await expect(
+      startRemoteHost({ platform: "linux", environment: { HOME: home } }),
+    ).rejects.toThrow("Remote Host installation is degraded: Shim is unavailable");
+    expect(probeProtocol).not.toHaveBeenCalled();
+    expect(launch).not.toHaveBeenCalled();
   });
 });

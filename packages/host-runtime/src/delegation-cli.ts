@@ -11,6 +11,7 @@ import {
   DELEGATION_RUNTIME_TOKEN_ENV,
   DELEGATION_THREAD_ID_ENV,
   DelegationControlError,
+  isDelegationExecutionPolicy,
   type DelegationControlErrorCode,
 } from "./delegation-types.js";
 
@@ -245,6 +246,7 @@ export async function runDelegationCli(input: {
         "--cwd",
         "--model",
         "--thinking",
+        "--execution-policy",
         "--parent-thread",
         "--request-id",
       ]);
@@ -278,6 +280,13 @@ export async function runDelegationCli(input: {
         );
       const parentThread =
         value(parsed, "--parent-thread") ?? environment[DELEGATION_THREAD_ID_ENV];
+      const executionPolicy = value(parsed, "--execution-policy");
+      if (executionPolicy !== undefined && !isDelegationExecutionPolicy(executionPolicy)) {
+        throw new DelegationControlError(
+          "INVALID_ARGUMENT",
+          "--execution-policy must be default or unattended-full-access",
+        );
+      }
       const cwdOption = value(parsed, "--cwd");
       const cwd = cwdOption ? await realpath(cwdOption) : undefined;
       writeResult(
@@ -293,6 +302,7 @@ export async function runDelegationCli(input: {
             ...(value(parsed, "--thinking")
               ? { thinkingOptionId: value(parsed, "--thinking") }
               : {}),
+            ...(executionPolicy ? { executionPolicy } : {}),
             ...(parentThread ? { parentThreadId: normalizeThreadId(parentThread) } : {}),
             ...(value(parsed, "--request-id") ? { requestId: value(parsed, "--request-id") } : {}),
           },

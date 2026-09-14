@@ -115,6 +115,8 @@ describe("delegation CLI", () => {
             "model-ref",
             "--thinking",
             "high",
+            "--execution-policy",
+            "default",
             "--parent-thread",
             "codex://threads/parent-1",
             "--request-id",
@@ -136,11 +138,45 @@ describe("delegation CLI", () => {
         requestId: "request-1",
         model: { id: "model-ref" },
         thinkingOptionId: "high",
+        executionPolicy: "default",
       });
       expect(JSON.parse(outputText(output))).toEqual({ threadId: "child-1" });
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
+  });
+
+  it("rejects an invalid execution policy before calling the Runtime", async () => {
+    const fetchImpl = successfulFetch({ threadId: "child-1" });
+    const diagnosticOutput = new PassThrough();
+    await expect(
+      runDelegationCli({
+        arguments: [
+          "delegate",
+          "start",
+          "--harness",
+          "pi",
+          "--task",
+          "review",
+          "--execution-policy",
+          "all-access",
+        ],
+        environment: {
+          [DELEGATION_RUNTIME_ENDPOINT_ENV]: "http://127.0.0.1:4321",
+          [DELEGATION_RUNTIME_TOKEN_ENV]: "token",
+        },
+        output: new PassThrough(),
+        diagnosticOutput,
+        fetchImpl,
+      }),
+    ).resolves.toBe(1);
+    expect(JSON.parse(outputText(diagnosticOutput))).toMatchObject({
+      error: {
+        code: "INVALID_ARGUMENT",
+        message: "--execution-policy must be default or unattended-full-access",
+      },
+    });
+    expect(fetchImpl).not.toHaveBeenCalled();
   });
 
   it("uses the Host-provided current Thread when --parent-thread is omitted", async () => {

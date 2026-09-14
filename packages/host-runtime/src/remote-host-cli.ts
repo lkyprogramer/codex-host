@@ -13,6 +13,52 @@ interface RemoteCliResources {
   hostRuntimePath?: string;
 }
 
+interface RemoteHostCliDependencies {
+  install: typeof installRemoteHost;
+  uninstall: typeof uninstallRemoteHost;
+  inspect: typeof inspectRemoteHost;
+  start: typeof startRemoteHost;
+  stop: typeof stopRemoteHost;
+}
+
+let dependencyOverrides: Partial<RemoteHostCliDependencies> = {};
+
+function dependencies(): RemoteHostCliDependencies {
+  return {
+    install: installRemoteHost,
+    uninstall: uninstallRemoteHost,
+    inspect: inspectRemoteHost,
+    start: startRemoteHost,
+    stop: stopRemoteHost,
+    ...dependencyOverrides,
+  };
+}
+
+export function setRemoteHostCliDependenciesForTest(
+  overrides: Partial<RemoteHostCliDependencies>,
+): () => void {
+  const previous = dependencyOverrides;
+  dependencyOverrides = overrides;
+  return () => {
+    dependencyOverrides = previous;
+  };
+}
+
+async function stopVerifiedRemoteHostBeforeUninstall(
+  options: RemoteHostInstallOptions,
+  lifecycle: RemoteHostCliDependencies,
+): Promise<void> {
+  const status = await lifecycle.inspect(options);
+  if (status.runtime.state === "stopped") return;
+  if (status.runtime.state === "running" && status.runtime.protocol === "codexhost") {
+    await lifecycle.stop(options);
+    return;
+  }
+  throw new Error(
+    `Refusing to uninstall Remote Host while its socket is not verified as codexhost-owned: ${status.runtime.socketPath}`,
+  );
+}
+
 function parseRemoteCliArguments(arguments_: readonly string[]): {
   command: "install" | "start" | "stop" | "status" | "uninstall" | "help";
   options: RemoteHostInstallOptions;
@@ -77,6 +123,7 @@ export async function runRemoteHostCli(input: {
   try {
     const parsed = parseRemoteCliArguments(input.arguments);
     const options = { ...parsed.options, environment: input.environment ?? process.env };
+    const lifecycle = dependencies();
     if (parsed.command === "help") {
       output.write(
         [
@@ -93,26 +140,27 @@ export async function runRemoteHostCli(input: {
       return 0;
     }
     if (parsed.command === "install") {
-      const result = await installRemoteHost(options);
+      const result = await lifecycle.install(options);
       output.write(`${JSON.stringify({ state: "ready", ...result }, null, 2)}\n`);
       return 0;
     }
     if (parsed.command === "start") {
-      const result = await startRemoteHost(options);
+      const result = await lifecycle.start(options);
       output.write(`${JSON.stringify(result, null, 2)}\n`);
       return 0;
     }
     if (parsed.command === "stop") {
-      const result = await stopRemoteHost(options);
+      const result = await lifecycle.stop(options);
       output.write(`${JSON.stringify(result, null, 2)}\n`);
       return 0;
     }
     if (parsed.command === "status") {
-      const result = await inspectRemoteHost(options);
+      const result = await lifecycle.inspect(options);
       output.write(`${JSON.stringify(result, null, 2)}\n`);
       return result.state === "degraded" || result.runtime.state === "unknown" ? 1 : 0;
     }
-    await uninstallRemoteHost(options);
+    await stopVerifiedRemoteHostBeforeUninstall(options, lifecycle);
+    await lifecycle.uninstall(options);
     output.write(`${JSON.stringify({ state: "not-installed" }, null, 2)}\n`);
     return 0;
   } catch (error) {

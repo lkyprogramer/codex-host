@@ -226,6 +226,16 @@ function installedManifest(status: RemoteHostInstallationStatus): RemoteHostMani
   return status;
 }
 
+function installedManifestForStop(status: RemoteHostInstallationStatus): RemoteHostManifestV1 {
+  if (status.state === "not-installed") {
+    throw new Error("Remote Host is not installed. Run: codexhost remote install");
+  }
+  // A degraded installation can still own a running listener. Preserve the
+  // protocol probe, shim identity check, and socket readback before removing
+  // any files; only start remains blocked until the installation is repaired.
+  return status;
+}
+
 function managedEnvironment(
   manifest: RemoteHostManifestV1,
   environment: NodeJS.ProcessEnv,
@@ -377,7 +387,7 @@ export async function stopRemoteHost(
     throw new Error("Remote Host lifecycle must run on the macOS or Linux SSH host");
   }
   const lifecycle = dependencies();
-  const manifest = installedManifest(await lifecycle.inspectInstallation(options));
+  const manifest = installedManifestForStop(await lifecycle.inspectInstallation(options));
   const socketPath = socketPathFor(environment);
   const current = await lifecycle.probeProtocol(manifest, socketPath, environment);
   if (current.state === "stopped") return { state: "stopped", changed: false, socketPath };

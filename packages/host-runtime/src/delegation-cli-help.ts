@@ -3,10 +3,16 @@ const COMMAND_HELP = {
 List Harnesses available in the active Runtime.`,
   "harness inspect": `codexhost harness inspect <harness> [--cwd <path>] [--refresh true|false] [--format json|compact]
 Read available Models, native defaults, Thinking options, and configuration capabilities.
-Use the returned Model and Thinking IDs for explicit selections.`,
-  "delegate start": `codexhost delegate start --harness <id> (--task <text> | --task-file <path> | --task -) [--cwd <path>] [--model <opaque-ref>] [--thinking <option-id>] [--parent-thread <thread>] [--request-id <id>] [--format json|compact]
+Use the returned Model and Thinking IDs for explicit selections.
+Some Harnesses encode reasoning and speed in Model variants instead of a separate Thinking option. Select the exact variant; never infer an opaque ref from a native CLI alias.
+An absent defaultModel means the current native default is unknown; a listed Model is not proof of successful execution.`,
+  "delegate start": `codexhost delegate start --harness <id> (--task <text> | --task-file <path> | --task -) [--cwd <path>] [--model <opaque-ref>] [--thinking <option-id>] [--execution-policy default|unattended-full-access] [--parent-thread <thread>] [--request-id <id>] [--format json|compact]
 Create an independent child Thread, submit the task, and return immediately.
 Omit --model and --thinking to use the Harness native defaults.
+--execution-policy selects persisted execution intent, not a native Permission Mode or Thinking level.
+Omitting it is equivalent to explicit unattended-full-access, including retry identity. default requests native behavior without added unattended elevation; it does not revoke prior native authorization or guarantee read-only execution.
+A Harness may reject a policy it cannot express natively. Official Codex currently rejects explicit default.
+Policy is retained for subsequent sends and supported resume/history operations. Changing policy changes request identity; do not alter it to replay an UNKNOWN task.
 --cwd overrides the child workspace. Otherwise use the resolved parent Thread workspace, then the Host Runtime process cwd.
 --parent-thread overrides caller inference. PARENT_THREAD_AMBIGUOUS requires an explicit parent.
 Reuse --request-id for an idempotent retry. Identical recent parent/target/task/configuration requests are also deduplicated briefly.
@@ -47,7 +53,9 @@ User-visible command, tool, and file-change items. Default metadata omits output
   "thread configuration": `codexhost thread configuration <thread> [--format json|compact]
 Requested vs effective vs unknown configuration without filling unknowns.`,
   "thread release": `codexhost thread release <thread> [--expected-turn <turn>] [--format json|compact]
-Release idle/terminal Threads. Busy Threads must cancel then wait. Fail-closed for unknown/unsupported quiescence.`,
+Release idle/terminal Threads. Busy Threads must cancel then wait. Fail-closed for unknown/unsupported job quiescence.
+Lifecycle-capable Harnesses can suspend native resources without discarding the Thread. resourcesReleased=true only confirms that scoped resource release; released=false and quiescence=unknown still prohibit assuming background jobs or worktrees are safe to remove.
+The Host also attempts idle suspension after 60 seconds for opt-in Harnesses. status/wait-many do not wake a suspended Session; send, configuration and full history reads may resume it.`,
 } as const;
 
 export type DelegationCliCommand = keyof typeof COMMAND_HELP;
@@ -60,7 +68,7 @@ read/wait are non-consuming. Native Codex callers need local Runtime access; RUN
 export const DELEGATION_HELP = `usage:
   codexhost harness list
   codexhost harness inspect <harness>
-  codexhost delegate start --harness <id> --task <text>
+  codexhost delegate start --harness <id> --task <text> [--execution-policy default|unattended-full-access]
   codexhost delegate reconcile <thread>
   codexhost thread send <thread> --message <text>
   codexhost thread cancel <thread>

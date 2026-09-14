@@ -1,4 +1,6 @@
 import { awaitWithSignal } from "./abortable-read.js";
+import { validateOpenedHarnessSession } from "./harness-session-validation.js";
+import { ManagedHarnessSession } from "./managed-harness-session.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -67,10 +69,11 @@ export interface ExternalThread {
   activeTurnId: HostTurnId | null;
   latestUsage: HostUsage | null;
   usageTurnId: HostTurnId | null;
-  projectedTurns: Map<HostTurnId, { projector: CodexTurnProjector }>;
+  projectedTurns: Map<HostTurnId, { projector: CodexTurnProjector; started?: true }>;
   responseGates: Map<HostTurnId, TurnProjectionGate>;
   ephemeralTurnIds: Set<HostTurnId>;
   persistenceError: Error | null;
+  finalizing: boolean;
   ignoredInteractionIds: Set<HostInteractionId>;
   changes: ThreadChangeHub;
   attentionChanges: ThreadChangeHub;
@@ -193,6 +196,21 @@ function errorMessage(error: unknown): string {
 }
 
 const EXTERNAL_READ_TIMEOUT_MS = 10_000;
+const DEFAULT_IDLE_SUSPEND_TIMEOUT_MS = 60_000;
+
+interface IdleSuspendTimer {
+  abort: AbortController;
+  attempts: number;
+  timer: ReturnType<typeof setTimeout>;
+}
+
+interface ResumedNativeSession {
+  session: HarnessSession;
+  record: StoredThreadRecordV1;
+  turns: JsonObject[];
+  state: HarnessSessionState;
+  transportModelId: string;
+}
 
 export class ExternalThreadRuntime {
   readonly #refreshes = new Map<
@@ -210,8 +228,12 @@ export class ExternalThreadRuntime {
   readonly #repository: ExternalThreadRepository;
   readonly #restores = new Map<string, Promise<ExternalThread>>();
   readonly #threads = new Map<string, ExternalThread>();
+  readonly #idleTimers = new Map<ExternalThread, IdleSuspendTimer>();
+  readonly #idleUnknownReported = new Set<ExternalThread>();
   readonly #epoch: string;
   readonly #historyReadTimeoutMs: number;
+  readonly #idleSuspendTimeoutMs: number;
+  readonly #canSuspend: (thread: ExternalThread) => boolean;
 
   constructor(input: {
     adapters: Map<ExternalHarnessId, HarnessAdapter>;
@@ -221,6 +243,8 @@ export class ExternalThreadRuntime {
     diagnose(error: unknown): void;
     epoch?: string;
     historyReadTimeoutMs?: number;
+    idleSuspendTimeoutMs?: number;
+    canSuspend?(thread: ExternalThread): boolean;
   }) {
     this.#adapters = input.adapters;
     this.#environment = input.environment ?? process.env;
@@ -229,6 +253,11 @@ export class ExternalThreadRuntime {
     this.#diagnose = input.diagnose;
     this.#epoch = input.epoch ?? randomUUID();
     this.#historyReadTimeoutMs = input.historyReadTimeoutMs ?? EXTERNAL_READ_TIMEOUT_MS;
+    this.#idleSuspendTimeoutMs = input.idleSuspendTimeoutMs ?? DEFAULT_IDLE_SUSPEND_TIMEOUT_MS;
+    this.#canSuspend =
+      input.canSuspend ??
+      ((thread) =>
+        !thread.running && thread.activeTurnId === null && thread.responseGates.size === 0);
   }
 
   get epoch(): string {
@@ -244,12 +273,19 @@ export class ExternalThreadRuntime {
   }
 
   remove(threadId: string): void {
+    const thread = this.#threads.get(threadId);
+    if (thread) {
+      this.#clearIdleTimer(thread);
+      this.#idleUnknownReported.delete(thread);
+    }
     this.#threads.delete(threadId);
   }
 
   clear(): void {
     for (const refresh of this.#refreshes.values()) refresh.abort.abort();
+    for (const thread of this.#idleTimers.keys()) this.#clearIdleTimer(thread);
     this.#refreshes.clear();
+    this.#idleUnknownReported.clear();
     this.#threads.clear();
     this.#restores.clear();
   }
@@ -310,13 +346,29 @@ export class ExternalThreadRuntime {
       responseGates: new Map(),
       ephemeralTurnIds: new Set(),
       persistenceError: null,
+      finalizing: false,
       ignoredInteractionIds: new Set(),
       changes: new ThreadChangeHub(this.#epoch),
       attentionChanges: new ThreadChangeHub(`${this.#epoch}:attention`),
     };
+    externalThread.session = new ManagedHarnessSession({
+      session: input.session,
+      resume: () => this.#resumeSuspendedSession(externalThread),
+      onActivity: () => this.#touchIdleTimer(externalThread),
+      onFault: (error) => {
+        this.#clearIdleTimer(externalThread);
+        this.#diagnose(error);
+      },
+    }) as unknown as HarnessSession;
     externalThread.outputTask = this.#consumeOutputs(externalThread);
     this.#threads.set(externalThread.id, externalThread);
+    this.#touchIdleTimer(externalThread);
     return externalThread;
+  }
+
+  markIdle(thread: ExternalThread): void {
+    if (this.#threads.get(thread.id) !== thread) return;
+    this.#touchIdleTimer(thread);
   }
 
   async replace(
@@ -342,10 +394,87 @@ export class ExternalThreadRuntime {
       await current.outputTask;
     } catch (error) {
       this.#diagnose(error);
+      throw new Error("External Thread replacement could not close the current native Session", {
+        cause: error,
+      });
     }
     await this.#retireSubagents(current.id);
-    this.#threads.delete(current.id);
+    this.remove(current.id);
     return this.register(input);
+  }
+
+  #clearIdleTimer(thread: ExternalThread): void {
+    const idle = this.#idleTimers.get(thread);
+    if (!idle) return;
+    this.#idleTimers.delete(thread);
+    clearTimeout(idle.timer);
+    idle.abort.abort();
+  }
+
+  #touchIdleTimer(thread: ExternalThread): void {
+    this.#clearIdleTimer(thread);
+    this.#idleUnknownReported.delete(thread);
+    this.#armIdleTimer(thread, 0);
+  }
+
+  #armIdleTimer(thread: ExternalThread, attempts: number): void {
+    if (
+      this.#threads.get(thread.id) !== thread ||
+      !thread.session.resourceLifecycle ||
+      !this.#canSuspend(thread)
+    ) {
+      return;
+    }
+    const abort = new AbortController();
+    const delay = Math.min(this.#idleSuspendTimeoutMs * Math.max(1, 2 ** attempts), 5 * 60_000);
+    const timer = setTimeout(() => {
+      void this.#suspendWhenIdle(thread, abort);
+    }, delay);
+    timer.unref?.();
+    this.#idleTimers.set(thread, { abort, attempts, timer });
+  }
+
+  async #suspendWhenIdle(thread: ExternalThread, abort: AbortController): Promise<void> {
+    const idle = this.#idleTimers.get(thread);
+    if (!idle || idle.abort !== abort) return;
+    clearTimeout(idle.timer);
+    if (
+      abort.signal.aborted ||
+      this.#threads.get(thread.id) !== thread ||
+      !this.#canSuspend(thread)
+    ) {
+      this.#clearIdleTimer(thread);
+      return;
+    }
+    const lifecycle = thread.session.resourceLifecycle;
+    if (!lifecycle) {
+      this.#clearIdleTimer(thread);
+      return;
+    }
+    let result: Awaited<ReturnType<typeof lifecycle.suspend>> | undefined;
+    try {
+      // The managed Session serializes this call with all wake operations. Do
+      // not race it with cancellation: a late native stop must settle first.
+      result = await lifecycle.suspend(abort.signal);
+    } catch (error) {
+      this.#diagnose(error);
+    } finally {
+      if (this.#idleTimers.get(thread) === idle) this.#idleTimers.delete(thread);
+    }
+    if (
+      (result?.status === "busy" || result?.status === "unknown") &&
+      !abort.signal.aborted &&
+      this.#threads.get(thread.id) === thread &&
+      this.#canSuspend(thread)
+    ) {
+      if (result.status === "unknown" && !this.#idleUnknownReported.has(thread)) {
+        this.#idleUnknownReported.add(thread);
+        this.#diagnose(
+          `External Thread '${thread.id}' idle resource suspension is unknown; retrying`,
+        );
+      }
+      this.#armIdleTimer(thread, result.status === "unknown" ? idle.attempts + 1 : 0);
+    }
   }
 
   async #retireSubagents(parentId: string): Promise<void> {
@@ -374,13 +503,16 @@ export class ExternalThreadRuntime {
     }
     for (const child of this.#threads.values()) {
       if (!(await descendant(child.record))) continue;
-      this.#threads.delete(child.id);
       try {
         await child.session.close();
         await child.outputTask;
       } catch (error) {
         this.#diagnose(error);
+        throw new Error("External Subagent Session could not close during parent retirement", {
+          cause: error,
+        });
       }
+      this.remove(child.id);
     }
   }
 
@@ -426,9 +558,15 @@ export class ExternalThreadRuntime {
     }
     const { record } = location;
     if (record.state !== "ready" || !record.nativeSessionRef) {
+      const delegation = await this.#repository.getDelegationByChild(record.hostThreadId);
       return {
         kind: "error",
-        error: { code: -32079, message: "External Native Session is unavailable" },
+        error: {
+          code: -32079,
+          message: delegation
+            ? "External Delegation outcome is unknown; inspect or reconcile before retrying"
+            : "External Native Session is unavailable",
+        },
       };
     }
     let restoring = this.#restores.get(threadId);
@@ -537,6 +675,169 @@ export class ExternalThreadRuntime {
     }
   }
 
+  async #resumeSuspendedSession(thread: ExternalThread): Promise<HarnessSession> {
+    const record = await this.#repository.find(thread.id);
+    if (
+      !record ||
+      record.state !== "ready" ||
+      !record.nativeSessionRef ||
+      record.subagent ||
+      this.#threads.get(thread.id) !== thread
+    ) {
+      throw new Error("External Thread is no longer available for native Session resume");
+    }
+    const managed = thread.session;
+    if (!(managed instanceof ManagedHarnessSession)) {
+      throw new Error("External Thread does not retain a managed native Session");
+    }
+    const resumed = await this.#openResumedNativeSession(record, (session) =>
+      managed.validateResumedSession(session),
+    );
+    if (this.#threads.get(thread.id) !== thread) {
+      await resumed.session.close().catch(() => undefined);
+      throw new Error("External Thread was removed while its native Session was resuming");
+    }
+    thread.record = resumed.record;
+    thread.turns = resumed.turns;
+    thread.transportModelId = resumed.transportModelId;
+    thread.historyHydrated = true;
+    thread.stateObserver.update(resumed.state);
+    managed.updateObservedState(resumed.state);
+    thread.thread = externalThreadValue({
+      record: resumed.record,
+      turns: resumed.turns,
+      sessionId: thread.sessionId,
+      running: thread.running,
+    });
+    if (resumed.state.effectiveModel) thread.requestedModel = resumed.state.effectiveModel;
+    if (resumed.state.effectiveThinkingOptionId) {
+      thread.requestedThinkingOptionId = resumed.state.effectiveThinkingOptionId;
+    }
+    if (resumed.state.effectivePermissionModeId) {
+      thread.requestedPermissionModeId = resumed.state.effectivePermissionModeId;
+    }
+    return resumed.session;
+  }
+
+  async #openResumedNativeSession(
+    record: StoredThreadRecordV1,
+    validateResume?: (session: HarnessSession) => void,
+  ): Promise<ResumedNativeSession> {
+    const harnessId = record.harnessId as ExternalHarnessId;
+    const adapter = this.#adapters.get(harnessId);
+    if (!adapter || !record.nativeSessionRef) {
+      throw new ExternalThreadOpenError({
+        code: -32077,
+        message: "External Harness is unavailable",
+      });
+    }
+    const restoredSelection = decodeExternalTransportSelection(harnessId, record.transportModelId);
+    const opened = await adapter.open({
+      kind: "resume",
+      cwd: record.cwd,
+      environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
+      nativeRef: record.nativeSessionRef as NativeSessionRef,
+      knownTurnRefs: record.turnMappings.map(({ nativeTurnRef }) => nativeTurnRef),
+      ...(restoredSelection?.model ? { model: restoredSelection.model } : {}),
+      ...(restoredSelection?.thinkingOptionId
+        ? { thinkingOptionId: restoredSelection.thinkingOptionId }
+        : {}),
+      ...((record.executionPolicy || harnessId === "grok") && restoredSelection?.permissionModeId
+        ? { permissionModeId: restoredSelection.permissionModeId }
+        : {}),
+      ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
+    });
+    if (!opened.ok) {
+      throw new ExternalThreadOpenError(mapExternalThreadHarnessError(opened.error, "resume"));
+    }
+    const validated = await validateOpenedHarnessSession(record.harnessId, opened.value);
+    if (!validated.ok) {
+      throw new ExternalThreadOpenError(mapExternalThreadHarnessError(validated.error, "resume"));
+    }
+    const session = validated.value;
+    try {
+      validateResume?.(session);
+      if (
+        restoredSelection?.permissionModeId &&
+        session.initialState.effectivePermissionModeId !== restoredSelection.permissionModeId &&
+        harnessId !== "opencode" &&
+        !permissionModeFixedAtCreate(session.capabilities.configuration)
+      ) {
+        if (!session.capabilities.configuration.selectPermissionMode) {
+          throw new ExternalThreadOpenError({
+            code: -32076,
+            message: "External Harness does not support restored Permission Mode selection",
+          });
+        }
+        const selected = await session.execute({
+          type: "permissionMode.select",
+          permissionModeId: restoredSelection.permissionModeId,
+        });
+        if (!selected.ok) {
+          throw new ExternalThreadOpenError(
+            mapExternalThreadHarnessError(selected.error, "resume"),
+          );
+        }
+      }
+      const snapshot = await session.readSnapshot();
+      if (!snapshot.ok) {
+        throw new ExternalThreadOpenError(mapExternalThreadHarnessError(snapshot.error, "read"));
+      }
+      let aligned = await this.#repository.alignSnapshot(record, snapshot.value);
+      const restoredState = snapshot.value.state;
+      const state = restoredState ?? session.initialState;
+      const effectiveModel = restoredState
+        ? restoredState.effectiveModel
+        : restoredSelection?.model;
+      const effectiveThinkingOptionId = restoredState
+        ? restoredState.effectiveThinkingOptionId
+        : restoredSelection?.thinkingOptionId;
+      const effectivePermissionModeId = restoredState
+        ? restoredState.effectivePermissionModeId
+        : restoredSelection?.permissionModeId;
+      let transportModelId = aligned.record.transportModelId;
+      // OMP can silently replace an unavailable Model during resume, while OpenCode's
+      // additive Permission API cannot reliably restore a stale mode. Persist live state so the
+      // next restore does not reapply an obsolete transport token.
+      if ((harnessId === "omp" || harnessId === "opencode") && effectiveModel) {
+        const liveSelection: ExternalConfigurationSelection = {
+          model: effectiveModel,
+          ...(effectiveThinkingOptionId ? { thinkingOptionId: effectiveThinkingOptionId } : {}),
+          ...(effectivePermissionModeId ? { permissionModeId: effectivePermissionModeId } : {}),
+        };
+        transportModelId = encodeExternalTransportSelection(harnessId, liveSelection);
+        if (transportModelId !== aligned.record.transportModelId) {
+          try {
+            aligned = {
+              ...aligned,
+              record: await this.#repository.setTransportModelId(
+                aligned.record.hostThreadId,
+                transportModelId,
+              ),
+            };
+          } catch (error) {
+            this.#diagnose(error);
+          }
+        }
+      }
+      return {
+        session,
+        record: aligned.record,
+        turns: aligned.turns,
+        state: {
+          ...state,
+          ...(effectiveModel ? { effectiveModel } : {}),
+          ...(effectiveThinkingOptionId ? { effectiveThinkingOptionId } : {}),
+          ...(effectivePermissionModeId ? { effectivePermissionModeId } : {}),
+        },
+        transportModelId,
+      };
+    } catch (error) {
+      await session.close().catch(() => undefined);
+      throw error;
+    }
+  }
+
   async #restore(record: StoredThreadRecordV1): Promise<ExternalThread> {
     const harnessId = record.harnessId as ExternalHarnessId;
     const adapter = this.#adapters.get(harnessId);
@@ -594,113 +895,27 @@ export class ExternalThreadRuntime {
         ...(snapshot.value.state ? { restoredState: snapshot.value.state } : {}),
       });
     }
-    const restoredSelection = decodeExternalTransportSelection(harnessId, record.transportModelId);
-    const opened = await adapter.open({
-      kind: "resume",
-      cwd: record.cwd,
-      environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
-      nativeRef: record.nativeSessionRef as NativeSessionRef,
-      knownTurnRefs: record.turnMappings.map(({ nativeTurnRef }) => nativeTurnRef),
-      ...(restoredSelection?.model ? { model: restoredSelection.model } : {}),
-      ...(restoredSelection?.thinkingOptionId
-        ? { thinkingOptionId: restoredSelection.thinkingOptionId }
-        : {}),
-      ...(harnessId === "grok" && restoredSelection?.permissionModeId
-        ? { permissionModeId: restoredSelection.permissionModeId }
-        : {}),
-    });
-    if (!opened.ok) {
-      throw new ExternalThreadOpenError(mapExternalThreadHarnessError(opened.error, "resume"));
-    }
-    const session = opened.value;
-    try {
-      if (
-        restoredSelection?.permissionModeId &&
-        harnessId !== "opencode" &&
-        !permissionModeFixedAtCreate(session.capabilities.configuration)
-      ) {
-        if (!session.capabilities.configuration.selectPermissionMode) {
-          throw new ExternalThreadOpenError({
-            code: -32076,
-            message: "External Harness does not support restored Permission Mode selection",
-          });
-        }
-        const selected = await session.execute({
-          type: "permissionMode.select",
-          permissionModeId: restoredSelection.permissionModeId,
-        });
-        if (!selected.ok) {
-          throw new ExternalThreadOpenError(
-            mapExternalThreadHarnessError(selected.error, "resume"),
-          );
-        }
-      }
-      const snapshot = await session.readSnapshot();
-      if (!snapshot.ok) {
-        throw new ExternalThreadOpenError(mapExternalThreadHarnessError(snapshot.error, "read"));
-      }
-      let aligned = await this.#repository.alignSnapshot(record, snapshot.value);
-      const restoredState = snapshot.value.state;
-      const effectiveModel = restoredState
-        ? restoredState.effectiveModel
-        : restoredSelection?.model;
-      const effectiveThinkingOptionId = restoredState
-        ? restoredState.effectiveThinkingOptionId
-        : restoredSelection?.thinkingOptionId;
-      const effectivePermissionModeId = restoredState
-        ? restoredState.effectivePermissionModeId
-        : restoredSelection?.permissionModeId;
-      let transportModelId = aligned.record.transportModelId;
-      // OMP can silently replace an unavailable Model during resume, while OpenCode's
-      // additive Permission API cannot reliably restore a stale mode. Persist live state so the
-      // next restore does not reapply an obsolete transport token.
-      if ((harnessId === "omp" || harnessId === "opencode") && effectiveModel) {
-        const liveSelection: ExternalConfigurationSelection = {
-          model: effectiveModel,
-          ...(effectiveThinkingOptionId ? { thinkingOptionId: effectiveThinkingOptionId } : {}),
-          ...((harnessId === "omp" || harnessId === "opencode") && effectivePermissionModeId
-            ? { permissionModeId: effectivePermissionModeId }
-            : {}),
-        };
-        transportModelId = encodeExternalTransportSelection(harnessId, liveSelection);
-        if (transportModelId !== aligned.record.transportModelId) {
-          try {
-            aligned = {
-              ...aligned,
-              record: await this.#repository.setTransportModelId(
-                aligned.record.hostThreadId,
-                transportModelId,
-              ),
-            };
-          } catch (error) {
-            this.#diagnose(error);
-          }
-        }
-      }
-      const sessionId = await this.#repository.sessionTreeId(aligned.record);
-      return this.register({
-        record: aligned.record,
-        session,
+    const resumed = await this.#openResumedNativeSession(record);
+    const sessionId = await this.#repository.sessionTreeId(resumed.record);
+    return this.register({
+      record: resumed.record,
+      session: resumed.session,
+      sessionId,
+      thread: externalThreadValue({
+        record: resumed.record,
+        turns: resumed.turns,
         sessionId,
-        thread: externalThreadValue({
-          record: aligned.record,
-          turns: aligned.turns,
-          sessionId,
-        }),
-        turns: aligned.turns,
-        ...(effectiveModel ? { requestedModel: effectiveModel } : {}),
-        ...(effectiveThinkingOptionId
-          ? { requestedThinkingOptionId: effectiveThinkingOptionId }
-          : {}),
-        ...(effectivePermissionModeId
-          ? { requestedPermissionModeId: effectivePermissionModeId }
-          : {}),
-        ...(restoredState ? { restoredState } : {}),
-        transportModelId,
-      });
-    } catch (error) {
-      await session.close().catch(() => undefined);
-      throw error;
-    }
+      }),
+      turns: resumed.turns,
+      ...(resumed.state.effectiveModel ? { requestedModel: resumed.state.effectiveModel } : {}),
+      ...(resumed.state.effectiveThinkingOptionId
+        ? { requestedThinkingOptionId: resumed.state.effectiveThinkingOptionId }
+        : {}),
+      ...(resumed.state.effectivePermissionModeId
+        ? { requestedPermissionModeId: resumed.state.effectivePermissionModeId }
+        : {}),
+      restoredState: resumed.state,
+      transportModelId: resumed.transportModelId,
+    });
   }
 }

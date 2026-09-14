@@ -662,6 +662,7 @@ describe("macOS Aqua Harness broker", () => {
     await expect(output.next()).resolves.toMatchObject({
       value: { kind: "event", event: { type: "session.faulted" } },
     });
+    await expect(output.next()).resolves.toEqual({ done: true, value: undefined });
 
     const secondTurn = opened.value.execute({
       type: "turn.start",
@@ -671,27 +672,15 @@ describe("macOS Aqua Harness broker", () => {
     await new Promise<void>((resolve) => setImmediate(resolve));
     expect(open).toHaveBeenCalledTimes(1);
     staleGate.resolve();
-    await expect(secondTurn).resolves.toMatchObject({ ok: true });
-    expect(open).toHaveBeenCalledTimes(2);
-    const replacement = sessions[1];
-    if (!replacement) throw new Error("replacement native Session is unavailable");
-    replacement.succeedTurn();
-
-    await expect(
-      opened.value.execute({
-        type: "turn.start",
-        turnId: hostTurnIdSchema.parse("generation-race-third-turn"),
-        input: [{ type: "text", text: "replacement remains active" }],
-      }),
-    ).resolves.toMatchObject({ ok: true });
-    expect(open).toHaveBeenCalledTimes(2);
+    await expect(secondTurn).resolves.toMatchObject({ ok: false, error: { retryable: false } });
+    expect(open).toHaveBeenCalledTimes(1);
 
     await opened.value.close();
     await adapter.close();
     await server.close();
   });
 
-  it("reopens once after a terminal authentication failure and restores selection", async () => {
+  it("publishes one authentication Session fault, ends the wrapper, and permits fresh resume", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-harness-broker-"));
     roots.push(root);
     const descriptorPath = path.join(root, "broker-v1.json");
@@ -784,21 +773,32 @@ describe("macOS Aqua Harness broker", () => {
     }
     expect(observedAuthenticationTerminal).toBe(true);
 
+    await expect(outputs.next()).resolves.toMatchObject({
+      done: false,
+      value: {
+        kind: "event",
+        event: { type: "session.faulted", error: { code: "authenticationRequired" } },
+      },
+    });
+    await expect(outputs.next()).resolves.toEqual({ done: true, value: undefined });
+
     await expect(
       opened.value.execute({
         type: "turn.start",
         turnId: hostTurnIdSchema.parse("broker-reopen-turn"),
         input: [{ type: "text", text: "resume after login" }],
       }),
-    ).resolves.toEqual({ ok: true, value: { turnId: "broker-reopen-turn" } });
-    expect(open).toHaveBeenCalledTimes(2);
-    expect(sessions[1]?.state.nativeRef).toEqual(nativeRef);
-    expect(sessions[1]?.state.effectiveModel).toEqual(selectedModel.ref);
-    expect(sessions[1]?.state.effectiveThinkingOptionId).toBe(selectedThinking.id);
-    expect(sessions[1]?.state.effectivePermissionModeId).toBe(selectedPermission.id);
-    expect(opened.value.initialState.nativeRef).toEqual(nativeRef);
+    ).resolves.toMatchObject({ ok: false, error: { code: "unavailable", retryable: false } });
+    expect(open).toHaveBeenCalledTimes(1);
 
     await opened.value.close();
+    const resumed = await adapter.open({ kind: "resume", cwd: root, nativeRef });
+    expect(resumed.ok).toBe(true);
+    expect(open).toHaveBeenCalledTimes(2);
+    expect(open).toHaveBeenLastCalledWith(
+      expect.objectContaining({ kind: "resume", cwd: root, nativeRef }),
+    );
+    if (resumed.ok) await resumed.value.close();
     await adapter.close();
     await server.close();
   });

@@ -82,13 +82,15 @@ function harnessError(message: string, retryable = true): HarnessError {
   return { code: "unavailable", message, retryable, stage: "harnessBroker" };
 }
 
-function isAuthenticationTerminal(output: HarnessOutput): boolean {
-  return (
-    output.kind === "event" &&
-    output.event.type === "turn.completed" &&
-    output.event.outcome.status === "failed" &&
-    output.event.outcome.error.code === "authenticationRequired"
-  );
+function authenticationTerminalError(output: HarnessOutput): HarnessError | undefined {
+  if (output.kind !== "event" || output.event.type !== "turn.completed") return undefined;
+  if (
+    output.event.outcome.status !== "failed" ||
+    output.event.outcome.error.code !== "authenticationRequired"
+  ) {
+    return undefined;
+  }
+  return output.event.outcome.error;
 }
 
 function nativeWriterKey(nativeSessionId: string): string {
@@ -387,12 +389,13 @@ export async function startHarnessBrokerServer(input: {
               record.selection.permissionModeId = state.effectivePermissionModeId;
             }
           }
-          const authenticationTerminal = isAuthenticationTerminal(output);
-          if (output.kind === "event" && output.event.type === "session.faulted") {
+          const authenticationError = authenticationTerminalError(output);
+          const nativeFault = output.kind === "event" && output.event.type === "session.faulted";
+          if (nativeFault) {
             record.faulted = true;
             releaseProvisionalWriter(record);
           }
-          if (authenticationTerminal) {
+          if (authenticationError) {
             record.faulted = true;
             releaseProvisionalWriter(record);
           }
@@ -402,7 +405,18 @@ export async function startHarnessBrokerServer(input: {
             sessionGeneration,
             output,
           });
-          if (authenticationTerminal) {
+          if (authenticationError) {
+            await send({
+              kind: "output",
+              sessionId: record.id,
+              sessionGeneration,
+              output: {
+                kind: "event",
+                event: { type: "session.faulted", error: authenticationError },
+              },
+            });
+          }
+          if (authenticationError || nativeFault) {
             await nativeSession.close().catch(() => undefined);
             break;
           }
@@ -623,6 +637,17 @@ export async function startHarnessBrokerServer(input: {
       if (request.method === "session.execute") {
         const parsed = sessionExecuteParamsSchema.parse(request.params);
         const record = requireSession(parsed);
+        if (record.faulted) {
+          return {
+            ok: false,
+            error: {
+              code: "invalidState",
+              message: "Faulted Harness Session cannot accept commands; open a new resume Session",
+              retryable: false,
+              stage: "harnessBroker.session",
+            },
+          };
+        }
         const command = brokerHostCommandSchema.parse(parsed.command);
         if (record.awaitingNativeIdentity && !record.writerKey) {
           const isBootstrapTurn =
@@ -715,97 +740,17 @@ export async function startHarnessBrokerServer(input: {
       }
       if (request.method === "session.reopen") {
         const record = requireSession(request.params);
-        if (!record.faulted) {
-          return { ok: true, value: sessionMetadata(record) };
-        }
-        if (!record.nativeRef) {
-          return {
-            ok: false,
-            error: {
-              code: "sessionBusy",
-              message: "Faulted Harness Session has no authoritative native identity",
-              retryable: false,
-              stage: "harnessBroker.reopen",
-            },
-          };
-        }
-        const nativeRef = record.nativeRef;
-        const oldSession = record.session;
-        const oldOutputTask = record.outputTask;
-        record.forwarderEpoch += 1;
-        await oldSession.close().catch(() => undefined);
-        await oldOutputTask.catch(() => undefined);
-        const reopened = await input.adapter.open({
-          kind: "resume",
-          cwd: record.cwd,
-          nativeRef,
-          ...(record.environment ? { environment: record.environment } : {}),
-        });
-        if (!reopened.ok) return reopened;
-        const reopenedRef = reopened.value.initialState.nativeRef;
-        if (
-          !reopenedRef ||
-          reopenedRef.harnessId !== nativeRef.harnessId ||
-          reopenedRef.nativeSessionId !== nativeRef.nativeSessionId ||
-          reopenedRef.formatVersion !== nativeRef.formatVersion
-        ) {
-          await reopened.value.close().catch(() => undefined);
-          return {
-            ok: false,
-            error: {
-              code: "protocolError",
-              message: "Aqua Harness broker reopen changed the native Session identity",
-              retryable: false,
-              stage: "harnessBroker.reopen",
-            },
-          };
-        }
-        if (record.selection.model && reopened.value.capabilities.configuration.selectModel) {
-          const selected = await reopened.value.execute({
-            type: "model.select",
-            model: record.selection.model,
-          });
-          if (!selected.ok) {
-            await reopened.value.close().catch(() => undefined);
-            return selected;
-          }
-        }
-        if (
-          record.selection.thinkingOptionId &&
-          reopened.value.capabilities.configuration.selectThinkingOption
-        ) {
-          const selected = await reopened.value.execute({
-            type: "thinking.select",
-            thinkingOptionId: record.selection.thinkingOptionId,
-          });
-          if (!selected.ok) {
-            await reopened.value.close().catch(() => undefined);
-            return selected;
-          }
-        }
-        if (
-          record.selection.permissionModeId &&
-          reopened.value.capabilities.configuration.selectPermissionMode
-        ) {
-          const selected = await reopened.value.execute({
-            type: "permissionMode.select",
-            permissionModeId: record.selection.permissionModeId,
-          });
-          if (!selected.ok) {
-            await reopened.value.close().catch(() => undefined);
-            return selected;
-          }
-        }
-        record.session = reopened.value;
-        record.generation += 1;
-        record.faulted = false;
-        record.outputTask = forwardOutputs(
-          record,
-          reopened.value,
-          record.generation,
-          record.forwarderEpoch,
-        );
-        return { ok: true, value: sessionMetadata(record) };
+        return {
+          ok: false,
+          error: {
+            code: "invalidState",
+            message: record.faulted
+              ? "Faulted Harness Session cannot be reopened; open a new resume Session"
+              : "Harness Session reopen is not supported",
+            retryable: false,
+            stage: "harnessBroker.reopen",
+          },
+        };
       }
       const record = requireSession(request.params);
       await closeRecord(record);

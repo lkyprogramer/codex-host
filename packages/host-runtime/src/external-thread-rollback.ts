@@ -22,6 +22,7 @@ import {
   type ExternalThreadRepository,
 } from "./external-thread-repository.js";
 import { DELEGATION_THREAD_ID_ENV } from "./delegation-types.js";
+import { validateOpenedHarnessSession } from "./harness-session-validation.js";
 import type { ExternalThread, ExternalThreadRuntime } from "./external-thread-runtime.js";
 
 export type ExternalThreadRollbackResult =
@@ -146,6 +147,9 @@ async function executeCurrentLastTurnRollback(input: {
       ...(configuration.effectivePermissionModeId
         ? { permissionModeId: configuration.effectivePermissionModeId }
         : {}),
+      ...(current.record.executionPolicy
+        ? { executionPolicy: current.record.executionPolicy }
+        : {}),
     });
   } catch {
     return { ok: false, error: { code: -32076, message: "External Thread rollback failed" } };
@@ -154,7 +158,11 @@ async function executeCurrentLastTurnRollback(input: {
     return { ok: false, error: mapExternalThreadHarnessError(opened.error, "fork") };
   }
 
-  const session = opened.value;
+  const validated = await validateOpenedHarnessSession(current.record.harnessId, opened.value);
+  if (!validated.ok) {
+    return { ok: false, error: mapExternalThreadHarnessError(validated.error, "fork") };
+  }
+  const session = validated.value;
   const finalNativeRef = session.initialState.nativeRef;
   if (!finalNativeRef || finalNativeRef.harnessId !== current.harnessId) {
     await session.close().catch(() => undefined);
@@ -338,6 +346,7 @@ export async function executeExternalThreadRollback(input: {
       },
       sourceRef: sourceNativeRef as NativeSessionRef,
       checkpoint: boundary.nativeCheckpointRef as NativeCheckpointRef,
+      ...(derivedRecord.executionPolicy ? { executionPolicy: derivedRecord.executionPolicy } : {}),
     });
   } catch {
     return { ok: false, error: { code: -32076, message: "External Thread fork failed" } };
@@ -346,7 +355,11 @@ export async function executeExternalThreadRollback(input: {
     return { ok: false, error: mapExternalThreadHarnessError(opened.error, "fork") };
   }
 
-  const session = opened.value;
+  const validated = await validateOpenedHarnessSession(derived.record.harnessId, opened.value);
+  if (!validated.ok) {
+    return { ok: false, error: mapExternalThreadHarnessError(validated.error, "fork") };
+  }
+  const session = validated.value;
   const finalNativeRef = session.initialState.nativeRef;
   if (
     !finalNativeRef ||

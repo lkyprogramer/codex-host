@@ -71,6 +71,32 @@ afterEach(async () => {
 });
 
 describe("Harness plugin discovery and loading", () => {
+  it("rejects a malformed JavaScript Session before registration and closes its resources", async () => {
+    const directory = await root(["bad-session"]);
+    const location = await plugin(directory, "bad-session", {
+      code: `
+      import { writeFileSync } from "node:fs";
+      export function createHarnessAdapter() {
+        return { harnessId: "bad-session", inspect() {}, close() {},
+          async open() { return { ok: true, value: { harnessId: "other",
+            async close() { writeFileSync(new URL("closed", import.meta.url), "yes"); }
+          } }; }
+        };
+      }`,
+    });
+    const registry = await loadHarnessPlugins({ roots: [directory], context, warmup: false });
+    try {
+      const adapter = [...registry.adapters.values()][0];
+      expect(await adapter?.open({ kind: "create", cwd: directory })).toMatchObject({
+        ok: false,
+        error: { code: "protocolError", stage: "sessionValidation" },
+      });
+      expect(await readFile(path.join(location, "closed"), "utf8")).toBe("yes");
+    } finally {
+      await registry.close();
+    }
+  });
+
   it("loads the relocated CodeBuddy bundle without workspace dependencies and isolates factories", async () => {
     const directory = await root(["codebuddy"]);
     await cp(

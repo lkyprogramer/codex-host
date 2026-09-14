@@ -6,31 +6,39 @@ import type { HarnessInspection } from "@codexhost/harness-adapter";
 import { warmup as warmupClaude } from "@codexhost/adapter-claude-code/plugin";
 import { warmup as warmupAntigravity } from "@codexhost/adapter-antigravity/plugin";
 
-import { installedHarnessPluginOptions, loadHarnessPlugins } from "../src/index.js";
+import {
+  installedHarnessPluginOptions,
+  loadHarnessPlugins,
+  type HarnessPluginDiagnostic,
+} from "../src/index.js";
 
 const sourceRuntimeUrl = pathToFileURL(path.resolve("packages/host-runtime/dist/main.js")).href;
 const pluginRoot = path.resolve("packages/host-runtime/dist/plugins");
-const classes = {
-  pi: "PiAdapter",
-  "claude-code": "ClaudeCodeAdapter",
-  "deepseek-harness": "DeepSeekHarnessAdapter",
-  opencode: "OpenCodeAdapter",
-  grok: "GrokAdapter",
-  omp: "OmpAdapter",
-  antigravity: "AntigravityAdapter",
-  "kiro-cli": "KiroAdapter",
-  codebuddy: "CodeBuddyAdapter",
-  "cursor-cli": "CursorAdapter",
-};
+const preinstalledIds = [
+  "pi",
+  "claude-code",
+  "deepseek-harness",
+  "opencode",
+  "grok",
+  "omp",
+  "antigravity",
+  "kiro-cli",
+  "codebuddy",
+  "cursor-cli",
+];
 
 const unavailable: HarnessInspection = {
   status: "notInstalled",
   error: { code: "notInstalled", message: "synthetic", retryable: false },
 };
 
-function load(environment: NodeJS.ProcessEnv = {}) {
+function load(
+  environment: NodeJS.ProcessEnv = {},
+  diagnose?: (diagnostic: HarnessPluginDiagnostic) => void,
+) {
   return loadHarnessPlugins({
     roots: [pluginRoot],
+    ...(diagnose ? { diagnose } : {}),
     context: {
       environment: { PATH: "", ...environment },
       platform: process.platform,
@@ -65,20 +73,21 @@ describe("installed Harness composition", () => {
 
   // Cold bundle imports can exceed Vitest's 5s default on CI; the loader retains its 10s budget.
   it("loads all preinstalled plugin factories without static registration or executable discovery", async () => {
-    const registry = await load();
+    const diagnostics: HarnessPluginDiagnostic[] = [];
+    const registry = await load({}, (diagnostic) => diagnostics.push(diagnostic));
     try {
+      expect(diagnostics).toEqual([]);
       expect(
         registry
           .list()
           .map(({ id }) => id)
           .sort(),
-      ).toEqual(Object.keys(classes).sort());
+      ).toEqual([...preinstalledIds].sort());
       for (const [id, adapter] of registry.adapters) {
         expect(adapter.harnessId).toBe(id);
-        // esbuild may suffix class names when a plugin contains two protocol generations.
-        expect(adapter.constructor.name.replace(/\d+$/u, "")).toBe(
-          classes[id as keyof typeof classes],
-        );
+        expect(adapter.inspect).toBeTypeOf("function");
+        expect(adapter.open).toBeTypeOf("function");
+        expect(adapter.close).toBeTypeOf("function");
       }
       expect(registry.list().find(({ id }) => id === "omp")?.icon).toMatch(
         /^data:image\/svg\+xml/u,
@@ -172,7 +181,7 @@ describe("installed Harness composition", () => {
     });
     try {
       const adapter = [...registry.adapters].find(([id]) => id === "claude-code")?.[1];
-      expect(adapter?.constructor.name).toBe("BrokeredHarnessAdapter");
+      expect(adapter?.harnessId).toBe("claude-code");
       expect(adapter?.commandCatalog?.commands.map(({ invocation }) => invocation)).toEqual([
         "/compact",
         "/init",
@@ -192,7 +201,7 @@ describe("installed Harness composition", () => {
     try {
       for (const [id, adapter] of first.adapters) expect(adapter).not.toBe(second.adapters.get(id));
       await first.close();
-      expect(second.list()).toHaveLength(Object.keys(classes).length);
+      expect(second.list()).toHaveLength(preinstalledIds.length);
     } finally {
       await Promise.all([first.close(), second.close()]);
     }

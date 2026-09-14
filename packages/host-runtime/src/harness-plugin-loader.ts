@@ -2,7 +2,12 @@ import { readdir, realpath } from "node:fs/promises";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
-import type { HarnessAdapter, HarnessError } from "@codexhost/harness-adapter";
+import {
+  type HarnessAdapter,
+  type HarnessError,
+  type HarnessResult,
+  type HarnessSession,
+} from "@codexhost/harness-adapter";
 import type { HarnessPluginContext, HarnessPluginModule } from "@codexhost/harness-adapter/plugin";
 import {
   HARNESS_PLUGIN_API_VERSION,
@@ -15,6 +20,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import { HarnessPluginRegistry } from "./harness-plugin-registry.js";
+import { validateOpenedHarnessSession } from "./harness-session-validation.js";
 import {
   pluginResourcePath,
   readPluginConfiguration,
@@ -75,6 +81,35 @@ async function closeCandidate(value: unknown): Promise<void> {
   }
 }
 
+function validatePluginAdapter(
+  adapter: HarnessAdapter,
+  diagnose: (diagnostic: HarnessPluginDiagnostic) => void,
+): HarnessAdapter {
+  return {
+    harnessId: adapter.harnessId,
+    ...(adapter.commandCatalog ? { commandCatalog: adapter.commandCatalog } : {}),
+    ...(adapter.sessionImport ? { sessionImport: adapter.sessionImport } : {}),
+    ...(adapter.subagents ? { subagents: adapter.subagents } : {}),
+    ...(adapter.webUi ? { webUi: adapter.webUi } : {}),
+    ...(adapter.inspectAccount ? { inspectAccount: adapter.inspectAccount.bind(adapter) } : {}),
+    inspect: (input) => adapter.inspect(input),
+    close: () => adapter.close(),
+    open: async (input): Promise<HarnessResult<HarnessSession>> => {
+      const result: unknown = await adapter.open(input);
+      if (result && typeof result === "object" && Reflect.get(result, "ok") === false) {
+        return result as HarnessResult<HarnessSession>;
+      }
+      const value: unknown =
+        result && typeof result === "object" && Reflect.get(result, "ok") === true
+          ? Reflect.get(result, "value")
+          : undefined;
+      return validateOpenedHarnessSession(adapter.harnessId, value, {
+        onCleanupFailure: () => diagnose({ id: adapter.harnessId, code: "cleanupFailed" }),
+      });
+    },
+  };
+}
+
 function unavailableAdapter(
   descriptor: HarnessPluginDescriptor,
   code: HarnessPluginDiagnosticCode,
@@ -132,7 +167,7 @@ async function loadAdapter(
         })
         .catch(() => diagnose({ id: manifest.id, code: "warmupFailed" }));
     }
-    return value;
+    return validatePluginAdapter(value, diagnose);
   })();
   try {
     const adapter = await Promise.race([

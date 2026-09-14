@@ -3,7 +3,7 @@ import { mkdir, open, readFile, rename, rm, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-const SKILL_VERSION = 8;
+const SKILL_VERSION = 10;
 const SKILL_RELATIVE_PATH = path.join("skills", "codexhost-delegation", "SKILL.md");
 /**
  * Digests of every previously shipped managed Skill. A released digest missing
@@ -11,6 +11,8 @@ const SKILL_RELATIVE_PATH = path.join("skills", "codexhost-delegation", "SKILL.m
  * affected installations silently stop receiving Skill updates.
  */
 export const PREVIOUS_MANAGED_DIGESTS: readonly string[] = [
+  "84cfe818a4925a5be853ab6e0d955e46daf82d3a6976494fbfe05d84e8e3e5d1",
+  "c48c0cd991c7ce8b7347e3c3dc02511d01e23e84a93ced34427f10ba14a20eb8",
   "20314c67b7be9cd9aaba81949ed87495d3b0f90760c1c43fdd62bfeaef069b86",
   "9d2f491850fb0b4084a31ba9b5e4a550b5e833747af322090d8ed0ff80b88c30",
   "aff258622dc8ff321f32b15620d081e578cb9c9ed1134d6a57f35ca8e7762c0a",
@@ -56,6 +58,33 @@ directly for subsequent commands.
 
 Use the Harness native defaults. Inspect the target when a Model or Thinking
 selection is needed or the default is unavailable.
+
+Before starting a task, read \`delegate start --help\` from the same CLI. Use
+\`--execution-policy\` only when that help advertises it; a new Skill or source
+checkout does not upgrade an older installed CLI or connected Host. Do not
+install or replace a runtime merely to make a documented option available.
+
+When supported, \`--execution-policy default|unattended-full-access\` selects
+persisted execution intent. Omission and explicit \`unattended-full-access\` are
+equivalent, including request identity. Explicit \`default\` requests native
+behavior without added unattended elevation; it is not a read-only sandbox or
+revocation of saved native authorization. Official Codex currently rejects
+explicit \`default\`. Preserve the requested policy across retries; never switch
+policy or request ID to replay an UNKNOWN task.
+
+For Cursor, reasoning and speed are native Model parameters. Inspect the target
+and use the exact returned opaque Model ref matching all requested parameters.
+For example, \`cursor-grok-4.6-xhigh\` requests Grok 4.6 Extra High with Fast Off;
+that native CLI alias is not the Host ref, and \`--thinking xhigh\` is not the
+Cursor selector. Never silently substitute High or Fast. If the directory is
+missing the requested combination, report it as unavailable. If current native
+parameters are unknown, do not infer a default from directory defaults.
+
+Cursor unattended intent maps to native \`--force\`; native restrictions and
+questions still apply. A discoverable Model, accepted start request, or passing
+fixture does not prove successful native execution. Read the actual task result
+and report native catalog/configuration failures without repeatedly resubmitting
+the task or claiming execution success.
 
 For a new delegation, create an independent child session and submit the
 requested task. For an existing external session, resolve the target from the
@@ -115,7 +144,12 @@ SIGINT/SIGTERM stops observation only; it does not cancel or release child work.
 Cancel only acknowledges the cancel request and Turn terminal. It is not job
 quiescence. Do not release a worktree, process, or business resource until
 \`thread release\` reports owned-job quiescence \`confirmed\`. \`unknown\` and
-\`unsupported\` stay fail-closed. \`always-approve\` is the Grok unattended
+\`unsupported\` stay fail-closed. \`resourcesReleased=true\` only reports scoped
+native resource suspension, not owned-job quiescence; it does not authorize
+worktree or business-resource cleanup. Lifecycle-capable Harnesses can suspend
+after 60 idle seconds and resume for the next action or full history read.
+Use compact status/wait-many for observation without waking suspended Sessions.
+\`always-approve\` is the Grok unattended
 permission mode; it is not an OS read-only sandbox. Independent review requires
 a new task plus prompt/readback, not a sandbox flag.
 

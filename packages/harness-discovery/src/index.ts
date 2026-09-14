@@ -11,6 +11,11 @@ export {
 export { commandInvocation, type CommandInvocation } from "./invocation.js";
 export { withNodeRuntimeOnPath } from "./node-runtime.js";
 export {
+  trackOwnedProcessTree,
+  type OwnedProcessTree,
+  type OwnedProcessTreeOptions,
+} from "./owned-process-tree.js";
+export {
   harnessCandidates,
   resolveHarnessExecutable,
   VERSION_MANAGER_ROOTS,

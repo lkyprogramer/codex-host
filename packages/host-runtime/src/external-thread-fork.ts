@@ -16,6 +16,7 @@ import {
   type ExternalThreadRepository,
 } from "./external-thread-repository.js";
 import { DELEGATION_THREAD_ID_ENV } from "./delegation-types.js";
+import { validateOpenedHarnessSession } from "./harness-session-validation.js";
 import type { ExternalThread, ExternalThreadRuntime } from "./external-thread-runtime.js";
 
 export type ExternalThreadForkResult =
@@ -112,6 +113,9 @@ export async function executeExternalThreadFork(input: {
         transportModelId: source.transportModelId,
         ephemeral: fork.ephemeral ?? source.record.ephemeral,
         historyMode: source.record.historyMode,
+        ...(source.record.executionPolicy
+          ? { executionPolicy: source.record.executionPolicy }
+          : {}),
         forkSource: {
           hostThreadId: source.id,
           hostTurnId: boundary.hostTurnId,
@@ -136,6 +140,7 @@ export async function executeExternalThreadFork(input: {
       },
       sourceRef: nativeSessionRef as NativeSessionRef,
       checkpoint: boundary.nativeCheckpointRef as NativeCheckpointRef,
+      ...(source.record.executionPolicy ? { executionPolicy: source.record.executionPolicy } : {}),
     });
   } catch {
     await repository.removeProvisional(provisional.hostThreadId).catch(() => undefined);
@@ -146,7 +151,12 @@ export async function executeExternalThreadFork(input: {
     return { ok: false, error: mapExternalThreadHarnessError(opened.error, "fork") };
   }
 
-  const session = opened.value;
+  const validated = await validateOpenedHarnessSession(source.record.harnessId, opened.value);
+  if (!validated.ok) {
+    await repository.removeProvisional(provisional.hostThreadId).catch(() => undefined);
+    return { ok: false, error: mapExternalThreadHarnessError(validated.error, "fork") };
+  }
+  const session = validated.value;
   try {
     const derivedNativeRef = session.initialState.nativeRef;
     if (

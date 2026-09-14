@@ -3,6 +3,7 @@ import type { AddressInfo } from "node:net";
 
 import {
   DelegationControlError,
+  isDelegationExecutionPolicy,
   type DelegationControlApi,
   type DelegationStartInput,
   type HarnessInspectInput,
@@ -107,6 +108,15 @@ export async function startDelegationControlServer(input: {
           writeJson(response, 200, await input.api.inspect(body as unknown as HarnessInspectInput));
           return;
         case "/v1/delegate/start":
+          if (
+            body.executionPolicy !== undefined &&
+            !isDelegationExecutionPolicy(body.executionPolicy)
+          ) {
+            throw new DelegationControlError(
+              "INVALID_ARGUMENT",
+              "executionPolicy must be default or unattended-full-access",
+            );
+          }
           writeJson(response, 200, await input.api.start(body as unknown as DelegationStartInput));
           return;
         case "/v1/thread/send":

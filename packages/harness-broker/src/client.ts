@@ -365,16 +365,14 @@ class BrokeredHarnessSession implements HarnessSession {
   readonly commands?: HarnessCommandCapability;
   #metadata: SessionMetadata;
   #faulted = false;
+  #terminalOutputEnded = false;
   #closed = false;
   #state: HarnessSessionState;
-  #recovery: Promise<HarnessResult<void>> | undefined;
 
   constructor(
     connection: BrokerConnection,
     metadata: SessionMetadata,
     harnessId: HarnessId,
-    readonly openInput: OpenSessionInput,
-    readonly reconnect: () => Promise<BrokerConnection>,
     readonly onClose: () => void,
   ) {
     this.harnessId = harnessId;
@@ -426,40 +424,55 @@ class BrokeredHarnessSession implements HarnessSession {
     return this.#metadata.initialUsage;
   }
   acceptOutput(generation: number, output: unknown): void {
-    if (this.#closed || generation !== this.#metadata.sessionGeneration) return;
+    if (
+      this.#closed ||
+      this.#terminalOutputEnded ||
+      generation !== this.#metadata.sessionGeneration
+    )
+      return;
     const value = harnessOutputSchema.parse(output);
     if (value.kind === "event" && value.event.type === "session.state.changed") {
       const nativeRef = value.event.state.nativeRef ?? this.#state.nativeRef;
       this.#state = { ...structuredClone(value.event.state), ...(nativeRef ? { nativeRef } : {}) };
     }
-    if (
-      (value.kind === "event" && value.event.type === "session.faulted") ||
-      isAuthenticationTerminal(value)
-    ) {
+    if (value.kind === "event" && value.event.type === "session.faulted") {
+      this.#terminate(value.event.error);
+      return;
+    }
+    if (isAuthenticationTerminal(value)) {
+      // The failed Turn is observable before the server's required terminal
+      // Session fault so Host can finalize the Turn before removing its wrapper.
       this.#faulted = true;
+      this.#channel.emit(value);
+      return;
     }
     this.#channel.emit(value);
   }
 
   connectionFault(error: Error): void {
-    if (this.#closed) return;
+    this.#terminate(unavailable(error.message));
+  }
+
+  #terminate(error: HarnessError): void {
+    if (this.#closed || this.#terminalOutputEnded) return;
     this.#faulted = true;
+    this.#terminalOutputEnded = true;
     this.#channel.emit({
       kind: "event",
-      event: { type: "session.faulted", error: unavailable(error.message) },
+      event: { type: "session.faulted", error },
     });
+    this.#channel.end();
   }
 
   async refreshUsage(): Promise<void> {
+    if (this.#faulted) throw new Error("Aqua Harness broker Session is faulted");
     await this.#request("session.refreshUsage", {});
   }
   async readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>> {
     if (this.#closed)
       return { ok: false, error: unavailable("Aqua Harness broker Session is closed", false) };
-    if (this.#connection.closed) {
-      const recovered = await this.#ensureRecovery();
-      if (!recovered.ok) return recovered;
-    }
+    if (this.#faulted)
+      return { ok: false, error: unavailable("Aqua Harness broker Session is faulted", false) };
     try {
       return parseHarnessResult(await this.#request("session.readSnapshot", {}));
     } catch (error) {
@@ -492,10 +505,8 @@ class BrokeredHarnessSession implements HarnessSession {
   > {
     if (this.#closed)
       return { ok: false, error: unavailable("Aqua Harness broker Session is closed", false) };
-    if (this.#faulted && command.type === "turn.start") {
-      const recovered = await this.#ensureRecovery();
-      if (!recovered.ok) return recovered;
-    }
+    if (this.#faulted)
+      return { ok: false, error: unavailable("Aqua Harness broker Session is faulted", false) };
     try {
       return parseHarnessResult(await this.#request("session.execute", { command }));
     } catch (error) {
@@ -509,89 +520,10 @@ class BrokeredHarnessSession implements HarnessSession {
   async close(): Promise<void> {
     if (this.#closed) return;
     this.#closed = true;
-    await this.#recovery?.catch(() => {});
     this.#connection.unregister(this.sessionId);
     await this.#request("session.close", {}).catch(() => undefined);
     this.#channel.end();
     this.onClose();
-  }
-
-  async #ensureRecovery(): Promise<HarnessResult<void>> {
-    try {
-      this.#recovery ??= this.#recover().finally(() => {
-        this.#recovery = undefined;
-      });
-      return await this.#recovery;
-    } catch (error) {
-      return {
-        ok: false,
-        error: unavailable(error instanceof Error ? error.message : String(error)),
-      };
-    }
-  }
-
-  async #recover(): Promise<HarnessResult<void>> {
-    const previous = this.#connection;
-    const connection = previous.closed ? await this.reconnect() : previous;
-    const nativeRef = this.#state.nativeRef;
-    if (!nativeRef)
-      return {
-        ok: false,
-        error: unavailable("Cannot recover a Session without confirmed native identity", false),
-      };
-    const result = parseHarnessResult<unknown>(
-      await (connection === previous
-        ? this.#request("session.reopen", {})
-        : connection.request("adapter.open", {
-            kind: "resume",
-            cwd: this.openInput.cwd,
-            nativeRef,
-            ...(this.openInput.environment ? { environment: this.openInput.environment } : {}),
-            ...(this.#state.effectiveModel ? { model: this.#state.effectiveModel } : {}),
-            ...(this.#state.effectiveThinkingOptionId
-              ? { thinkingOptionId: this.#state.effectiveThinkingOptionId }
-              : {}),
-            ...(this.#state.effectivePermissionModeId
-              ? { permissionModeId: this.#state.effectivePermissionModeId }
-              : {}),
-          })),
-    );
-    if (!result.ok) return result;
-    const metadata = parseSessionMetadata(result.value),
-      observed = metadata.initialState.nativeRef;
-    if (
-      this.#closed ||
-      connection.closed ||
-      !observed ||
-      observed.harnessId !== nativeRef.harnessId ||
-      observed.nativeSessionId !== nativeRef.nativeSessionId ||
-      observed.formatVersion !== nativeRef.formatVersion
-    ) {
-      await connection
-        .request("session.close", {
-          sessionId: metadata.sessionId,
-          sessionGeneration: metadata.sessionGeneration,
-        })
-        .catch(() => {});
-      return {
-        ok: false,
-        error: unavailable(
-          "Broker recovery did not preserve the live native Session identity",
-          false,
-        ),
-      };
-    }
-    previous.unregister(this.sessionId);
-    this.#connection = connection;
-    this.#metadata = metadata;
-    this.#state = structuredClone(metadata.initialState);
-    connection.register(this);
-    this.#faulted = false;
-    this.#channel.emit({
-      kind: "event",
-      event: { type: "session.state.changed", state: structuredClone(this.#state) },
-    });
-    return { ok: true, value: undefined };
   }
 
   #request(method: HarnessBrokerMethod, extra: Record<string, unknown>): Promise<unknown> {
@@ -699,8 +631,6 @@ export class BrokeredHarnessAdapter implements HarnessAdapter {
         connection,
         parseSessionMetadata(result.value),
         this.harnessId,
-        safeInput,
-        () => this.#connect(),
         () => {
           this.#sessions.delete(session);
         },

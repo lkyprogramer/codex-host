@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -23,7 +23,7 @@ async function fixture(
   const store = new MappingStore({ directory });
   await store.initialize();
   const repository = new ExternalThreadRepository(store);
-  const adapters = new Map([["pi" as const, adapter]]);
+  const adapters = new Map([[adapter.harnessId, adapter]]);
   const registered: ReturnType<ExternalThreadRuntime["register"]>[] = [];
   const notifications: unknown[] = [];
   const runtime = new ExternalThreadRuntime({
@@ -113,6 +113,25 @@ class FailingTurnAdapter extends FakeHarnessAdapter {
         code: "nativeFailure",
         message: "synthetic initial delivery failure",
         retryable: false,
+      });
+    }
+    return opened;
+  }
+}
+
+class SuspendingFakeAdapter extends FakeHarnessAdapter {
+  override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+    const opened = await super.open(input);
+    if (opened.ok) {
+      const session = opened.value as FakeHarnessSession;
+      Object.defineProperty(session, "resourceLifecycle", {
+        configurable: true,
+        value: {
+          suspend: async () => {
+            await session.close();
+            return { status: "suspended", scope: "native-session-and-managed-process-group" };
+          },
+        },
       });
     }
     return opened;
@@ -311,6 +330,185 @@ describe("HarnessDelegationCoordinator", () => {
     }
   });
 
+  it("persists an explicit execution policy and scopes retries to that policy", async () => {
+    const adapter = new RecordingAdapter(harnessIdSchema.parse("pi"));
+    const value = await fixture(adapter);
+    try {
+      const defaultPolicy = await value.coordinator.start({
+        harnessId: "pi",
+        task: "review auth",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+        requestId: "default-policy-request",
+        executionPolicy: "default",
+      });
+      expect(adapter.openInputs[0]).toMatchObject({ executionPolicy: "default" });
+      await expect(value.repository.find(defaultPolicy.threadId)).resolves.toMatchObject({
+        executionPolicy: "default",
+      });
+      await expect(
+        value.coordinator.start({
+          harnessId: "pi",
+          task: "review auth",
+          cwd: "/synthetic",
+          parentThreadId: "parent-thread",
+          requestId: "default-policy-request",
+          executionPolicy: "default",
+        }),
+      ).resolves.toMatchObject({ threadId: defaultPolicy.threadId });
+
+      await expect(
+        value.coordinator.start({
+          harnessId: "pi",
+          task: "review auth",
+          cwd: "/synthetic",
+          parentThreadId: "parent-thread",
+          requestId: "default-policy-request",
+          executionPolicy: "unattended-full-access",
+        }),
+      ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+
+      const unattended = await value.coordinator.start({
+        harnessId: "pi",
+        task: "same implicit task",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      await expect(
+        value.coordinator.start({
+          harnessId: "pi",
+          task: "same implicit task",
+          cwd: "/synthetic",
+          parentThreadId: "parent-thread",
+          executionPolicy: "unattended-full-access",
+        }),
+      ).resolves.toMatchObject({ threadId: unattended.threadId });
+      const explicitDefault = await value.coordinator.start({
+        harnessId: "pi",
+        task: "same implicit task",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+        executionPolicy: "default",
+      });
+      expect(explicitDefault.threadId).not.toBe(unattended.threadId);
+      expect(adapter.openInputs).toHaveLength(3);
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("rejects an invalid execution policy before creating a delegated Thread", async () => {
+    const adapter = new RecordingAdapter(harnessIdSchema.parse("pi"));
+    const value = await fixture(adapter);
+    try {
+      await expect(
+        value.coordinator.start({
+          harnessId: "pi",
+          task: "review auth",
+          cwd: "/synthetic",
+          parentThreadId: "parent-thread",
+          executionPolicy: "all-access" as never,
+        }),
+      ).rejects.toMatchObject({
+        code: "INVALID_ARGUMENT",
+        message: "executionPolicy must be default or unattended-full-access",
+      });
+      expect(adapter.openInputs).toHaveLength(0);
+      await expect(value.repository.list()).resolves.toEqual([]);
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("rejects malformed direct start input before creating a delegated Thread", async () => {
+    const adapter = new RecordingAdapter(harnessIdSchema.parse("pi"));
+    const value = await fixture(adapter);
+    try {
+      await expect(value.coordinator.start(null as never)).rejects.toMatchObject({
+        code: "INVALID_ARGUMENT",
+        message: "Delegation start input must be an object",
+      });
+      expect(adapter.openInputs).toHaveLength(0);
+      await expect(value.repository.list()).resolves.toEqual([]);
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("does not replay an explicit retry whose persisted Delegation has no native identity", async () => {
+    const adapter = new RecordingAdapter(harnessIdSchema.parse("pi"));
+    const value = await fixture(adapter);
+    const requestId = "interrupted-before-native-commit";
+    const task = "do not replay this Delegation";
+    const cwd = path.resolve("/synthetic");
+    const parentThreadId = hostThreadIdSchema.parse("parent-thread");
+    const childThreadId = hostThreadIdSchema.parse("unknown-child-thread");
+    try {
+      await value.repository.createDelegatedThread({
+        thread: {
+          hostThreadId: childThreadId,
+          createRequestId: `delegation:${requestId}`,
+          harnessId: harnessIdSchema.parse("pi"),
+          cwd,
+          title: task,
+          transportModelId: "codexhost/pi-native",
+          ephemeral: false,
+          historyMode: "paginated",
+          executionPolicy: "unattended-full-access",
+        },
+        delegation: {
+          delegationId: hostThreadIdSchema.parse("unknown-delegation"),
+          parentHostThreadId: parentThreadId,
+          childHostThreadId: childThreadId,
+          sourceHarnessId: harnessIdSchema.parse("codex"),
+          targetHarnessId: harnessIdSchema.parse("pi"),
+          status: "creating",
+          requestId,
+          taskDigest: createHash("sha256")
+            .update(
+              JSON.stringify({
+                task,
+                cwd,
+                modelId: null,
+                thinkingOptionId: null,
+              }),
+            )
+            .digest("hex"),
+          latestHostTurnId: hostTurnIdSchema.parse("unknown-initial-turn"),
+        },
+      });
+
+      await expect(
+        value.coordinator.start({
+          harnessId: "pi",
+          task,
+          cwd,
+          parentThreadId,
+          requestId,
+        }),
+      ).rejects.toMatchObject({
+        code: "DELEGATION_FAILED",
+        details: { outcomeUnknown: true, threadId: childThreadId },
+      });
+      await expect(
+        value.coordinator.start({
+          harnessId: "pi",
+          task,
+          cwd,
+          parentThreadId,
+          requestId,
+          executionPolicy: "unattended-full-access",
+        }),
+      ).rejects.toMatchObject({
+        code: "DELEGATION_FAILED",
+        details: { outcomeUnknown: true, threadId: childThreadId },
+      });
+      expect(adapter.openInputs).toHaveLength(0);
+    } finally {
+      await value.close();
+    }
+  });
+
   it("sends follow-up Turns, rejects busy sends, and cancels the active Turn", async () => {
     const value = await fixture();
     try {
@@ -488,10 +686,18 @@ describe("HarnessDelegationCoordinator", () => {
       };
       const first = value.coordinator.start(input);
       const second = value.coordinator.start(input);
+      const explicitUnattended = value.coordinator.start({
+        ...input,
+        executionPolicy: "unattended-full-access",
+      });
+      await expect(
+        value.coordinator.start({ ...input, executionPolicy: "default" }),
+      ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
       await Promise.resolve();
       release();
-      const [left, right] = await Promise.all([first, second]);
+      const [left, right, normalized] = await Promise.all([first, second, explicitUnattended]);
       expect(left.threadId).toBe(right.threadId);
+      expect(normalized.threadId).toBe(left.threadId);
       expect(left.delegationId).toBe(right.delegationId);
       expect(left.turnId).toBe(right.turnId);
       expect(left.turnId).not.toBe("pending");
@@ -610,6 +816,35 @@ describe("HarnessDelegationCoordinator", () => {
         released: false,
         busy: false,
         quiescence: "unsupported",
+      });
+      expect(value.runtime.get(started.threadId)).toBeDefined();
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("reports native resource suspension without claiming owned-job quiescence", async () => {
+    const value = await fixture(
+      new SuspendingFakeAdapter(harnessIdSchema.parse("opencode")),
+      {},
+      async () => undefined,
+      true,
+    );
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "opencode",
+        task: "finish a bounded task",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      const released = await value.coordinator.release({ threadId: started.threadId });
+      expect(released).toEqual({
+        threadId: started.threadId,
+        released: false,
+        resourcesReleased: true,
+        busy: false,
+        quiescence: "unknown",
+        proof: { scope: "native-session-and-managed-process-group" },
       });
       expect(value.runtime.get(started.threadId)).toBeDefined();
     } finally {

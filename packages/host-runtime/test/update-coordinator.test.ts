@@ -9,6 +9,7 @@ import type * as UpdateManager from "@codexhost/update-manager";
 
 import {
   createBackgroundUpdateManager,
+  isUpdateOperationActive,
   type CodexhostLatestRelease,
 } from "@codexhost/update-manager";
 
@@ -200,13 +201,10 @@ describe("Host update coordinator", () => {
     await expect(coordinator.start()).resolves.toMatchObject({
       status: { version: "1.2.3", phase: "prepared" },
     });
-    const home = fixture.environment.HOME;
-    if (!home) throw new Error("fixture HOME is missing");
+    const descriptor = fixture.environment.CODEXHOST_RUNTIME_DESCRIPTOR_PATH;
+    if (!descriptor) throw new Error("runtime descriptor path is missing");
     const updaterRequestPath = path.join(
-      home,
-      "Library",
-      "Application Support",
-      "codexhost",
+      path.dirname(descriptor),
       "updates",
       "update-1.2.3-one",
       "request-v1.json",
@@ -273,13 +271,10 @@ describe("Host update coordinator", () => {
       }),
     );
     unblockDownload();
-    const home = fixture.environment.HOME;
-    if (!home) throw new Error("fixture HOME is missing");
+    const descriptor = fixture.environment.CODEXHOST_RUNTIME_DESCRIPTOR_PATH;
+    if (!descriptor) throw new Error("runtime descriptor path is missing");
     const requestPath = path.join(
-      home,
-      "Library",
-      "Application Support",
-      "codexhost",
+      path.dirname(descriptor),
       "updates",
       "update-1.2.3-async-macos",
       "request-v1.json",
@@ -288,6 +283,56 @@ describe("Host update coordinator", () => {
     await expect(coordinator.status()).resolves.toMatchObject({
       status: { phase: "prepared", version: "1.2.3", installation: "macos-dmg" },
     });
+  });
+
+  it("releases the operation lock when an artifact stalls", async () => {
+    const fixture = await macFixture();
+    const manager = createBackgroundUpdateManager({
+      platform: "darwin",
+      randomId: () => "stalled-artifact",
+      artifactDownloadTimeoutMs: 100,
+      artifactDownloadIdleTimeoutMs: 20,
+      download: async (_source, _destination, _onProgress, options) => {
+        return new Promise<never>((_resolve, reject) => {
+          options?.signal?.addEventListener("abort", () => reject(options.signal?.reason), {
+            once: true,
+          });
+        });
+      },
+    });
+    const coordinator = createHostUpdateCoordinator({
+      hostRuntimePath: fixture.hostRuntimePath,
+      environment: fixture.environment,
+      platform: "darwin",
+      architecture: "arm64",
+      manager,
+      fetchLatest: async () => ({
+        version: "1.2.3",
+        releaseNotes: "Release 1.2.3",
+        releaseNotesUrl: "https://github.com/BytePioneer-AI/codex-host/releases/tag/v1.2.3",
+        assets: [
+          {
+            name: "codexhost-1.2.3-macos-arm64.dmg",
+            size: 10,
+            digest: `sha256:${"00".repeat(32)}`,
+            downloadUrl:
+              "https://github.com/BytePioneer-AI/codex-host/releases/download/v1.2.3/codexhost-1.2.3-macos-arm64.dmg",
+          },
+        ],
+      }),
+    });
+
+    await expect(coordinator.start()).resolves.toMatchObject({
+      status: { phase: "prepared", version: "1.2.3" },
+    });
+    await vi.waitFor(async () =>
+      expect(await coordinator.status()).toMatchObject({ status: { phase: "failed" } }),
+    );
+    const descriptor = fixture.environment.CODEXHOST_RUNTIME_DESCRIPTOR_PATH;
+    if (!descriptor) throw new Error("runtime descriptor path is missing");
+    await expect(
+      isUpdateOperationActive(path.join(path.dirname(descriptor), "updates")),
+    ).resolves.toBe(false);
   });
 
   it("ignores a prepared status without an active operation lock", async () => {

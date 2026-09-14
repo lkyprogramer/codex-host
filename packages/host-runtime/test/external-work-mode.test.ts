@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 
-import type { HarnessSession } from "@codexhost/harness-adapter";
+import { FakeHarnessSession } from "@codexhost/harness-adapter/testing";
+import { harnessIdSchema } from "@codexhost/shared-contracts";
 
 import { applyRequestedWorkMode, requestedWorkMode } from "../src/external-work-mode.js";
 
@@ -15,24 +16,30 @@ describe("external work mode", () => {
 
   it("skips set when Desktop omitted a work-mode selection", async () => {
     const set = vi.fn(async () => ({ ok: true as const, value: undefined }));
-    const session = { workMode: { current: "plan" as const, set } } as HarnessSession;
+    const session = Object.assign(new FakeHarnessSession(harnessIdSchema.parse("pi")), {
+      workMode: { current: "plan" as const, set },
+    });
     await applyRequestedWorkMode(session, undefined);
     expect(set).not.toHaveBeenCalled();
   });
 
   it("fails closed when Plan is requested but the Session has no work-mode control", async () => {
-    await expect(applyRequestedWorkMode({} as HarnessSession, "plan")).rejects.toThrow(
-      "Planning mode is unavailable for this Harness",
-    );
+    await expect(
+      applyRequestedWorkMode(new FakeHarnessSession(harnessIdSchema.parse("pi")), "plan"),
+    ).rejects.toThrow("Planning mode is unavailable for this Harness");
   });
 
   it("sets Plan only when it differs from the native current mode", async () => {
     const set = vi.fn(async () => ({ ok: true as const, value: undefined }));
-    const session = { workMode: { current: "default" as const, set } } as HarnessSession;
+    const session = Object.assign(new FakeHarnessSession(harnessIdSchema.parse("pi")), {
+      workMode: { current: "default" as const, set },
+    });
     await applyRequestedWorkMode(session, "plan");
     expect(set).toHaveBeenCalledWith("plan");
     set.mockClear();
-    const alreadyPlan = { workMode: { current: "plan" as const, set } } as HarnessSession;
+    const alreadyPlan = Object.assign(new FakeHarnessSession(harnessIdSchema.parse("pi")), {
+      workMode: { current: "plan" as const, set },
+    });
     await applyRequestedWorkMode(alreadyPlan, "plan");
     expect(set).not.toHaveBeenCalled();
   });

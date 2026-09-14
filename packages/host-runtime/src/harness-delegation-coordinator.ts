@@ -28,6 +28,7 @@ import {
   DELEGATION_THREAD_ID_ENV,
   DelegationControlError,
   delegationNextCommands,
+  isDelegationExecutionPolicy,
   type DelegationConfigurationResult,
   type DelegationStartInput,
   type DelegationStartResult,
@@ -65,6 +66,8 @@ import {
   validateReadOptions,
 } from "./delegation-snapshot.js";
 import { decodeThreadRevision } from "./thread-change-hub.js";
+import { validateOpenedHarnessSession } from "./harness-session-validation.js";
+import { ManagedHarnessSession } from "./managed-harness-session.js";
 import {
   createExternalThreadRecordInput,
   externalThreadValue,
@@ -74,6 +77,20 @@ import type { ExternalThread, ExternalThreadRuntime } from "./external-thread-ru
 
 const IMPLICIT_DEDUPLICATION_MS = 30_000;
 const NATIVE_REF_TIMEOUT_MS = 10_000;
+const DEFAULT_DELEGATION_EXECUTION_POLICY = "unattended-full-access";
+
+type OwnedJobAdapter = HarnessAdapter & {
+  stopOwnedJobs(session: HarnessSession): Promise<{
+    quiescence: JobQuiescence;
+    proof?: ThreadReleaseResult["proof"];
+  }>;
+};
+
+function normalizedExecutionPolicy(
+  input: Pick<DelegationStartInput, "executionPolicy">,
+): NonNullable<DelegationStartInput["executionPolicy"]> {
+  return input.executionPolicy ?? DEFAULT_DELEGATION_EXECUTION_POLICY;
+}
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
@@ -84,7 +101,9 @@ function terminal(status: DelegationThreadSnapshot["status"]): boolean {
 }
 
 function taskDigest(
-  input: Pick<DelegationStartInput, "task" | "model" | "thinkingOptionId"> & { cwd: string },
+  input: Pick<DelegationStartInput, "task" | "model" | "thinkingOptionId" | "executionPolicy"> & {
+    cwd: string;
+  },
 ): string {
   return createHash("sha256")
     .update(
@@ -93,6 +112,7 @@ function taskDigest(
         cwd: path.resolve(input.cwd),
         modelId: input.model?.id ?? null,
         thinkingOptionId: input.thinkingOptionId ?? null,
+        ...(input.executionPolicy === "default" ? { executionPolicy: "default" } : {}),
       }),
     )
     .digest("hex");
@@ -137,6 +157,12 @@ function compactWaitManyStatus(status: DelegationThreadStatusView): ThreadWaitMa
 }
 
 function validateStart(input: DelegationStartInput): void {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new DelegationControlError(
+      "INVALID_ARGUMENT",
+      "Delegation start input must be an object",
+    );
+  }
   if (typeof input.task !== "string" || !input.task.trim())
     throw new DelegationControlError("INVALID_ARGUMENT", "Task must not be empty");
   if (input.cwd !== undefined && (typeof input.cwd !== "string" || !input.cwd.trim()))
@@ -146,6 +172,12 @@ function validateStart(input: DelegationStartInput): void {
     (typeof input.requestId !== "string" || !input.requestId.trim())
   ) {
     throw new DelegationControlError("INVALID_ARGUMENT", "Request ID must not be empty");
+  }
+  if (input.executionPolicy !== undefined && !isDelegationExecutionPolicy(input.executionPolicy)) {
+    throw new DelegationControlError(
+      "INVALID_ARGUMENT",
+      "executionPolicy must be default or unattended-full-access",
+    );
   }
 }
 
@@ -358,6 +390,7 @@ export class HarnessDelegationCoordinator {
               : transportModelIdForHarness(targetHarnessId),
           ephemeral: false,
           historyMode: "paginated",
+          executionPolicy: normalizedExecutionPolicy(input),
         }),
         delegation: {
           delegationId,
@@ -380,12 +413,16 @@ export class HarnessDelegationCoordinator {
         kind: "create",
         cwd: record.cwd,
         environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
-        executionPolicy: "unattended-full-access",
+        ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
         ...(input.model ? { model: input.model } : {}),
         ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
       });
       if (!opened.ok) throw new DelegationControlError("DELEGATION_FAILED", opened.error.message);
-      session = opened.value;
+      const validated = await validateOpenedHarnessSession(record.harnessId, opened.value);
+      if (!validated.ok) {
+        throw new DelegationControlError("DELEGATION_FAILED", validated.error.message);
+      }
+      session = validated.value;
       if (session.initialState.nativeRef) {
         record = await this.#repository.commitNative(
           record.hostThreadId,
@@ -431,13 +468,15 @@ export class HarnessDelegationCoordinator {
       }
       await this.#notifyThreadStarted(thread.thread);
       thread.changes.bump();
+      const latestDelegation =
+        (await this.#repository.getDelegation(delegation.delegationId)) ?? delegation;
       return {
         ...this.#result(
           delegation.delegationId,
           record.hostThreadId,
           turnId,
           targetHarnessId,
-          "running",
+          latestDelegation.status,
           {
             requested: {
               ...(input.model ? { model: input.model } : {}),
@@ -832,6 +871,13 @@ export class HarnessDelegationCoordinator {
 
   async #existingResult(delegation: StoredDelegationRecordV1): Promise<DelegationStartResult> {
     const record = await this.#repository.find(delegation.childHostThreadId);
+    if (!record || (record.state === "creating" && !record.nativeSessionRef)) {
+      throw new DelegationControlError(
+        "DELEGATION_FAILED",
+        "Delegation creation outcome is unknown; the native identity was not committed and this request will not be replayed",
+        { threadId: delegation.childHostThreadId, status: delegation.status, outcomeUnknown: true },
+      );
+    }
     const turnId =
       delegation.latestHostTurnId ??
       record?.pendingHostTurnIds?.at(-1) ??
@@ -863,7 +909,8 @@ export class HarnessDelegationCoordinator {
       left.task !== right.task ||
       (left.cwd ?? "") !== (right.cwd ?? "") ||
       (left.model?.id ?? null) !== (right.model?.id ?? null) ||
-      (left.thinkingOptionId ?? null) !== (right.thinkingOptionId ?? null)
+      (left.thinkingOptionId ?? null) !== (right.thinkingOptionId ?? null) ||
+      normalizedExecutionPolicy(left) !== normalizedExecutionPolicy(right)
     ) {
       throw new DelegationControlError(
         "INVALID_ARGUMENT",
@@ -1077,12 +1124,34 @@ export class HarnessDelegationCoordinator {
         quiescence: "unknown",
       };
     }
+    const lifecycle = thread.session.resourceLifecycle;
+    if (lifecycle) {
+      const suspended = await lifecycle.suspend(new AbortController().signal);
+      if (suspended.status === "suspended") {
+        // Reclaiming a native Session or process group cannot prove that a
+        // Harness has no detached/remote owned jobs. Keep release fail-closed.
+        return {
+          threadId: thread.id,
+          released: false,
+          resourcesReleased: true,
+          busy: false,
+          quiescence: "unknown",
+          proof: { scope: suspended.scope },
+        };
+      }
+      return {
+        threadId: thread.id,
+        released: false,
+        busy: suspended.status === "busy",
+        quiescence: suspended.status === "unsupported" ? "unsupported" : "unknown",
+      };
+    }
     const adapter = this.#adapters.get(thread.harnessId);
-    const releasable = adapter && isOwnedJobAdapter(adapter) ? adapter : undefined;
+    const releasable = adapter ? ownedJobAdapter(adapter) : undefined;
     let quiescence: JobQuiescence = releasable ? "unknown" : "unsupported";
     let proof: ThreadReleaseResult["proof"];
     if (releasable) {
-      const stopped = await releasable.stopOwnedJobs(thread.session);
+      const stopped = await this.#stopLegacyOwnedJobs(releasable, thread.session);
       quiescence = stopped.quiescence;
       proof = stopped.proof;
     }
@@ -1095,7 +1164,16 @@ export class HarnessDelegationCoordinator {
         ...(proof ? { proof } : {}),
       };
     }
-    await thread.session.close().catch(() => undefined);
+    try {
+      await thread.session.close();
+    } catch {
+      return {
+        threadId: thread.id,
+        released: false,
+        busy: false,
+        quiescence: "unknown",
+      };
+    }
     this.#forgetSendResults(thread.id);
     this.#externalRuntime.remove(thread.id);
     return {
@@ -1364,13 +1442,23 @@ export class HarnessDelegationCoordinator {
       if (key.startsWith(prefix)) this.#inflightSends.delete(key);
     }
   }
-}
 
-function isOwnedJobAdapter(adapter: HarnessAdapter): adapter is HarnessAdapter & {
-  stopOwnedJobs(session: HarnessSession): Promise<{
+  #stopLegacyOwnedJobs(
+    adapter: OwnedJobAdapter,
+    session: HarnessSession,
+  ): Promise<{
     quiescence: JobQuiescence;
     proof?: ThreadReleaseResult["proof"];
-  }>;
-} {
-  return typeof (adapter as { stopOwnedJobs?: unknown }).stopOwnedJobs === "function";
+  }> {
+    if (session instanceof ManagedHarnessSession) {
+      return session.withCurrentSession((current) => adapter.stopOwnedJobs(current));
+    }
+    return adapter.stopOwnedJobs(session);
+  }
+}
+
+function ownedJobAdapter(adapter: HarnessAdapter): OwnedJobAdapter | undefined {
+  return typeof (adapter as { stopOwnedJobs?: unknown }).stopOwnedJobs === "function"
+    ? (adapter as OwnedJobAdapter)
+    : undefined;
 }
