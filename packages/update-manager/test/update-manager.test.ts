@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import type { PathLike } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import type * as FsPromises from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -324,6 +324,46 @@ describe("background update manager", () => {
     ).rejects.toThrow("GitHub download failed");
     await expect(discoverLatestUpdateStatus(common.stateDirectory)).resolves.toMatchObject({
       status: { phase: "failed", error: "GitHub download failed" },
+    });
+  });
+
+  it("aborts a stalled artifact, removes its partial file, and records failure", async () => {
+    const root = await temporaryDirectory();
+    let signal: AbortSignal | undefined;
+    const manager = createBackgroundUpdateManager({
+      platform: "darwin",
+      randomId: () => "stalled-download",
+      artifactDownloadTimeoutMs: 100,
+      artifactDownloadIdleTimeoutMs: 20,
+      download: async (_source, _destination, _onProgress, options) => {
+        signal = options?.signal;
+        return new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener("abort", () => reject(signal?.reason), { once: true });
+        });
+      },
+    });
+    const common = await commonOptions(root);
+
+    await expect(
+      manager.prepareMacOsDmg({
+        ...common,
+        artifact: {
+          url: "https://downloads.example.test/codexhost.dmg",
+          sha256: "00".repeat(32),
+          size: 10,
+        },
+        appPath: path.join(root, "Applications", "codexhost.app"),
+      }),
+    ).rejects.toThrow("made no progress for 20ms");
+
+    expect(signal?.aborted).toBe(true);
+    const discovered = await discoverLatestUpdateStatus(common.stateDirectory);
+    expect(discovered).toMatchObject({ status: { phase: "failed" } });
+    if (!discovered) throw new Error("failed update status is missing");
+    await expect(
+      lstat(path.join(path.dirname(discovered.statusPath), ".update.dmg.download")),
+    ).rejects.toMatchObject({
+      code: "ENOENT",
     });
   });
 

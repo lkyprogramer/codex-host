@@ -21,10 +21,15 @@ export interface ArtifactDownloadResult {
   finalUrl: string;
 }
 
+export interface ArtifactDownloadOptions {
+  signal?: AbortSignal;
+}
+
 export type ArtifactDownloader = (
   source: ArtifactSource,
   destination: string,
   onProgress?: (progress: ArtifactDownloadProgress) => void | Promise<void>,
+  options?: ArtifactDownloadOptions,
 ) => Promise<ArtifactDownloadResult>;
 
 export function validateArtifact(source: ArtifactSource): ArtifactSource {
@@ -60,10 +65,12 @@ export async function downloadArtifact(
   source: ArtifactSource,
   destination: string,
   onProgress?: (progress: ArtifactDownloadProgress) => void | Promise<void>,
+  options: ArtifactDownloadOptions = {},
 ): Promise<ArtifactDownloadResult> {
   const response = await fetch(source.url, {
     redirect: "follow",
     headers: { "accept-encoding": "identity" },
+    ...(options.signal ? { signal: options.signal } : {}),
   });
   if (!response.ok || response.body === null) {
     throw new Error(`update artifact download failed with HTTP ${response.status}`);
@@ -74,8 +81,8 @@ export async function downloadArtifact(
   }
   const file = await open(destination, "wx", 0o600);
   let bytes = 0;
+  const reader = response.body.getReader();
   try {
-    const reader = response.body.getReader();
     while (true) {
       const item = await reader.read();
       if (item.done) break;
@@ -89,6 +96,7 @@ export async function downloadArtifact(
     }
     await file.sync();
   } finally {
+    if (options.signal?.aborted) await reader.cancel().catch(() => undefined);
     await file.close();
   }
   return { bytes, finalUrl: finalUrl.toString() };

@@ -189,12 +189,15 @@ fn waiting_for_launcher_exit_at(
     ))
 }
 
-fn update_state_directory() -> io::Result<PathBuf> {
-    let descriptor = default_descriptor_path()?;
+fn update_state_directory_for_descriptor(descriptor: &Path) -> io::Result<PathBuf> {
     descriptor
         .parent()
         .ok_or_else(|| invalid("runtime descriptor has no state directory"))
         .map(|parent| parent.join("updates"))
+}
+
+fn update_state_directory() -> io::Result<PathBuf> {
+    update_state_directory_for_descriptor(&default_descriptor_path()?)
 }
 
 pub(crate) fn update_waiting_for_launcher_exit() -> io::Result<bool> {
@@ -330,7 +333,10 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     use super::STATUS_FILE;
-    use super::{ACTIVE_UPDATE_LOCK_FILE, PendingUpdate, waiting_for_launcher_exit_at};
+    use super::{
+        ACTIVE_UPDATE_LOCK_FILE, PendingUpdate, update_state_directory_for_descriptor,
+        waiting_for_launcher_exit_at,
+    };
     #[cfg(target_os = "macos")]
     use super::{
         atomic_replace_file, pending_startable_update_at, pending_update_at,
@@ -547,5 +553,16 @@ mod tests {
         assert!(waiting_for_launcher_exit_at(&root, 42, &launcher).expect("detect waiting update"));
         assert!(waiting_for_launcher_exit_at(&root, 43, &launcher).is_err());
         fs::remove_dir_all(fixture).expect("remove waiting update fixture");
+    }
+
+    #[test]
+    fn derives_update_state_next_to_the_runtime_descriptor() {
+        assert_eq!(
+            update_state_directory_for_descriptor(Path::new(
+                "/run/user/501/codexhost/desktop-runtime-v1.json",
+            ))
+            .expect("descriptor has a parent"),
+            Path::new("/run/user/501/codexhost/updates")
+        );
     }
 }

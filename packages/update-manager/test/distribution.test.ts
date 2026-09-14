@@ -162,6 +162,54 @@ describe("installed update context", () => {
     },
   );
 
+  it("uses the runtime descriptor directory for Linux npm update state", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-linux-npm-update-state-"));
+    roots.push(root);
+    const packageRoot = path.join(root, "platform-package");
+    const host = path.join(packageRoot, "app", "host-runtime.mjs");
+    const runtimeDirectory = path.join(root, "xdg-runtime", "codexhost");
+    const environment = runtimeEnvironment(root);
+    Object.assign(environment, {
+      XDG_RUNTIME_DIR: path.join(root, "xdg-runtime"),
+      [UPDATE_RUNTIME_ENV.runtimeDescriptorPath]: path.join(
+        runtimeDirectory,
+        "desktop-runtime-v1.json",
+      ),
+      [UPDATE_RUNTIME_ENV.npmNodePath]: path.join(root, "node"),
+      [UPDATE_RUNTIME_ENV.npmCliPath]: path.join(root, "npm-cli.js"),
+      [UPDATE_RUNTIME_ENV.npmLauncherPath]: path.join(root, "codexhost.js"),
+      [UPDATE_RUNTIME_ENV.npmPackageRoot]: packageRoot,
+    });
+    await Promise.all([
+      file(host),
+      file(path.join(packageRoot, "libexec", "codexhost-updater")),
+      file(path.join(root, "bin", "codexhost")),
+      file(path.join(root, "node")),
+      file(path.join(root, "npm-cli.js")),
+      file(path.join(root, "codexhost.js")),
+      file(
+        path.join(packageRoot, "app", "codexhost-distribution.json"),
+        JSON.stringify({
+          schemaVersion: 1,
+          version: "1.2.3",
+          distribution: "npm",
+          target: "linux-arm64",
+        }),
+      ),
+    ]);
+
+    await expect(
+      resolveInstalledUpdateContext({
+        hostRuntimePath: host,
+        environment,
+        platform: "linux",
+        architecture: "arm64",
+      }),
+    ).resolves.toMatchObject({
+      common: { stateDirectory: path.join(runtimeDirectory, "updates") },
+    });
+  });
+
   it("rejects unknown metadata and target mismatch", async () => {
     expect(() =>
       parseDistributionMetadata({

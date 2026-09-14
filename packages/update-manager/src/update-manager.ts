@@ -21,6 +21,8 @@ import {
 
 const REQUEST_SCHEMA_VERSION = 1;
 const WINDOWS_RENAME_RETRY_DELAYS_MS = [10, 30, 70, 150, 300] as const;
+const ARTIFACT_DOWNLOAD_TIMEOUT_MS = 20 * 60 * 1_000;
+const ARTIFACT_DOWNLOAD_IDLE_TIMEOUT_MS = 60 * 1_000;
 
 export interface PreparedUpdateInfo {
   version: string;
@@ -72,6 +74,8 @@ export interface BackgroundUpdateManagerDependencies {
   platform?: NodeJS.Platform;
   randomId?(): string;
   download?: ArtifactDownloader;
+  artifactDownloadTimeoutMs?: number;
+  artifactDownloadIdleTimeoutMs?: number;
   spawnUpdater?(executable: string, requestPath: string): ChildProcess;
   now?(): number;
 }
@@ -137,6 +141,13 @@ function systemErrorCode(error: unknown): string | null {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+function requirePositiveTimeout(value: number, label: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${label} must be a positive integer`);
+  }
+  return value;
 }
 
 async function replaceStatusFile(temporaryPath: string, statusPath: string): Promise<void> {
@@ -208,6 +219,14 @@ export function createBackgroundUpdateManager(
   const platform = dependencies.platform ?? process.platform;
   const randomId = dependencies.randomId ?? randomUUID;
   const download = dependencies.download ?? downloadArtifact;
+  const artifactDownloadTimeoutMs = requirePositiveTimeout(
+    dependencies.artifactDownloadTimeoutMs ?? ARTIFACT_DOWNLOAD_TIMEOUT_MS,
+    "artifact download timeout",
+  );
+  const artifactDownloadIdleTimeoutMs = requirePositiveTimeout(
+    dependencies.artifactDownloadIdleTimeoutMs ?? ARTIFACT_DOWNLOAD_IDLE_TIMEOUT_MS,
+    "artifact download idle timeout",
+  );
   const spawnUpdater = dependencies.spawnUpdater ?? defaultSpawnUpdater;
   const now = dependencies.now ?? Date.now;
   const preparedRequests = new Set<string>();
@@ -350,8 +369,37 @@ export function createBackgroundUpdateManager(
     const temporaryPath = path.join(common.workDirectory, `.${fileName}.download`);
     const artifactPath = path.join(common.workDirectory, fileName);
     const progress = progressReporter(common.statusPath, common.version, installation, source.size);
+    const controller = new AbortController();
+    const abort = (message: string): void => {
+      if (!controller.signal.aborted) controller.abort(new Error(message));
+    };
+    const totalTimeout = setTimeout(
+      () => abort(`update artifact download exceeded ${artifactDownloadTimeoutMs}ms`),
+      artifactDownloadTimeoutMs,
+    );
+    let idleTimeout = setTimeout(
+      () =>
+        abort(`update artifact download made no progress for ${artifactDownloadIdleTimeoutMs}ms`),
+      artifactDownloadIdleTimeoutMs,
+    );
+    const refreshIdleTimeout = (): void => {
+      clearTimeout(idleTimeout);
+      idleTimeout = setTimeout(
+        () =>
+          abort(`update artifact download made no progress for ${artifactDownloadIdleTimeoutMs}ms`),
+        artifactDownloadIdleTimeoutMs,
+      );
+    };
     try {
-      const result = await download(source, temporaryPath, progress.update);
+      const result = await download(
+        source,
+        temporaryPath,
+        async (nextProgress) => {
+          refreshIdleTimeout();
+          await progress.update(nextProgress);
+        },
+        { signal: controller.signal },
+      );
       progress.update({ downloadedBytes: result.bytes, totalBytes: source.size });
       await progress.flush();
       const finalUrl = new URL(result.finalUrl);
@@ -366,6 +414,9 @@ export function createBackgroundUpdateManager(
       await progress.flush();
       await writeFailedStatus(common.statusPath, common.version, installation, error);
       throw error;
+    } finally {
+      clearTimeout(totalTimeout);
+      clearTimeout(idleTimeout);
     }
   }
 

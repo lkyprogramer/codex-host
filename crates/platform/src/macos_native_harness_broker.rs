@@ -81,6 +81,13 @@ pub enum NativeHarnessBrokerInstallOutcome {
 }
 
 #[cfg(target_os = "macos")]
+#[derive(Debug)]
+struct PreviousBrokerGeneration {
+    plist: Vec<u8>,
+    observed: NativeHarnessBrokerObservedState,
+}
+
+#[cfg(target_os = "macos")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NativeHarnessBrokerStatus {
     pub label: String,
@@ -511,9 +518,10 @@ fn validate_secure_plist(
 }
 
 #[cfg(target_os = "macos")]
-fn atomic_write_plist(
+fn atomic_write_plist_contents(
     plan: &NativeHarnessBrokerLaunchAgentPlan,
     uid: u32,
+    contents: &[u8],
 ) -> Result<(), PlatformError> {
     if let Ok(metadata) = fs::symlink_metadata(&plan.plist_path) {
         if metadata.file_type().is_symlink() || !metadata.is_file() {
@@ -541,7 +549,7 @@ fn atomic_write_plist(
             .create_new(true)
             .mode(0o600)
             .open(&temporary_path)?;
-        temporary.write_all(plan.plist_xml.as_bytes())?;
+        temporary.write_all(contents)?;
         temporary.sync_all()?;
         fs::rename(&temporary_path, &plan.plist_path)?;
         validate_secure_plist(plan, uid)?;
@@ -551,6 +559,14 @@ fn atomic_write_plist(
         let _ = fs::remove_file(&temporary_path);
     }
     result
+}
+
+#[cfg(target_os = "macos")]
+fn atomic_write_plist(
+    plan: &NativeHarnessBrokerLaunchAgentPlan,
+    uid: u32,
+) -> Result<(), PlatformError> {
+    atomic_write_plist_contents(plan, uid, plan.plist_xml.as_bytes())
 }
 
 #[cfg(target_os = "macos")]
@@ -643,10 +659,11 @@ fn wait_for_ready(
     let started = Instant::now();
     loop {
         let descriptor = descriptor_fingerprint(plan, uid)?;
-        if observed_launchctl_state(commands)? == NativeHarnessBrokerObservedState::Running
-            && descriptor.is_some()
-            && descriptor != previous_descriptor
-        {
+        if descriptor_generation_is_ready(
+            observed_launchctl_state(commands)?,
+            descriptor,
+            previous_descriptor,
+        ) {
             return Ok(true);
         }
         if started.elapsed() >= timeout {
@@ -663,6 +680,99 @@ fn execute_required(command: &NativeHarnessBrokerCommand) -> Result<(), Platform
         Ok(())
     } else {
         Err(command_failure(command, &output))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn previous_generation(
+    plan: &NativeHarnessBrokerLaunchAgentPlan,
+    uid: u32,
+    observed: NativeHarnessBrokerObservedState,
+) -> Result<Option<PreviousBrokerGeneration>, PlatformError> {
+    if observed == NativeHarnessBrokerObservedState::NotLoaded {
+        return Ok(None);
+    }
+    let metadata = fs::symlink_metadata(&plan.plist_path).map_err(|error| {
+        PlatformError::Invalid(format!(
+            "cannot preserve the previous native Harness broker generation at '{}': {error}",
+            plan.plist_path.display()
+        ))
+    })?;
+    if metadata.file_type().is_symlink()
+        || !metadata.is_file()
+        || metadata.uid() != uid
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err(PlatformError::Invalid(format!(
+            "cannot preserve an unverified previous native Harness broker generation: {}",
+            plan.plist_path.display()
+        )));
+    }
+    let plist = fs::read(&plan.plist_path)?;
+    if plist.is_empty() {
+        return Err(PlatformError::Invalid(format!(
+            "cannot preserve an empty previous native Harness broker generation: {}",
+            plan.plist_path.display()
+        )));
+    }
+    Ok(Some(PreviousBrokerGeneration { plist, observed }))
+}
+
+#[cfg(target_os = "macos")]
+fn descriptor_generation_is_ready(
+    state: NativeHarnessBrokerObservedState,
+    descriptor: Option<[u8; 32]>,
+    previous_descriptor: Option<[u8; 32]>,
+) -> bool {
+    state == NativeHarnessBrokerObservedState::Running
+        && descriptor.is_some()
+        && descriptor != previous_descriptor
+}
+
+#[cfg(target_os = "macos")]
+fn restore_previous_generation(
+    previous: &PreviousBrokerGeneration,
+    commands: &NativeHarnessBrokerLaunchctlPlan,
+    plan: &NativeHarnessBrokerLaunchAgentPlan,
+    uid: u32,
+) -> Result<(), PlatformError> {
+    if observed_launchctl_state(commands)? != NativeHarnessBrokerObservedState::NotLoaded {
+        execute_required(&commands.bootout)?;
+    }
+    let failed_generation_descriptor = descriptor_fingerprint(plan, uid)?;
+    atomic_write_plist_contents(plan, uid, &previous.plist)?;
+    validate_secure_plist(plan, uid)?;
+    execute_required(&commands.bootstrap)?;
+    if previous.observed == NativeHarnessBrokerObservedState::Running {
+        execute_required(&commands.kickstart)?;
+        if !wait_for_ready(
+            commands,
+            plan,
+            uid,
+            failed_generation_descriptor,
+            Duration::from_secs(3),
+        )? {
+            return Err(PlatformError::Invalid(format!(
+                "previous native Harness broker generation did not resume in {}",
+                plan.launchctl_target
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn report_install_failure_after_restore(
+    primary: PlatformError,
+    restore: Result<(), PlatformError>,
+) -> PlatformError {
+    match restore {
+        Ok(()) => PlatformError::Invalid(format!(
+            "native Harness broker installation failed but the previous generation was restored: {primary}"
+        )),
+        Err(rollback) => PlatformError::Invalid(format!(
+            "native Harness broker installation failed: {primary}; previous-generation rollback failed: {rollback}"
+        )),
     }
 }
 
@@ -714,33 +824,46 @@ pub fn install_native_harness_broker(
     let uid = require_current_aqua_uid(paths.home)?;
     let matches = plist_matches(&plan, uid)?;
     let observed = observed_launchctl_state(&commands)?;
-    let previous_descriptor = descriptor_fingerprint(&plan, require_current_aqua_uid(paths.home)?)?;
+    let previous_generation = previous_generation(&plan, uid, observed)?;
+    let previous_descriptor = descriptor_fingerprint(&plan, uid)?;
     let steps = plan_native_harness_broker_install(matches, observed);
-    for step in &steps {
-        match step {
-            NativeHarnessBrokerInstallStep::Bootout => execute_required(&commands.bootout)?,
-            NativeHarnessBrokerInstallStep::WritePlist => atomic_write_plist(&plan, uid)?,
-            NativeHarnessBrokerInstallStep::Bootstrap => {
-                validate_secure_plist(&plan, uid)?;
-                execute_required(&commands.bootstrap)?;
-            }
-            NativeHarnessBrokerInstallStep::Kickstart => {
-                validate_secure_plist(&plan, uid)?;
-                execute_required(&commands.kickstart)?;
+    let apply = || -> Result<(), PlatformError> {
+        for step in &steps {
+            match step {
+                NativeHarnessBrokerInstallStep::Bootout => execute_required(&commands.bootout)?,
+                NativeHarnessBrokerInstallStep::WritePlist => atomic_write_plist(&plan, uid)?,
+                NativeHarnessBrokerInstallStep::Bootstrap => {
+                    validate_secure_plist(&plan, uid)?;
+                    execute_required(&commands.bootstrap)?;
+                }
+                NativeHarnessBrokerInstallStep::Kickstart => {
+                    validate_secure_plist(&plan, uid)?;
+                    execute_required(&commands.kickstart)?;
+                }
             }
         }
-    }
-    if !wait_for_ready(
-        &commands,
-        &plan,
-        require_current_aqua_uid(paths.home)?,
-        previous_descriptor,
-        Duration::from_secs(3),
-    )? {
-        return Err(PlatformError::Invalid(format!(
-            "native Harness broker did not enter the running state in {}",
-            plan.launchctl_target
-        )));
+        if !wait_for_ready(
+            &commands,
+            &plan,
+            uid,
+            previous_descriptor,
+            Duration::from_secs(3),
+        )? {
+            return Err(PlatformError::Invalid(format!(
+                "native Harness broker did not enter the running state in {}",
+                plan.launchctl_target
+            )));
+        }
+        Ok(())
+    };
+    if let Err(primary) = apply() {
+        if let Some(previous) = previous_generation.as_ref() {
+            return Err(report_install_failure_after_restore(
+                primary,
+                restore_previous_generation(previous, &commands, &plan, uid),
+            ));
+        }
+        return Err(primary);
     }
     Ok(match steps.as_slice() {
         [] => NativeHarnessBrokerInstallOutcome::AlreadyRunning,
@@ -799,6 +922,32 @@ mod tests {
         plan_native_harness_broker_launch_agent_with_environment,
         plan_native_harness_broker_launchctl,
     };
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rollback_readiness_rejects_the_failed_generations_stale_descriptor() {
+        let stale = Some([1_u8; 32]);
+        assert!(!super::descriptor_generation_is_ready(
+            NativeHarnessBrokerObservedState::Running,
+            stale,
+            stale
+        ));
+        assert!(!super::descriptor_generation_is_ready(
+            NativeHarnessBrokerObservedState::Running,
+            None,
+            stale
+        ));
+        assert!(super::descriptor_generation_is_ready(
+            NativeHarnessBrokerObservedState::Running,
+            Some([2_u8; 32]),
+            stale
+        ));
+        assert!(!super::descriptor_generation_is_ready(
+            NativeHarnessBrokerObservedState::NotLoaded,
+            Some([2_u8; 32]),
+            stale
+        ));
+    }
 
     #[test]
     fn non_claude_brokers_have_independent_launch_agents_and_lifecycle_targets() {
@@ -971,6 +1120,61 @@ mod tests {
             ),
             [NativeHarnessBrokerInstallStep::Kickstart]
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn reports_both_install_and_rollback_failures() {
+        let primary = crate::PlatformError::Invalid("bootstrap failed".to_owned());
+        let rollback = crate::PlatformError::Invalid("old bootstrap failed".to_owned());
+        let error = super::report_install_failure_after_restore(primary, Err(rollback));
+        assert!(error.to_string().contains("bootstrap failed"));
+        assert!(error.to_string().contains("rollback failed"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn preserves_and_restores_a_verified_previous_plist_generation() {
+        use std::fs;
+        use std::os::unix::fs::PermissionsExt;
+
+        use nix::unistd::Uid;
+
+        let home = crate::temporary_directory("codexhost-broker-generation-recovery");
+        let uid = Uid::effective().as_raw();
+        let plan = plan_native_harness_broker_launch_agent(
+            NativeHarnessBrokerPaths {
+                harness_id: "claude-code",
+                home: &home,
+                node: Path::new("/opt/codexhost/node"),
+                host_runtime: Path::new("/opt/codexhost/host-runtime.mjs"),
+            },
+            uid,
+        )
+        .expect("LaunchAgent plan");
+        let parent = plan.plist_path.parent().expect("plist parent");
+        fs::create_dir_all(parent).expect("LaunchAgent directory");
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o700))
+            .expect("LaunchAgent permissions");
+        fs::write(&plan.plist_path, b"old-generation").expect("old plist");
+        fs::set_permissions(&plan.plist_path, fs::Permissions::from_mode(0o600))
+            .expect("old plist permissions");
+
+        let previous =
+            super::previous_generation(&plan, uid, NativeHarnessBrokerObservedState::Running)
+                .expect("preserve previous generation")
+                .expect("running generation has a plist");
+        super::atomic_write_plist_contents(&plan, uid, b"new-generation")
+            .expect("publish new generation");
+        super::atomic_write_plist_contents(&plan, uid, &previous.plist)
+            .expect("restore previous generation");
+
+        assert_eq!(
+            fs::read(&plan.plist_path).expect("read restored plist"),
+            b"old-generation"
+        );
+        assert_eq!(previous.observed, NativeHarnessBrokerObservedState::Running);
+        fs::remove_dir_all(home).expect("remove generation recovery fixture");
     }
 
     #[cfg(target_os = "macos")]

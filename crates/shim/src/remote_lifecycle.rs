@@ -129,7 +129,7 @@ fn socket_owner_process_ids(socket_path: &Path) -> LifecycleResult<Vec<u32>> {
     }
     let user_id = String::from_utf8(user_id.stdout)?.trim().to_owned();
     let output = Command::new("lsof")
-        .args(["-n", "-t", "-a", "-u", &user_id, "--"])
+        .args(["-n", "-t", "-a", "-U", "-u", &user_id, "--"])
         .arg(socket_path)
         .output()?;
     if !output.status.success() && output.stdout.is_empty() {

@@ -240,6 +240,20 @@ fn main() {
         let error = Command::new("/bin/sh").args(["-c", "kill -SEGV $$"]).exec();
         panic!("failed to exec crashing process: {error}");
     }
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(signal) = env::var_os("FAKE_CODEX_TERMINATE_SIGNAL") {
+        use nix::sys::signal::{Signal, kill};
+        use nix::unistd::Pid;
+
+        let signal = match signal.to_string_lossy().as_ref() {
+            "HUP" => Signal::SIGHUP,
+            "INT" => Signal::SIGINT,
+            "TERM" => Signal::SIGTERM,
+            value => panic!("unsupported fixture termination signal: {value}"),
+        };
+        kill(Pid::this(), signal).expect("terminate fake Codex CLI by signal");
+        unreachable!("the fixture should have terminated by signal");
+    }
     if run_unix_listener() {
         return;
     }

@@ -153,7 +153,7 @@ export async function resolveInstalledUpdateContext(
     UPDATE_RUNTIME_ENV.runtimeDescriptorPath,
   );
   const stateDirectory = path.normalize(
-    options.stateDirectory ?? defaultUpdateStateDirectory(platform, environment),
+    options.stateDirectory ?? path.join(path.dirname(runtimeDescriptorPath), "updates"),
   );
   const resourcesRoot = path.dirname(appDirectory);
   const installationRoot =

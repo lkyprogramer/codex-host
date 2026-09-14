@@ -277,6 +277,13 @@ fn exit_signal(status: &ExitStatus) -> Option<i32> {
     status.signal()
 }
 
+fn proxy_exit_code(status: &ExitStatus) -> i32 {
+    status
+        .code()
+        .or_else(|| exit_signal(status).and_then(|signal| 128_i32.checked_add(signal)))
+        .unwrap_or(1)
+}
+
 #[cfg(target_os = "windows")]
 fn exit_signal(_status: &ExitStatus) -> Option<i32> {
     None
@@ -852,7 +859,7 @@ pub fn run_proxy_with_observer(
     Ok(if outcome.desktop_input_closed {
         0
     } else {
-        outcome.status.code().unwrap_or(1)
+        proxy_exit_code(&outcome.status)
     })
 }
 

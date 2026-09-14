@@ -1,5 +1,6 @@
 export type {
   ArtifactDownloadProgress,
+  ArtifactDownloadOptions,
   ArtifactDownloader,
   ArtifactDownloadResult,
   ArtifactSource,

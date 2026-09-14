@@ -987,11 +987,15 @@ fn remote_lifecycle_refuses_a_mismatched_installed_command() {
     fs::remove_dir_all(directory).expect("remove mismatched lifecycle fixture");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 #[test]
 fn reports_an_official_cli_crash_without_polluting_stdout() {
     let output = run_shim(b"", &[], &[("FAKE_CODEX_CRASH", "1")]);
     assert!(!output.status.success());
+    assert_eq!(
+        output.status.code(),
+        Some(128 + nix::sys::signal::Signal::SIGSEGV as i32)
+    );
     assert!(output.stdout.is_empty());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -999,6 +1003,24 @@ fn reports_an_official_cli_crash_without_polluting_stdout() {
         "unexpected crash status {:?} with stderr: {stderr}",
         output.status
     );
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn preserves_official_cli_shutdown_signal_exit_conventions() {
+    for (name, signal) in [
+        ("HUP", nix::sys::signal::Signal::SIGHUP),
+        ("INT", nix::sys::signal::Signal::SIGINT),
+        ("TERM", nix::sys::signal::Signal::SIGTERM),
+    ] {
+        let output = run_shim(b"", &[], &[("FAKE_CODEX_TERMINATE_SIGNAL", name)]);
+        assert_eq!(
+            output.status.code(),
+            Some(128 + signal as i32),
+            "shim did not preserve {name} termination status"
+        );
+        assert!(output.stdout.is_empty());
+    }
 }
 
 fn wait_for_file(path: &std::path::Path, timeout: Duration) -> String {
