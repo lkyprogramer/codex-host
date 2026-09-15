@@ -291,7 +291,7 @@ export class CursorAdapter implements HarnessAdapter {
           input.knownTurnRefs?.some(
             (ref) =>
               ref.harnessId !== this.harnessId ||
-              ref.nativeSessionId !== transport.sessionId ||
+              ref.nativeSessionId !== opened.transport.sessionId ||
               !native.some((turn) => turn.id === ref.nativeTurnKey),
           )
         )
