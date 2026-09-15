@@ -1,4 +1,8 @@
 /** Bound a read without claiming that an uncancellable native operation has stopped. */
+export function isAbortError(error: unknown): boolean {
+  return error instanceof Error && (error.name === "AbortError" || error.name === "TimeoutError");
+}
+
 export function awaitWithSignal<T>(pending: Promise<T>, signal: AbortSignal): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const aborted = () => reject(signal.reason);

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 
 import { FakeHarnessAdapter } from "@codexhost/harness-adapter/testing";
 import type { FakeHarnessSession } from "@codexhost/harness-adapter/testing";
@@ -1270,6 +1271,128 @@ describe("bounded observer waits", () => {
       expect(result.results[0]).toMatchObject({ outcome: "error" });
       await value.coordinator.waitMany(input);
       expect(read).toHaveBeenCalledTimes(1);
+    } finally {
+      release({});
+      await value.close();
+    }
+  });
+
+  it("does not report an idle official wait as an error after the wait budget elapses", async () => {
+    const value = await fixture();
+    const officialId = hostThreadIdSchema.parse(randomUUID());
+    const running = {
+      threadId: officialId,
+      harnessId: "codex" as const,
+      status: "running" as const,
+      turn: { turnId: "turn-1", status: "running" as const },
+      progress: [],
+      result: { availability: "pending" as const },
+      nextCursor: "cursor",
+    };
+    let reads = 0;
+    const read = vi.fn(async () => {
+      reads += 1;
+      // Snapshot and the first collect of the wait must succeed; only later polls
+      // should be slower than leftover budget.
+      if (reads > 2) await delay(200);
+      return running;
+    });
+    Object.assign(value.coordinator, { read });
+    try {
+      const first = await value.coordinator.waitMany({
+        timeoutMs: 0,
+        targets: [{ threadId: officialId }],
+      });
+      const firstTarget = first.results[0];
+      if (!firstTarget || firstTarget.outcome === "error") {
+        throw new Error(`snapshot failed: ${JSON.stringify(first)}`);
+      }
+      const result = await value.coordinator.waitMany({
+        timeoutMs: 250,
+        targets: [{ threadId: officialId, afterRevision: firstTarget.revision }],
+      });
+      expect(result.timedOut).toBe(true);
+      expect(result.results[0]).toMatchObject({ outcome: "timedOut", threadId: officialId });
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("keeps a loaded Thread timedOut when a sibling official read hits the wait budget", async () => {
+    const value = await fixture();
+    const officialId = hostThreadIdSchema.parse(randomUUID());
+    const running = {
+      threadId: officialId,
+      harnessId: "codex" as const,
+      status: "running" as const,
+      turn: { turnId: "turn-1", status: "running" as const },
+      progress: [],
+      result: { availability: "pending" as const },
+      nextCursor: "cursor",
+    };
+    let reads = 0;
+    const read = vi.fn(async () => {
+      reads += 1;
+      if (reads > 2) await delay(200);
+      return running;
+    });
+    Object.assign(value.coordinator, { read });
+    try {
+      const child = await value.coordinator.start({
+        harnessId: "pi",
+        task: "fixture",
+        cwd: value.directory,
+        parentThreadId: randomUUID(),
+      });
+      const status = await value.coordinator.status({ threadId: child.threadId });
+      const snapshot = await value.coordinator.waitMany({
+        timeoutMs: 0,
+        targets: [
+          { threadId: officialId },
+          { threadId: child.threadId, afterRevision: status.revision },
+        ],
+      });
+      const official = snapshot.results.find((row) => row.threadId === officialId);
+      if (!official || official.outcome === "error") {
+        throw new Error(`official snapshot failed: ${JSON.stringify(snapshot)}`);
+      }
+      const result = await value.coordinator.waitMany({
+        timeoutMs: 250,
+        targets: [
+          { threadId: officialId, afterRevision: official.revision },
+          { threadId: child.threadId, afterRevision: status.revision },
+        ],
+      });
+      expect(result.timedOut).toBe(true);
+      expect(result.results.map((row) => row.outcome)).toEqual(["timedOut", "timedOut"]);
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("cancels a wait-many collect without cancelling the child Turn", async () => {
+    const value = await fixture();
+    const officialId = hostThreadIdSchema.parse(randomUUID());
+    let release!: (value: unknown) => void;
+    const blocked = new Promise((resolve) => {
+      release = resolve;
+    });
+    let started = false;
+    const read = vi.fn(() => {
+      started = true;
+      return blocked;
+    });
+    Object.assign(value.coordinator, { read });
+    const controller = new AbortController();
+    try {
+      const pending = value.coordinator.waitMany(
+        { targets: [{ threadId: officialId }], timeoutMs: 10_000 },
+        controller.signal,
+      );
+      const rejected = expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      await vi.waitFor(() => expect(started).toBe(true));
+      controller.abort();
+      await rejected;
     } finally {
       release({});
       await value.close();

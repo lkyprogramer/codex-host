@@ -1,4 +1,4 @@
-import { awaitWithSignal } from "./abortable-read.js";
+import { awaitWithSignal, isAbortError } from "./abortable-read.js";
 import { setTimeout as cancellableDelay } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
 import path from "node:path";
@@ -1002,13 +1002,40 @@ export class HarnessDelegationCoordinator {
     }
     signal?.throwIfAborted();
     const deadline = Date.now() + input.timeoutMs;
-    const readDeadline = AbortSignal.timeout(input.timeoutMs || 5_000);
-    const readSignal = signal ? AbortSignal.any([signal, readDeadline]) : readDeadline;
-    const collect = async (): Promise<ThreadWaitManyResult> => {
+    const collect = async (previous?: ThreadWaitManyResult): Promise<ThreadWaitManyResult> => {
+      // Bound this status read only. Do not reuse one deadline across the wait.
+      const readTimeoutMs =
+        input.timeoutMs === 0
+          ? 5_000
+          : Math.max(1, Math.min(input.timeoutMs, deadline - Date.now()));
+      const readDeadline = AbortSignal.timeout(readTimeoutMs);
+      const readSignal = signal ? AbortSignal.any([signal, readDeadline]) : readDeadline;
       const results = await Promise.all(
-        input.targets.map(async (target) =>
-          this.#waitManyTarget(target, input.changeKind, readSignal),
-        ),
+        input.targets.map(async (target) => {
+          try {
+            return await this.#waitManyTarget(target, input.changeKind, readSignal);
+          } catch (error) {
+            signal?.throwIfAborted();
+            if (!readDeadline.aborted || !isAbortError(error)) throw error;
+            const prior = previous?.results.find((row) => row.threadId === target.threadId);
+            if (prior && prior.outcome !== "error") {
+              return {
+                threadId: target.threadId,
+                outcome: "timedOut" as const,
+                revision: prior.revision,
+                status: prior.status,
+              };
+            }
+            return {
+              threadId: target.threadId,
+              outcome: "error" as const,
+              error: {
+                code: "INTERNAL_ERROR" as const,
+                message: error instanceof Error ? error.message : String(error),
+              },
+            };
+          }
+        }),
       );
       const changed = results.some(
         (result) =>
@@ -1056,7 +1083,7 @@ export class HarnessDelegationCoordinator {
       }
       signal?.throwIfAborted();
       if (Date.now() >= deadline) return snapshot;
-      snapshot = await collect();
+      snapshot = await collect(snapshot);
       signal?.throwIfAborted();
       if (!snapshot.timedOut) return snapshot;
     }
@@ -1409,6 +1436,7 @@ export class HarnessDelegationCoordinator {
         status: compactWaitManyStatus(status),
       };
     } catch (error) {
+      if (isAbortError(error)) throw error;
       const normalized =
         error instanceof DelegationControlError
           ? error

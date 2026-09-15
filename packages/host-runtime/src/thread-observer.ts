@@ -1,5 +1,6 @@
 import { setTimeout as delay } from "node:timers/promises";
 
+import { isAbortError } from "./abortable-read.js";
 import {
   DelegationControlError,
   type DelegationThreadStatus,
@@ -209,11 +210,11 @@ export async function observeThreads(input: {
     );
     const timeoutMs =
       requests === 0 ? 0 : Math.max(0, Math.min(REQUEST_TIMEOUT_MS, remaining, reviewRemaining));
-    // Bound a stalled transport as well as normal server waits. No timeout affects the child Turn.
+    // Bound a stalled transport as well as normal server waits. Keep 5s slack even
+    // when overall remaining equals this request so a normal wait is not aborted.
+    // No timeout affects the child Turn.
     const requestDeadline = AbortSignal.timeout(
-      input.timeoutMs === 0
-        ? 5_000
-        : Math.max(1, Math.min(timeoutMs + 5_000, Math.max(1, remaining))),
+      input.timeoutMs === 0 ? 5_000 : Math.max(1, timeoutMs + 5_000),
     );
     const signal = input.signal
       ? AbortSignal.any([input.signal, requestDeadline])
@@ -240,14 +241,13 @@ export async function observeThreads(input: {
       if (input.signal?.aborted) return finish("cancelled");
       if (input.timeoutMs > 0 && requestDeadline.aborted && elapsed() >= input.timeoutMs)
         return finish("timeout");
-      // Only retry actual transport failures; authentication/protocol/target errors need attention.
-      if (
-        !(error instanceof DelegationControlError) ||
-        error.code !== "RUNTIME_UNREACHABLE" ||
-        !error.details?.cause ||
-        ++failures > 2
-      )
-        throw error;
+      // Retry stalled-transport aborts and unreachable Runtime; protocol/target errors need attention.
+      const retryableTransport =
+        (requestDeadline.aborted && isAbortError(error)) ||
+        (error instanceof DelegationControlError &&
+          error.code === "RUNTIME_UNREACHABLE" &&
+          Boolean(error.details?.cause));
+      if (!retryableTransport || ++failures > 2) throw error;
       try {
         await delay(
           Math.min(250 * 2 ** (failures - 1), input.timeoutMs - elapsed()),

@@ -178,6 +178,107 @@ describe("Thread observer", () => {
     expect(await pending).toMatchObject({ reason: "cancelled", requests: 1 });
   });
 
+  it("keeps 5s request slack when overall remaining equals the wait-many timeout", async () => {
+    vi.useFakeTimers();
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    const limits: number[] = [];
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      limits.push(ms);
+      return originalTimeout(ms);
+    });
+    try {
+      const waitMany = vi.fn(async (input: ThreadWaitManyInput) => {
+        if (input.timeoutMs > 0)
+          await new Promise((resolve) => setTimeout(resolve, input.timeoutMs));
+        return {
+          timedOut: true,
+          results: [{ ...row(), outcome: "timedOut" as const }],
+        };
+      });
+      const pending = observeThreads({
+        targets: [{ threadId: "child" }],
+        timeoutMs: 90_000,
+        waitMany,
+      });
+      await vi.advanceTimersByTimeAsync(90_000);
+      await expect(pending).resolves.toMatchObject({ reason: "timeout", requests: 3 });
+      expect(waitMany.mock.calls.map(([input]) => input.timeoutMs)).toEqual([0, 60_000, 30_000]);
+      expect(limits).toEqual([5_000, 65_000, 35_000]);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("retries a request-deadline abort while overall observation remains", async () => {
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    let abortNextLongDeadline = false;
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      if (ms > 5_000 && abortNextLongDeadline) {
+        abortNextLongDeadline = false;
+        const controller = new AbortController();
+        controller.abort(Object.assign(new Error("deadline"), { name: "TimeoutError" }));
+        return controller.signal;
+      }
+      return originalTimeout(ms);
+    });
+    try {
+      const waitMany = vi.fn(async (input: ThreadWaitManyInput, signal: AbortSignal) => {
+        if (signal.aborted) {
+          throw signal.reason instanceof Error
+            ? signal.reason
+            : Object.assign(new Error("aborted"), { name: "TimeoutError" });
+        }
+        if (input.timeoutMs === 0) abortNextLongDeadline = true;
+        else await delay(50);
+        return {
+          timedOut: true,
+          results: [{ ...row(), outcome: "timedOut" as const }],
+        };
+      });
+      const result = await observeThreads({
+        targets: [{ threadId: "child" }],
+        timeoutMs: 1_000,
+        waitMany,
+      });
+      expect(result.reason).toBe("timeout");
+      expect(waitMany.mock.calls.length).toBeGreaterThanOrEqual(3);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
+  it("does not retry a protocol error after the request deadline", async () => {
+    const originalTimeout = AbortSignal.timeout.bind(AbortSignal);
+    let abortNextLongDeadline = false;
+    const spy = vi.spyOn(AbortSignal, "timeout").mockImplementation((ms: number) => {
+      if (ms > 5_000 && abortNextLongDeadline) {
+        abortNextLongDeadline = false;
+        const controller = new AbortController();
+        controller.abort(Object.assign(new Error("deadline"), { name: "TimeoutError" }));
+        return controller.signal;
+      }
+      return originalTimeout(ms);
+    });
+    try {
+      const waitMany = vi.fn(async (input: ThreadWaitManyInput) => {
+        if (input.timeoutMs === 0) {
+          abortNextLongDeadline = true;
+          return {
+            timedOut: true,
+            results: [{ ...row(), outcome: "timedOut" as const }],
+          };
+        }
+        throw new DelegationControlError("INVALID_ARGUMENT", "bad payload");
+      });
+      await expect(
+        observeThreads({ targets: [{ threadId: "child" }], timeoutMs: 90_000, waitMany }),
+      ).rejects.toMatchObject({ code: "INVALID_ARGUMENT" });
+      expect(waitMany).toHaveBeenCalledTimes(2);
+    } finally {
+      spy.mockRestore();
+    }
+  });
+
   it("retries only bounded transport failures internally", async () => {
     vi.useFakeTimers();
     const waitMany = vi.fn(async () => {
