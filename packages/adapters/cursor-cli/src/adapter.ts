@@ -57,8 +57,40 @@ export interface CursorAdapterOptions {
   command?: string;
   timeoutMs?: number;
 }
+const EMPTY_CATALOG =
+  /no parameterized models|no model catalog|no parameterized model directory|no model configuration/iu;
+const INSPECTION_CACHE_MS = 5 * 60_000;
+
+type CursorInspectionEntry = {
+  close(): Promise<void>;
+  expires: number;
+  pending: boolean;
+  result: Promise<HarnessInspection>;
+};
+
+function inspectionCacheMs(inspection: HarnessInspection): number {
+  if (inspection.status === "ready" || inspection.status === "notInstalled")
+    return INSPECTION_CACHE_MS;
+  if (inspection.error.code === "authenticationRequired") return INSPECTION_CACHE_MS;
+  return 0;
+}
+
+export function isEmptyCursorCatalogError(error: unknown): boolean {
+  const message =
+    typeof error === "string"
+      ? error
+      : error &&
+          typeof error === "object" &&
+          "message" in error &&
+          typeof error.message === "string"
+        ? error.message
+        : cursorDiagnostic(error);
+  return EMPTY_CATALOG.test(message);
+}
+
 export function cursorError(error: unknown): HarnessError {
   const message = cursorDiagnostic(error);
+  const emptyCatalog = isEmptyCursorCatalogError(error) || EMPTY_CATALOG.test(message);
   const code = /not installed/iu.test(message)
     ? "notInstalled"
     : /not authenticated|authentication required|not logged in|login required|auth(?:entication)? (?:failed|expired)/iu.test(
@@ -68,10 +100,35 @@ export function cursorError(error: unknown): HarnessError {
       : /exited|closed/iu.test(message)
         ? "processExited"
         : "protocolError";
-  return { code, message, retryable: false };
+  return { code, message, retryable: emptyCatalog };
 }
 function rejected(code: HarnessError["code"], message: string): { ok: false; error: HarnessError } {
   return { ok: false, error: { code, message, retryable: false } };
+}
+
+async function openCursorCatalog(
+  create: () => CursorTransport,
+  sessionId?: string,
+): Promise<{ transport: CursorTransport; info: CursorSessionInfo }> {
+  const attempt = async (transport: CursorTransport) => {
+    const info = await transport.open(sessionId);
+    cursorCatalog(info);
+    return { transport, info };
+  };
+  let transport = create();
+  try {
+    return await attempt(transport);
+  } catch (error) {
+    await transport.close().catch(() => undefined);
+    if (!isEmptyCursorCatalogError(error)) throw error;
+    transport = create();
+    try {
+      return await attempt(transport);
+    } catch (retryError) {
+      await transport.close().catch(() => undefined);
+      throw retryError;
+    }
+  }
 }
 export class CursorAdapter implements HarnessAdapter {
   readonly subagents: HarnessSubagentCapability = {
@@ -114,15 +171,8 @@ export class CursorAdapter implements HarnessAdapter {
   readonly #sessions = new Set<CursorSession>();
   readonly #ephemeralTransports = new Set<CursorTransport>();
   readonly #openingTransports = new Set<CursorTransport>();
-  readonly #inspections = new Map<
-    string,
-    {
-      close(): Promise<void>;
-      expires: number;
-      pending: boolean;
-      result: Promise<HarnessInspection>;
-    }
-  >();
+  /** Account-level catalog. cwd is only the ACP spawn directory, not a cache key. */
+  #inspection: CursorInspectionEntry | undefined;
   #closed = false;
   #closePromise: Promise<void> | null = null;
   constructor(readonly options: CursorAdapterOptions = {}) {}
@@ -140,17 +190,21 @@ export class CursorAdapter implements HarnessAdapter {
         status: "unavailable",
         error: { code: "unavailable", message: "Cursor adapter is closed", retryable: false },
       };
-    const cwd = path.resolve(input.cwd ?? process.cwd());
-    const cached = this.#inspections.get(cwd);
+    const cached = this.#inspection;
     if (cached && (cached.pending || (!input.refresh && cached.expires > Date.now())))
       return cached.result;
-    const transport = new CursorTransport(this.transportOptions(cwd));
+    const probeCwd = path.resolve(input.cwd ?? process.cwd());
+    const current = { transport: undefined as CursorTransport | undefined };
     const result = (async (): Promise<HarnessInspection> => {
       try {
-        const info = await transport.open();
+        const opened = await openCursorCatalog(() => {
+          current.transport = new CursorTransport(this.transportOptions(probeCwd));
+          return current.transport;
+        });
+        current.transport = opened.transport;
         return {
           status: "ready",
-          catalog: cursorCatalog(info),
+          catalog: cursorCatalog(opened.info),
           capabilities: CURSOR_CAPABILITIES,
           permissionModes: CURSOR_MODES,
         };
@@ -161,21 +215,26 @@ export class CursorAdapter implements HarnessAdapter {
           error: failure,
         };
       } finally {
-        await transport.close();
+        await current.transport?.close().catch(() => undefined);
       }
     })();
-    // Cache negative results as well; discovery never starts a polling/retry timer.
-    const entry = {
-      close: () => transport.close(),
+    const entry: CursorInspectionEntry = {
+      close: () => current.transport?.close() ?? Promise.resolve(),
       expires: Number.POSITIVE_INFINITY,
       pending: true,
       result,
     };
-    this.#inspections.set(cwd, entry);
-    void result.finally(() => {
-      entry.pending = false;
-      entry.expires = Date.now() + 5 * 60_000;
-    });
+    this.#inspection = entry;
+    void result.then(
+      (inspection) => {
+        entry.pending = false;
+        entry.expires = Date.now() + inspectionCacheMs(inspection);
+      },
+      () => {
+        entry.pending = false;
+        entry.expires = 0;
+      },
+    );
     return result;
   }
   async open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>> {
@@ -196,14 +255,15 @@ export class CursorAdapter implements HarnessAdapter {
         input.executionPolicy === "unattended-full-access" &&
         (!input.permissionModeId || input.permissionModeId === "agent"),
     };
-    const transport = new CursorTransport(options);
-    this.#openingTransports.add(transport);
+    let transport: CursorTransport | undefined;
     try {
       if (input.kind === "resume")
         readCursorNativeTurns(input.nativeRef.nativeSessionId, options.cwd, options.environment);
-      let info = await transport.open(
-        input.kind === "resume" ? input.nativeRef.nativeSessionId : undefined,
-      );
+      const sessionId = input.kind === "resume" ? input.nativeRef.nativeSessionId : undefined;
+      const opened = await openCursorCatalog(() => new CursorTransport(options), sessionId);
+      transport = opened.transport;
+      this.#openingTransports.add(transport);
+      let info = opened.info;
       if (input.model) {
         const value = cursorNativeModel(info, input.model.id);
         const selected = await transport.configure("model", value);
@@ -254,8 +314,10 @@ export class CursorAdapter implements HarnessAdapter {
       return { ok: true, value: session };
     } catch (error) {
       try {
-        await transport.close();
-        this.#openingTransports.delete(transport);
+        if (transport) {
+          await transport.close();
+          this.#openingTransports.delete(transport);
+        }
       } catch (cleanupError) {
         return { ok: false, error: cursorError(cleanupError) };
       }
@@ -272,7 +334,7 @@ export class CursorAdapter implements HarnessAdapter {
       ...[...this.#sessions].map((session) => session.close()),
       ...[...this.#ephemeralTransports].map((transport) => transport.close()),
       ...[...this.#openingTransports].map((transport) => transport.close()),
-      ...[...this.#inspections.values()].map((inspection) => inspection.close()),
+      ...(this.#inspection ? [this.#inspection.close()] : []),
     ]);
     const errors = results.flatMap((result) =>
       result.status === "rejected" ? [result.reason] : [],

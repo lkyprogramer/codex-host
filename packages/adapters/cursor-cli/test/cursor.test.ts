@@ -330,6 +330,176 @@ describe("Cursor native configuration", () => {
     expect(open).toHaveBeenCalledTimes(2);
     await adapter.close();
   });
+  it("reuses a ready model catalog across working directories", async () => {
+    const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      expect(await adapter.inspect({ cwd: "/synthetic/cursor-a" })).toMatchObject({
+        status: "ready",
+      });
+      expect(await adapter.inspect({ cwd: "/synthetic/cursor-b" })).toMatchObject({
+        status: "ready",
+      });
+      expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      await adapter.close();
+    }
+  });
+  it("does not cache an empty model catalog", async () => {
+    const open = vi
+      .spyOn(CursorTransport.prototype, "open")
+      .mockRejectedValueOnce(new Error("Cursor returned no parameterized models"))
+      .mockRejectedValueOnce(new Error("Cursor returned no parameterized models"))
+      .mockImplementation(async function (this: CursorTransport) {
+        this.sessionId = info.sessionId;
+        return info;
+      });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const first = await adapter.inspect({ cwd: "/synthetic/cursor-empty-catalog" });
+      expect(first.status).toBe("unavailable");
+      expect(first.status === "unavailable" && first.error.retryable).toBe(true);
+      expect(open).toHaveBeenCalledTimes(2);
+      const second = await adapter.inspect({ cwd: "/synthetic/cursor-other" });
+      expect(second.status).toBe("ready");
+      expect(open).toHaveBeenCalledTimes(3);
+    } finally {
+      await adapter.close();
+    }
+  });
+  it("retries inspect once when session/new returns no model catalog", async () => {
+    const empty = {
+      sessionId: info.sessionId,
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          type: "select" as const,
+          currentValue: "",
+          options: [],
+        },
+      ],
+    };
+    const open = vi
+      .spyOn(CursorTransport.prototype, "open")
+      .mockImplementationOnce(async function (this: CursorTransport) {
+        this.sessionId = empty.sessionId;
+        return empty;
+      })
+      .mockImplementation(async function (this: CursorTransport) {
+        this.sessionId = info.sessionId;
+        return info;
+      });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      expect(await adapter.inspect()).toMatchObject({ status: "ready" });
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.close();
+    }
+  });
+  it("does not pin inspect when probe cleanup fails", async () => {
+    const open = vi
+      .spyOn(CursorTransport.prototype, "open")
+      .mockRejectedValueOnce(new Error("Cursor ACP request timed out"))
+      .mockImplementation(async function (this: CursorTransport) {
+        this.sessionId = info.sessionId;
+        return info;
+      });
+    vi.spyOn(CursorTransport.prototype, "close").mockRejectedValue(
+      new Error("owned group remains"),
+    );
+    const adapter = new CursorAdapter();
+    try {
+      const first = await adapter.inspect();
+      expect(first.status).toBe("unavailable");
+      expect(await adapter.inspect()).toMatchObject({ status: "ready" });
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.close().catch(() => undefined);
+    }
+  });
+  it("does not cache a catalog timeout across inspects", async () => {
+    const open = vi
+      .spyOn(CursorTransport.prototype, "open")
+      .mockRejectedValueOnce(new Error("Cursor ACP request timed out"))
+      .mockImplementation(async function (this: CursorTransport) {
+        this.sessionId = info.sessionId;
+        return info;
+      });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const first = await adapter.inspect({ cwd: "/synthetic/cursor-timeout" });
+      expect(first.status).toBe("unavailable");
+      expect(open).toHaveBeenCalledTimes(1);
+      expect(await adapter.inspect({ cwd: "/synthetic/cursor-timeout-b" })).toMatchObject({
+        status: "ready",
+      });
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.close();
+    }
+  });
+  it("retries session open once after Cursor returns an empty catalog", async () => {
+    const open = vi
+      .spyOn(CursorTransport.prototype, "open")
+      .mockRejectedValueOnce(new Error("Cursor returned no parameterized models"))
+      .mockImplementation(async function (this: CursorTransport) {
+        this.sessionId = info.sessionId;
+        return info;
+      });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const result = await adapter.open({ kind: "create", cwd: process.cwd() });
+      expect(result.ok).toBe(true);
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.close();
+    }
+  });
+  it("retries session open once when session/new returns no model catalog", async () => {
+    const empty = {
+      sessionId: info.sessionId,
+      configOptions: [
+        {
+          id: "model",
+          name: "Model",
+          type: "select" as const,
+          currentValue: "model[effort=high]",
+          options: [],
+        },
+      ],
+    };
+    const open = vi
+      .spyOn(CursorTransport.prototype, "open")
+      .mockImplementationOnce(async function (this: CursorTransport) {
+        this.sessionId = empty.sessionId;
+        return empty;
+      })
+      .mockImplementation(async function (this: CursorTransport) {
+        this.sessionId = info.sessionId;
+        return info;
+      });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const result = await adapter.open({ kind: "create", cwd: process.cwd() });
+      expect(result.ok).toBe(true);
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      await adapter.close();
+    }
+  });
   it("does not claim unconfirmed mode selection", async () => {
     const f = session();
     vi.spyOn(f.transport, "configure").mockResolvedValue({ configOptions: [] });

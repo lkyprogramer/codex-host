@@ -89,8 +89,14 @@ contract investigation before release acceptance.
   shell edits and missing historical diffs are not inferred. Other Cursor notification
   extensions are not all implemented.
 - Model inspection opens one empty native ACP session per cache refresh because
-  the catalog is returned by `session/new`. It submits no model prompt. Both
-  successful and failed inspection results are cached for five minutes on demand.
+  the catalog is returned by `session/new`. It submits no model prompt. The model
+  catalog is account-global: a working directory is only the ACP spawn path, not a
+  cache key. Ready catalogs, missing install, and authentication failures are
+  cached for five minutes and reused across directories. Empty directories,
+  timeouts, and other protocol failures are not retained. Inspect and Session open
+  share one empty-catalog retry in a new ACP process, including the older
+  `session/new` variant catalog with no model options. Same-session empty-directory
+  refetch remains a single read-only retry and never fabricates models.
 - The native history format and operating-system authentication behavior require
   platform/version acceptance before formal product support is claimed.
 
