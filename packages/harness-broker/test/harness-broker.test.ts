@@ -142,6 +142,40 @@ describe("macOS Aqua Harness broker", () => {
       }
     },
   );
+  it("preserves executionReady=false across broker Session metadata", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-broker-ready-"));
+    roots.push(root);
+    const descriptorPath = path.join(root, "broker.json");
+    const socketPath =
+      process.platform === "win32"
+        ? `\\\\.\\pipe\\codexhost-broker-${randomUUID()}`
+        : path.join(root, "broker.sock");
+    const native = new FakeHarnessAdapter(harnessIdSchema.parse("cursor-cli"));
+    const original = native.open.bind(native);
+    vi.spyOn(native, "open").mockImplementation(async (input) => {
+      const opened = await original(input);
+      if (opened.ok) Object.defineProperty(opened.value, "executionReady", { value: false });
+      return opened;
+    });
+    const server = await startHarnessBrokerServer({
+      descriptorPath,
+      socketPath,
+      adapter: native,
+    });
+    const client = new BrokeredHarnessAdapter({
+      descriptorPath,
+      harnessId: "cursor-cli",
+    });
+    try {
+      const created = await client.open({ kind: "create", cwd: "/synthetic" });
+      expect(created.ok).toBe(true);
+      if (!created.ok) throw Error(created.error.message);
+      expect(created.value.executionReady).toBe(false);
+    } finally {
+      await client.close();
+      await server.close();
+    }
+  });
   it.skipIf(process.platform === "win32")(
     "refuses to replace a non-socket entry at the broker socket path",
     async () => {

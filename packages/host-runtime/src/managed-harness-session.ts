@@ -92,7 +92,7 @@ export class ManagedHarnessSession {
   readonly initialUsage;
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
-  readonly #resume: () => Promise<HarnessSession>;
+  readonly #resume: (options?: { skipSnapshot?: boolean }) => Promise<HarnessSession>;
   readonly #onActivity: () => void;
   readonly #onFault: (error: Error) => void;
   readonly #outputEndTimeoutMs: number;
@@ -109,10 +109,11 @@ export class ManagedHarnessSession {
   #suspendedOutputs = new Map<number, HarnessOutput[]>();
   #suspended: Extract<HarnessIdleSuspendResult, { status: "suspended" }> | null = null;
   #suspendingGeneration: number | null = null;
+  #deferredLive: boolean;
 
   constructor(input: {
     session: HarnessSession;
-    resume(): Promise<HarnessSession>;
+    resume(options?: { skipSnapshot?: boolean }): Promise<HarnessSession>;
     onActivity(): void;
     onFault(error: Error): void;
     outputEndTimeoutMs?: number;
@@ -127,6 +128,7 @@ export class ManagedHarnessSession {
     this.#onActivity = input.onActivity;
     this.#onFault = input.onFault;
     this.#outputEndTimeoutMs = input.outputEndTimeoutMs ?? 5_000;
+    this.#deferredLive = input.session.executionReady === false;
     this.outputs = this.#channel.outputs;
     this.#attach(input.session);
   }
@@ -178,11 +180,13 @@ export class ManagedHarnessSession {
   }
 
   refreshUsage(): Promise<void> {
-    return this.#use(async (session) => session.refreshUsage?.());
+    return this.#read(async (session) => {
+      await session.refreshUsage?.();
+    });
   }
 
   readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>> {
-    return this.#use(async (session) => {
+    return this.#read(async (session) => {
       const result = await session.readSnapshot();
       if (result.ok && result.value.state) this.#observeState(result.value.state);
       return result;
@@ -251,6 +255,16 @@ export class ManagedHarnessSession {
   /** Preserves a confirmed native state when resume needed an explicit Host read. */
   updateObservedState(state: HarnessSessionState): void {
     this.#observeState(state);
+  }
+
+  async #read<T>(operation: SessionOperation<T>): Promise<T> {
+    this.#onActivity();
+    return this.#enqueue(async () => {
+      this.#assertOpen();
+      const session =
+        this.#deferredLive && !this.#suspended ? this.#current : await this.#resumeIfNeeded();
+      return operation(session);
+    });
   }
 
   async #use<T>(operation: SessionOperation<T>): Promise<T> {
@@ -361,6 +375,35 @@ export class ManagedHarnessSession {
   }
 
   async #resumeIfNeeded(): Promise<HarnessSession> {
+    if (this.#deferredLive) {
+      const previous = this.#current;
+      const previousGeneration = this.#generation;
+      this.#generation += 1;
+      this.#pumpCompletions.delete(previousGeneration);
+      this.#pendingPumpEnds.delete(previousGeneration);
+      this.#suspendedOutputs.delete(previousGeneration);
+      this.#deferredLive = false;
+      this.#suspended = null;
+      try {
+        await previous.close();
+      } catch (error) {
+        const failure = error instanceof Error ? error : new Error(String(error));
+        this.#fail(failure);
+        throw failure;
+      }
+      let resumed: HarnessSession | undefined;
+      try {
+        resumed = await this.#resume({ skipSnapshot: true });
+        this.#validateResume(resumed);
+      } catch (error) {
+        await resumed?.close().catch(() => undefined);
+        const failure = error instanceof Error ? error : new Error(String(error));
+        this.#fail(failure);
+        throw failure;
+      }
+      this.#attach(resumed);
+      return resumed;
+    }
     if (!this.#suspended) return this.#current;
     let resumed: HarnessSession | undefined;
     try {

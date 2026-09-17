@@ -467,6 +467,40 @@ describe("Cursor native configuration", () => {
       await adapter.close();
     }
   });
+  it("resumes history without fetching the model catalog", async () => {
+    const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+      sessionId,
+    ) {
+      this.sessionId = sessionId ?? info.sessionId;
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "historyOnly", "get").mockReturnValue(true);
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const result = await adapter.open({
+        kind: "resume",
+        historyOnly: true,
+        cwd: process.cwd(),
+        nativeRef: {
+          harnessId: harnessIdSchema.parse("cursor-cli"),
+          nativeSessionId: info.sessionId,
+          formatVersion: 1,
+        },
+      });
+      expect(result.ok).toBe(true);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(result.value.executionReady).toBe(false);
+      expect(open).toHaveBeenCalledWith(info.sessionId, { historyOnly: true });
+      open.mockClear();
+      const snapshot = await result.value.readSnapshot();
+      expect(snapshot.ok).toBe(true);
+      expect(open).not.toHaveBeenCalled();
+    } finally {
+      await adapter.close();
+    }
+  });
   it("retries session open once when session/new returns no model catalog", async () => {
     const empty = {
       sessionId: info.sessionId,

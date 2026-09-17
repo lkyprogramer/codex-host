@@ -269,4 +269,71 @@ describe("ManagedHarnessSession", () => {
     await vi.waitFor(() => expect(initial.closed).toBe(true));
     expect(onFault).toHaveBeenCalledOnce();
   });
+
+  it("does not fault when a deferred history Session ends before live resume", async () => {
+    const history = session();
+    Object.defineProperty(history, "executionReady", { value: false });
+    const live = session();
+    const onFault = vi.fn();
+    const resume = vi.fn(async (options?: { skipSnapshot?: boolean }) => {
+      expect(options).toEqual({ skipSnapshot: true });
+      return live;
+    });
+    const managed = new ManagedHarnessSession({
+      session: history,
+      resume,
+      onActivity: () => undefined,
+      onFault,
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+    const started = await managed.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("turn-live"),
+      input: [{ type: "text", text: "continue" }],
+    });
+    expect(started.ok).toBe(true);
+    expect(history.closed).toBe(true);
+    expect(onFault).not.toHaveBeenCalled();
+    live.succeedTurn();
+    let faulted = false;
+    for (let index = 0; index < 8; index += 1) {
+      const next = await outputs.next();
+      if (next.done) break;
+      if (next.value.kind === "event" && next.value.event.type === "session.faulted") {
+        faulted = true;
+        break;
+      }
+      if (next.value.kind === "event" && next.value.event.type === "turn.completed") break;
+    }
+    expect(faulted).toBe(false);
+    await managed.close();
+  });
+
+  it("faults instead of opening a live Session when history cleanup fails", async () => {
+    const history = session();
+    Object.defineProperty(history, "executionReady", { value: false });
+    let closes = 0;
+    vi.spyOn(history, "close").mockImplementation(async () => {
+      closes += 1;
+      if (closes === 1) throw new Error("owned group remains");
+    });
+    const resume = vi.fn(async () => session());
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: history,
+      resume,
+      onActivity: () => undefined,
+      onFault,
+    });
+    await expect(
+      managed.execute({
+        type: "turn.start",
+        turnId: hostTurnIdSchema.parse("turn-live"),
+        input: [{ type: "text", text: "continue" }],
+      }),
+    ).rejects.toThrow("owned group remains");
+    expect(resume).not.toHaveBeenCalled();
+    expect(onFault).toHaveBeenCalledOnce();
+    await managed.close().catch(() => undefined);
+  });
 });

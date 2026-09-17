@@ -189,6 +189,7 @@ function sessionMetadata(record: ServerSession): object {
     },
     initialUsage: record.session.initialUsage,
     commands: record.session.commands !== undefined,
+    ...(record.session.executionReady === false ? { executionReady: false } : {}),
   };
 }
 

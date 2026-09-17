@@ -47,6 +47,7 @@ const resumeSchema = z
     nativeRef: nativeSessionRefSchema,
     cwd: cwdSchema,
     knownTurnRefs: z.array(nativeTurnRefSchema).max(100_000).optional(),
+    historyOnly: z.boolean().optional(),
   })
   .strict();
 const forkSchema = z

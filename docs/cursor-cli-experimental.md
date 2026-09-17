@@ -93,10 +93,13 @@ contract investigation before release acceptance.
   catalog is account-global: a working directory is only the ACP spawn path, not a
   cache key. Ready catalogs, missing install, and authentication failures are
   cached for five minutes and reused across directories. Empty directories,
-  timeouts, and other protocol failures are not retained. Inspect and Session open
-  share one empty-catalog retry in a new ACP process, including the older
-  `session/new` variant catalog with no model options. Same-session empty-directory
-  refetch remains a single read-only retry and never fabricates models.
+  timeouts, and other protocol failures are not retained. Inspect and live Session
+  open share one empty-catalog retry in a new ACP process, including the older
+  `session/new` variant catalog with no model options. Opening a stored Thread first
+  resumes history-only (authenticate and `session/load`, no model catalog); the live
+  catalog is fetched when the next Turn starts, without a second history snapshot
+  against that same native Session. Same-session empty-directory refetch remains a
+  single read-only retry and never fabricates models.
 - The native history format and operating-system authentication behavior require
   platform/version acceptance before formal product support is claimed.
 

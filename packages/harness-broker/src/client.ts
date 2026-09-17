@@ -68,6 +68,7 @@ interface SessionMetadata {
   initialState: HarnessSessionState;
   initialUsage: HostUsage | null;
   commands: boolean;
+  executionReady?: boolean;
 }
 
 interface PendingRequest {
@@ -145,6 +146,7 @@ function parseSessionMetadata(value: unknown): SessionMetadata {
     initialState: state,
     initialUsage: candidate.initialUsage === null ? null : parseHostUsage(candidate.initialUsage),
     commands: candidate.commands === true,
+    ...(candidate.executionReady === false ? { executionReady: false } : {}),
   };
 }
 
@@ -360,6 +362,7 @@ class BrokerConnection {
 class BrokeredHarnessSession implements HarnessSession {
   readonly harnessId: HarnessId;
   readonly outputs: AsyncIterable<HarnessOutput>;
+  readonly executionReady?: boolean;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   #connection: BrokerConnection;
   readonly commands?: HarnessCommandCapability;
@@ -382,6 +385,7 @@ class BrokeredHarnessSession implements HarnessSession {
     this.#metadata = metadata;
     this.#state = structuredClone(metadata.initialState);
     this.outputs = this.#channel.outputs;
+    if (metadata.executionReady === false) this.executionReady = false;
     if (metadata.commands) {
       this.commands = {
         list: async () => {

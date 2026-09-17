@@ -12,9 +12,11 @@ import {
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
   hostThreadIdSchema,
+  hostTurnIdSchema,
   nativeSessionRefSchema,
 } from "@codexhost/shared-contracts";
 import {
+  encodeClaudeTransportModel,
   encodeGrokTransportModel,
   encodeOmpTransportModel,
   encodeOpenCodeTransportModel,
@@ -525,6 +527,139 @@ describe("ExternalThreadRuntime register", () => {
       await adapter.close();
     },
   );
+});
+
+describe("deferred live resume", () => {
+  it("restores history without opening a live Session until execute", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const nativeRef = nativeSessionRefSchema.parse({
+      harnessId,
+      nativeSessionId: "native-history",
+      formatVersion: 1,
+    });
+    const history = new FakeHarnessSession(harnessId, undefined, undefined, nativeRef);
+    Object.defineProperty(history, "executionReady", { value: false });
+    const live = new FakeHarnessSession(harnessId, undefined, undefined, nativeRef);
+    const stored: StoredThreadRecordV1 = {
+      ...record(),
+      nativeSessionRef: nativeRef,
+    };
+    const order: string[] = [];
+    const originalHistoryClose = history.close.bind(history);
+    vi.spyOn(history, "close").mockImplementation(async () => {
+      order.push("close-history");
+      await originalHistoryClose();
+    });
+    const open = vi.fn(async (input: OpenSessionInput) => {
+      if (input.kind === "resume" && input.historyOnly)
+        return { ok: true as const, value: history };
+      order.push("open-live");
+      return { ok: true as const, value: live };
+    });
+    const restoringAdapter: HarnessAdapter = {
+      harnessId: adapter.harnessId,
+      inspect: (input) => adapter.inspect(input),
+      open,
+      close: () => adapter.close(),
+    };
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", restoringAdapter]]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const resolved = await runtime.resolve(hostThreadId);
+    expect(resolved.kind).toBe("external");
+    if (resolved.kind !== "external") throw new Error("Thread did not restore");
+    expect(open).toHaveBeenCalledWith(expect.objectContaining({ historyOnly: true }));
+    expect(
+      open.mock.calls.filter(([input]) => input.kind === "resume" && !input.historyOnly),
+    ).toHaveLength(0);
+    await resolved.thread.session.readSnapshot();
+    expect(
+      open.mock.calls.filter(([input]) => input.kind === "resume" && !input.historyOnly),
+    ).toHaveLength(0);
+    const started = await resolved.thread.session.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("turn-live"),
+      input: [{ type: "text", text: "continue" }],
+    });
+    expect(started.ok).toBe(true);
+    expect(
+      open.mock.calls.some(([input]) => input.kind === "resume" && input.historyOnly !== true),
+    ).toBe(true);
+    expect(order).toEqual(["close-history", "open-live"]);
+    expect(live.snapshotReads).toBe(0);
+    await adapter.close();
+  });
+
+  it("replays Permission Mode when a live restore ignores historyOnly", async () => {
+    const claudeHarnessId = harnessIdSchema.parse("claude-code");
+    const permissionModes = harnessPermissionModeCatalogSchema.parse({
+      modes: [
+        { id: "default", label: "Default" },
+        { id: "bypassPermissions", label: "Bypass" },
+      ],
+      defaultModeId: "default",
+    });
+    const defaultMode = harnessPermissionModeIdSchema.parse("default");
+    const storedMode = harnessPermissionModeIdSchema.parse("bypassPermissions");
+    const adapter = new FakeHarnessAdapter(
+      claudeHarnessId,
+      undefined,
+      true,
+      true,
+      null,
+      permissionModes,
+    );
+    const model = adapter.catalog.defaultModel;
+    if (!model) throw new Error("Fake Claude catalog has no default Model");
+    const created = await adapter.open({
+      kind: "create",
+      cwd: "/synthetic",
+      model,
+      permissionModeId: defaultMode,
+    });
+    if (!created.ok || !created.value.initialState.nativeRef) {
+      throw new Error("Fake Claude Session did not open");
+    }
+    const session = created.value;
+    const execute = vi.spyOn(session, "execute");
+    const stored: StoredThreadRecordV1 = {
+      ...record(),
+      harnessId: claudeHarnessId,
+      nativeSessionRef: created.value.initialState.nativeRef,
+      title: "Claude Thread",
+      transportModelId: encodeClaudeTransportModel(model, storedMode),
+    } as StoredThreadRecordV1;
+    const restoringAdapter: HarnessAdapter = {
+      harnessId: adapter.harnessId,
+      inspect: (input) => adapter.inspect(input),
+      open: (input) => adapter.open(input),
+      close: () => adapter.close(),
+    };
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["claude-code", restoringAdapter]]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const resolved = await runtime.resolve(hostThreadId);
+    expect(resolved.kind).toBe("external");
+    expect(execute).toHaveBeenCalledWith({
+      type: "permissionMode.select",
+      permissionModeId: storedMode,
+    });
+    await adapter.close();
+  });
 });
 
 describe("bounded native history", () => {

@@ -11,6 +11,7 @@ import {
   type HarnessSessionState,
   type HostCommand,
   type HostThreadSnapshot,
+  type HarnessModelRef,
   type InspectHarnessInput,
   type OpenSessionInput,
   type TurnOutcome,
@@ -255,16 +256,25 @@ export class CursorAdapter implements HarnessAdapter {
         input.executionPolicy === "unattended-full-access" &&
         (!input.permissionModeId || input.permissionModeId === "agent"),
     };
+    const historyOnly = input.kind === "resume" && input.historyOnly === true;
     let transport: CursorTransport | undefined;
     try {
       if (input.kind === "resume")
         readCursorNativeTurns(input.nativeRef.nativeSessionId, options.cwd, options.environment);
       const sessionId = input.kind === "resume" ? input.nativeRef.nativeSessionId : undefined;
-      const opened = await openCursorCatalog(() => new CursorTransport(options), sessionId);
-      transport = opened.transport;
-      this.#openingTransports.add(transport);
-      let info = opened.info;
-      if (input.model) {
+      let info: CursorSessionInfo;
+      if (historyOnly) {
+        transport = new CursorTransport(options);
+        this.#openingTransports.add(transport);
+        info = await transport.open(sessionId, { historyOnly: true });
+      } else {
+        const opened = await openCursorCatalog(() => new CursorTransport(options), sessionId);
+        transport = opened.transport;
+        this.#openingTransports.add(transport);
+        info = opened.info;
+      }
+      if (!transport) throw new Error("Cursor transport failed to open");
+      if (!historyOnly && input.model) {
         const value = cursorNativeModel(info, input.model.id);
         const selected = await transport.configure("model", value);
         if (
@@ -276,28 +286,34 @@ export class CursorAdapter implements HarnessAdapter {
         }
         info = { ...info, configOptions: selected.configOptions };
       }
+      const openedTransport = transport;
       const session = new CursorSession(
-        transport,
+        openedTransport,
         info,
         () => {
           this.#sessions.delete(session);
         },
         input.kind === "create",
+        historyOnly ? input.model : undefined,
       );
       if (input.kind === "resume") {
-        const native = readCursorNativeTurns(transport.sessionId, options.cwd, options.environment);
-        cursorSnapshot(transport.sessionId, native, transport.replay);
+        const native = readCursorNativeTurns(
+          openedTransport.sessionId,
+          options.cwd,
+          options.environment,
+        );
+        cursorSnapshot(openedTransport.sessionId, native, openedTransport.replay);
         if (
           input.knownTurnRefs?.some(
             (ref) =>
               ref.harnessId !== this.harnessId ||
-              ref.nativeSessionId !== opened.transport.sessionId ||
+              ref.nativeSessionId !== openedTransport.sessionId ||
               !native.some((turn) => turn.id === ref.nativeTurnKey),
           )
         )
           throw new Error("Saved Cursor turn identity no longer exists in native history");
       }
-      if (input.permissionModeId) {
+      if (!historyOnly && input.permissionModeId) {
         const selected = await session.execute({
           type: "permissionMode.select",
           permissionModeId: input.permissionModeId,
@@ -371,11 +387,32 @@ export class CursorSession implements HarnessSession {
     readonly info: CursorSessionInfo,
     readonly onClose: () => void,
     created = true,
+    fallbackModel?: HarnessModelRef,
   ) {
     this.#fresh = created;
-    const currentModel = cursorModels(info).current;
-    if (!currentModel)
-      throw new Error("Cursor did not report current model parameters; select an explicit model");
+    let currentModel: string | undefined;
+    try {
+      currentModel = cursorModels(info).current;
+    } catch {
+      currentModel = undefined;
+    }
+    if (!currentModel) {
+      if (!this.transport.historyOnly) {
+        throw new Error("Cursor did not report current model parameters; select an explicit model");
+      }
+      this.initialState = {
+        nativeRef: nativeSessionRefSchema.parse({
+          harnessId: "cursor-cli",
+          nativeSessionId: transport.sessionId,
+          formatVersion: 1,
+        }),
+        ...(fallbackModel ? { effectiveModel: fallbackModel } : {}),
+        effectivePermissionModeId: harnessPermissionModeIdSchema.parse(
+          info.modes?.currentModeId ?? "agent",
+        ),
+      };
+      return;
+    }
     this.initialState = {
       nativeRef: nativeSessionRefSchema.parse({
         harnessId: "cursor-cli",
@@ -387,6 +424,9 @@ export class CursorSession implements HarnessSession {
         info.modes?.currentModeId ?? "agent",
       ),
     };
+  }
+  get executionReady(): boolean {
+    return !this.transport.historyOnly;
   }
   #native(allowMissing = false) {
     return readCursorNativeTurns(
@@ -400,28 +440,40 @@ export class CursorSession implements HarnessSession {
     if (this.#closed) return rejected("invalidState", "Cursor session is closed");
     if (this.#active || this.#configuring) return rejected("sessionBusy", "Cursor session is busy");
     this.#configuring = true;
-    const replay = new CursorTransport(this.transport.options);
-    this.#replays.add(replay);
     try {
       const before = this.#native(this.#fresh);
       if (before.length === 0 && this.#fresh)
         return { ok: true, value: { turns: [], state: structuredClone(this.initialState) } };
-      await replay.open(this.transport.sessionId, { historyOnly: true });
-      const after = this.#native();
-      if (JSON.stringify(before) !== JSON.stringify(after))
-        throw new Error("Cursor native history changed during snapshot read");
-      return {
-        ok: true,
-        value: {
-          ...cursorSnapshot(this.transport.sessionId, after, replay.replay),
-          state: structuredClone(this.initialState),
-        },
-      };
+      if (this.transport.historyOnly) {
+        return {
+          ok: true,
+          value: {
+            ...cursorSnapshot(this.transport.sessionId, before, this.transport.replay),
+            state: structuredClone(this.initialState),
+          },
+        };
+      }
+      const replay = new CursorTransport(this.transport.options);
+      this.#replays.add(replay);
+      try {
+        await replay.open(this.transport.sessionId, { historyOnly: true });
+        const after = this.#native();
+        if (JSON.stringify(before) !== JSON.stringify(after))
+          throw new Error("Cursor native history changed during snapshot read");
+        return {
+          ok: true,
+          value: {
+            ...cursorSnapshot(this.transport.sessionId, after, replay.replay),
+            state: structuredClone(this.initialState),
+          },
+        };
+      } finally {
+        await replay.close();
+        this.#replays.delete(replay);
+      }
     } catch (error) {
       return { ok: false, error: cursorError(error) };
     } finally {
-      await replay.close();
-      this.#replays.delete(replay);
       this.#configuring = false;
     }
   }

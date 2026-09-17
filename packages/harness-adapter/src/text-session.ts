@@ -90,6 +90,8 @@ export interface ResumeSessionInput {
   environment?: Record<string, string | undefined>;
   knownTurnRefs?: NativeTurnRef[];
   permissionModeId?: HarnessPermissionModeId;
+  /** Replay native history without preparing execution or fetching a model catalog. */
+  historyOnly?: boolean;
 }
 
 export interface ForkSessionInput {
@@ -555,6 +557,11 @@ export interface HarnessSession {
   readonly workMode?: HarnessWorkModeControl;
   readonly steering?: HarnessSteeringControl;
   readonly resourceLifecycle?: HarnessResourceLifecycle;
+  /**
+   * False when the Session can replay history but cannot start native work.
+   * Host replaces it with a live resume before execute. Omitted means ready.
+   */
+  readonly executionReady?: boolean;
 
   refreshUsage?(): Promise<void>;
   readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>>;

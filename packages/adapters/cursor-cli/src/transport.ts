@@ -67,6 +67,9 @@ export class CursorTransport {
   get closed(): boolean {
     return this.#closed;
   }
+  get historyOnly(): boolean {
+    return this.#historyOnly;
+  }
   #rejectFault!: (error: Error) => void;
   readonly #failed = new Promise<never>((_, reject) => {
     this.#rejectFault = reject;
