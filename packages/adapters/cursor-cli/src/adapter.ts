@@ -60,7 +60,8 @@ export interface CursorAdapterOptions {
 }
 const EMPTY_CATALOG =
   /no parameterized models|no model catalog|no parameterized model directory|no model configuration/iu;
-const INSPECTION_CACHE_MS = 5 * 60_000;
+const READY_INSPECTION_CACHE_MS = 7 * 24 * 60 * 60_000;
+const ERROR_INSPECTION_CACHE_MS = 5 * 60_000;
 
 type CursorInspectionEntry = {
   close(): Promise<void>;
@@ -69,10 +70,14 @@ type CursorInspectionEntry = {
   result: Promise<HarnessInspection>;
 };
 
+// The model catalog is account-global and changes on a weekly cadence at most,
+// while probing is expensive (full CLI startup plus remote metadata). Keep ready
+// catalogs for a week; short error entries stay at five minutes so a failed
+// login or install repair is noticed promptly. Explicit refresh always bypasses.
 function inspectionCacheMs(inspection: HarnessInspection): number {
-  if (inspection.status === "ready" || inspection.status === "notInstalled")
-    return INSPECTION_CACHE_MS;
-  if (inspection.error.code === "authenticationRequired") return INSPECTION_CACHE_MS;
+  if (inspection.status === "ready") return READY_INSPECTION_CACHE_MS;
+  if (inspection.status === "notInstalled") return ERROR_INSPECTION_CACHE_MS;
+  if (inspection.error.code === "authenticationRequired") return ERROR_INSPECTION_CACHE_MS;
   return 0;
 }
 
@@ -275,7 +280,14 @@ export class CursorAdapter implements HarnessAdapter {
       }
       if (!transport) throw new Error("Cursor transport failed to open");
       if (!historyOnly && input.model) {
-        const value = cursorNativeModel(info, input.model.id);
+        let value: string;
+        try {
+          value = cursorNativeModel(info, input.model.id);
+        } catch (error) {
+          // The ref was offered from a cached catalog the live one no longer contains.
+          this.#expireInspection();
+          throw error;
+        }
         const selected = await transport.configure("model", value);
         if (
           !selected.configOptions.some(
@@ -329,6 +341,9 @@ export class CursorAdapter implements HarnessAdapter {
       this.#openingTransports.delete(transport);
       return { ok: true, value: session };
     } catch (error) {
+      const failure = cursorError(error);
+      if (failure.code === "authenticationRequired" || failure.code === "notInstalled")
+        this.#expireInspection();
       try {
         if (transport) {
           await transport.close();
@@ -337,8 +352,16 @@ export class CursorAdapter implements HarnessAdapter {
       } catch (cleanupError) {
         return { ok: false, error: cursorError(cleanupError) };
       }
-      return { ok: false, error: cursorError(error) };
+      return { ok: false, error: failure };
     }
+  }
+  /**
+   * A live session outcome that contradicts the settled cached inspection (login
+   * lost, install removed, catalog drifted) must not stay hidden behind the long
+   * ready TTL. In-flight probes are left alone so callers keep sharing them.
+   */
+  #expireInspection(): void {
+    if (this.#inspection && !this.#inspection.pending) this.#inspection.expires = 0;
   }
   close(): Promise<void> {
     this.#closed = true;

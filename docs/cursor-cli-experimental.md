@@ -91,9 +91,12 @@ contract investigation before release acceptance.
 - Model inspection opens one empty native ACP session per cache refresh because
   the catalog is returned by `session/new`. It submits no model prompt. The model
   catalog is account-global: a working directory is only the ACP spawn path, not a
-  cache key. Ready catalogs, missing install, and authentication failures are
-  cached for five minutes and reused across directories. Empty directories,
-  timeouts, and other protocol failures are not retained. Inspect and live Session
+  cache key. Ready catalogs are cached for seven days; missing install and
+  authentication failures are cached for five minutes. Both are reused across
+  directories. Empty directories, timeouts, and other protocol failures are not
+  retained. A cached ready catalog also expires early when a live Session open
+  reports a missing install, an authentication failure, or a requested model that
+  the live catalog no longer contains. Inspect and live Session
   open share one empty-catalog retry in a new ACP process, including the older
   `session/new` variant catalog with no model options. Opening a stored Thread first
   resumes history-only (authenticate and `session/load`, no model catalog); the live

@@ -261,10 +261,10 @@ describe("Cursor native configuration", () => {
       await first;
       await adapter.inspect();
       expect(open).toHaveBeenCalledTimes(1);
-      clock.mockReturnValue(699_999);
+      clock.mockReturnValue(400_000 + 7 * 24 * 60 * 60_000 - 1);
       await adapter.inspect();
       expect(open).toHaveBeenCalledTimes(1);
-      clock.mockReturnValue(700_001);
+      clock.mockReturnValue(400_000 + 7 * 24 * 60 * 60_000 + 1);
       await adapter.inspect();
       expect(open).toHaveBeenCalledTimes(2);
     } finally {
@@ -316,20 +316,35 @@ describe("Cursor native configuration", () => {
     expect(() => cursorNativeModel(info, "unknown")).toThrow();
     expect(cursorCatalog(info).thinkingOptions).toEqual([]);
   });
-  it("caches failed inspection and retries only on explicit refresh or expiry", async () => {
-    const open = vi
-      .spyOn(CursorTransport.prototype, "open")
-      .mockRejectedValue(new Error("not logged in"));
-    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
-    const adapter = new CursorAdapter();
-    const first = await adapter.inspect();
-    expect(harnessInspectionSchema.safeParse(first).success).toBe(true);
-    expect(await adapter.inspect()).toEqual(first);
-    expect(open).toHaveBeenCalledTimes(1);
-    await adapter.inspect({ refresh: true });
-    expect(open).toHaveBeenCalledTimes(2);
-    await adapter.close();
-  });
+  it.each([
+    ["not logged in", "unavailable"],
+    ["Cursor CLI is not installed", "notInstalled"],
+  ])(
+    "caches failed inspection (%s) for five minutes and retries on explicit refresh",
+    async (message, status) => {
+      const clock = vi.spyOn(Date, "now").mockReturnValue(0);
+      const open = vi
+        .spyOn(CursorTransport.prototype, "open")
+        .mockRejectedValue(new Error(message));
+      vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+      const adapter = new CursorAdapter();
+      try {
+        const first = await adapter.inspect();
+        expect(harnessInspectionSchema.safeParse(first).success).toBe(true);
+        expect(first.status).toBe(status);
+        clock.mockReturnValue(5 * 60_000 - 1);
+        expect(await adapter.inspect()).toEqual(first);
+        expect(open).toHaveBeenCalledTimes(1);
+        await adapter.inspect({ refresh: true });
+        expect(open).toHaveBeenCalledTimes(2);
+        clock.mockReturnValue(5 * 60_000 - 1 + 5 * 60_000 + 1);
+        await adapter.inspect();
+        expect(open).toHaveBeenCalledTimes(3);
+      } finally {
+        await adapter.close();
+      }
+    },
+  );
   it("reuses a ready model catalog across working directories", async () => {
     const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
       this: CursorTransport,
@@ -347,6 +362,69 @@ describe("Cursor native configuration", () => {
         status: "ready",
       });
       expect(open).toHaveBeenCalledTimes(1);
+    } finally {
+      await adapter.close();
+    }
+  });
+  it.each([
+    ["not logged in", true],
+    ["Cursor CLI is not installed", true],
+    ["Cursor ACP session/new: Internal error", false],
+  ])(
+    "expires a ready catalog when opening a session fails with %s (expires=%s)",
+    async (message, expires) => {
+      const open = vi
+        .spyOn(CursorTransport.prototype, "open")
+        .mockImplementationOnce(async function (this: CursorTransport) {
+          this.sessionId = info.sessionId;
+          return info;
+        })
+        .mockRejectedValueOnce(new Error(message))
+        .mockImplementation(async function (this: CursorTransport) {
+          this.sessionId = info.sessionId;
+          return info;
+        });
+      vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+      const adapter = new CursorAdapter();
+      try {
+        expect(await adapter.inspect()).toMatchObject({ status: "ready" });
+        const result = await adapter.open({
+          kind: "create",
+          cwd: process.cwd(),
+          executionPolicy: "default",
+        });
+        expect(result.ok).toBe(false);
+        expect(open).toHaveBeenCalledTimes(2);
+        await adapter.inspect();
+        expect(open).toHaveBeenCalledTimes(expires ? 3 : 2);
+      } finally {
+        await adapter.close();
+      }
+    },
+  );
+  it("expires a ready catalog when the requested model is missing from the live catalog", async () => {
+    const open = vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      this.sessionId = info.sessionId;
+      return info;
+    });
+    const configure = vi.spyOn(CursorTransport.prototype, "configure");
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      expect(await adapter.inspect()).toMatchObject({ status: "ready" });
+      const result = await adapter.open({
+        kind: "create",
+        cwd: process.cwd(),
+        executionPolicy: "default",
+        model: cursorModelRef("retired-model[effort=high]"),
+      });
+      expect(result.ok).toBe(false);
+      expect(configure).not.toHaveBeenCalled();
+      expect(open).toHaveBeenCalledTimes(2);
+      await adapter.inspect();
+      expect(open).toHaveBeenCalledTimes(3);
     } finally {
       await adapter.close();
     }
