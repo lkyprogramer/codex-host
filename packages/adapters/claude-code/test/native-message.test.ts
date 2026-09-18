@@ -885,13 +885,64 @@ describe("Claude native Turn interpretation", () => {
     );
   });
 
-  it("classifies authentication evidence", () => {
+  it("classifies authentication evidence and carries the native detail", () => {
     const turn = new ClaudeNativeTurnAccumulator();
 
-    turn.consume(assistant("", "authentication_failed"));
-    expect(turn.consume(result({ is_error: true, terminal_reason: "api_error" })).terminal).toEqual(
-      { status: "failed", kind: "authentication" },
-    );
+    turn.consume(assistant("Login expired · Please run /login", "authentication_failed"));
+    expect(
+      turn.consume(
+        result({
+          is_error: true,
+          terminal_reason: "api_error",
+          result: "Login expired · Please run /login",
+        }),
+      ).terminal,
+    ).toEqual({
+      status: "failed",
+      kind: "authentication",
+      detail: "authentication_failed; Login expired · Please run /login",
+    });
+  });
+
+  it("classifies Claude Code sign-in prompts in a failed result text", () => {
+    const turn = new ClaudeNativeTurnAccumulator();
+
+    expect(
+      turn.consume(result({ is_error: true, result: "OAuth token revoked · Please run /login" }))
+        .terminal,
+    ).toEqual({
+      status: "failed",
+      kind: "authentication",
+      detail: "OAuth token revoked · Please run /login",
+    });
+  });
+
+  it("never reads authentication out of a successful answer text", () => {
+    const turn = new ClaudeNativeTurnAccumulator();
+
+    turn.consume(assistant("Use OAuth; if you are not logged in, run /login first."));
+    expect(
+      turn.consume(result({ result: "Use OAuth; if you are not logged in, run /login first." }))
+        .terminal,
+    ).toEqual({ status: "succeeded" });
+  });
+
+  it("carries native error detail for generic failures", () => {
+    const turn = new ClaudeNativeTurnAccumulator();
+
+    expect(
+      turn.consume(
+        result({
+          subtype: "error_during_execution",
+          is_error: true,
+          errors: ["API Error: 529 overloaded", "API Error: 529 overloaded"],
+        }),
+      ).terminal,
+    ).toEqual({
+      status: "failed",
+      kind: "native",
+      detail: "API Error: 529 overloaded",
+    });
   });
 
   it("requires a requested cancel and authoritative aborted terminal", () => {

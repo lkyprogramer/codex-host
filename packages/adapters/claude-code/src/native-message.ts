@@ -13,6 +13,7 @@ const AUTHENTICATION_ERRORS = new Set(["authentication_failed", "oauth_org_not_a
 const SUBAGENT_TOOLS = new Set(["Agent", "Task", "SendMessage"]);
 const SUBAGENT_DESCRIPTION_LIMIT = 500;
 const SUBAGENT_SUMMARY_LIMIT = 2_000;
+const NATIVE_FAILURE_DETAIL_LIMIT = 500;
 
 type ClaudeNativeEvent = Exclude<
   ClaudeTurnEvent,
@@ -117,22 +118,36 @@ function targetedSubagentId(argumentsValue: unknown): string | undefined {
   );
 }
 
-function includesAuthenticationFailure(
-  message: Record<string, unknown>,
-  errors: string[],
-): boolean {
+function nativeErrorTexts(message: Record<string, unknown>, errors: string[]): string[] {
+  const texts = [...errors];
+  // `result` carries the native error text only on a failed result; on success
+  // it is the final answer and must never feed error classification.
+  if (message.is_error === true && typeof message.result === "string") texts.push(message.result);
+  if (Array.isArray(message.errors)) {
+    for (const error of message.errors) if (typeof error === "string") texts.push(error);
+  }
+  return [...new Set(texts.map((text) => text.trim()).filter((text) => text.length > 0))];
+}
+
+function includesAuthenticationFailure(texts: string[], errors: string[]): boolean {
   if (errors.some((error) => AUTHENTICATION_ERRORS.has(error))) return true;
-  const text = [message.result, ...(Array.isArray(message.errors) ? message.errors : [])]
-    .filter((value): value is string => typeof value === "string")
-    .join(" ")
-    .toLowerCase();
+  const text = texts.join(" ").toLowerCase();
   return (
-    text.includes("not logged in") || text.includes("invalid api key") || text.includes("oauth")
+    text.includes("not logged in") ||
+    text.includes("invalid api key") ||
+    text.includes("oauth") ||
+    // Claude Code's own sign-in prompts ("Login expired · Please run /login").
+    text.includes("run /login")
   );
 }
 
-function failure(kind: ClaudeTransportFailureKind): ClaudeTransportTurnResult {
-  return { status: "failed", kind };
+function failure(kind: ClaudeTransportFailureKind, detail?: string): ClaudeTransportTurnResult {
+  return { status: "failed", kind, ...(detail ? { detail } : {}) };
+}
+
+function nativeFailureDetail(texts: string[]): string | undefined {
+  if (texts.length === 0) return undefined;
+  return texts.join("; ").slice(0, NATIVE_FAILURE_DETAIL_LIMIT);
 }
 
 function safeNonNegativeInteger(value: unknown): value is number {
@@ -467,13 +482,14 @@ export class ClaudeNativeTurnAccumulator {
       this.#assistantErrors.length === 0;
     if (nativeSuccess && this.#tools.size > 0) this.#protocolConflict = true;
 
+    const errorTexts = nativeSuccess ? [] : nativeErrorTexts(message, this.#assistantErrors);
     let terminal: ClaudeTransportTurnResult;
     if (this.#protocolConflict) {
       terminal = failure("protocol");
     } else if (this.#textConflict) {
       terminal = failure("textConflict");
-    } else if (includesAuthenticationFailure(message, this.#assistantErrors)) {
-      terminal = failure("authentication");
+    } else if (!nativeSuccess && includesAuthenticationFailure(errorTexts, this.#assistantErrors)) {
+      terminal = failure("authentication", nativeFailureDetail(errorTexts));
     } else if (this.#cancelRequested && ABORTED_TERMINALS.has(terminalReason)) {
       terminal = { status: "cancelled", reason: terminalReason };
     } else if (this.#cancelRequested) {
@@ -481,7 +497,7 @@ export class ClaudeNativeTurnAccumulator {
     } else if (nativeSuccess) {
       terminal = { status: "succeeded" };
     } else {
-      terminal = failure("native");
+      terminal = failure("native", nativeFailureDetail(errorTexts));
     }
     return { events, terminal };
   }

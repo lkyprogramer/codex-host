@@ -591,13 +591,16 @@ function turnStatus(
 }
 
 function turnError(outcome: TurnCompletedEvent["outcome"]): JsonObject | null {
-  return outcome.status === "failed"
-    ? {
-        message: outcome.error.message,
-        codexErrorInfo: "other",
-        additionalDetails: null,
-      }
-    : null;
+  return outcome.status === "failed" ? harnessTurnError(outcome.error) : null;
+}
+
+/** Native failure detail rides on Codex's own additionalDetails slot instead of a new field. */
+function harnessTurnError(error: { message: string; diagnostic?: string }): JsonObject {
+  return {
+    message: error.message,
+    codexErrorInfo: "other",
+    additionalDetails: error.diagnostic ?? null,
+  };
 }
 
 function historicalStatus(outcome: HistoricalTurnOutcome): "completed" | "interrupted" | "failed" {
@@ -618,13 +621,7 @@ export function projectHistoricalTurn(input: HistoricalTurnProjectionInput): Jso
     startedAtMs >= 0 &&
     completedAtMs >= startedAtMs;
   const error =
-    snapshot.outcome.status === "failed"
-      ? {
-          message: snapshot.outcome.error.message,
-          codexErrorInfo: "other",
-          additionalDetails: null,
-        }
-      : null;
+    snapshot.outcome.status === "failed" ? harnessTurnError(snapshot.outcome.error) : null;
   return {
     id: turnId,
     status: historicalStatus(snapshot.outcome),
@@ -741,7 +738,9 @@ export class CodexTurnProjector {
             return [projectItem(projected.item, projected.outcome, this.#cwd)];
           }
           if (projected.item.type === "subagentDelegation") {
-            return [projectItem(projected.item, projected.outcome, this.#cwd, true, this.#threadId)];
+            return [
+              projectItem(projected.item, projected.outcome, this.#cwd, true, this.#threadId),
+            ];
           }
           const fileItem = wireFileChangeItem(projected);
           return fileItem ? [projectItem(fileItem, projected.outcome, this.#cwd)] : [];
@@ -1157,7 +1156,9 @@ export class CodexTurnProjector {
             return [projectItem(projected.item, projected.outcome, this.#cwd)];
           }
           if (projected.item.type === "subagentDelegation") {
-            return [projectItem(projected.item, projected.outcome, this.#cwd, true, this.#threadId)];
+            return [
+              projectItem(projected.item, projected.outcome, this.#cwd, true, this.#threadId),
+            ];
           }
           const fileItem = wireFileChangeItem(projected);
           return fileItem ? [projectItem(fileItem, projected.outcome, this.#cwd)] : [];

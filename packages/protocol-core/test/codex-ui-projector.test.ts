@@ -1512,14 +1512,14 @@ describe("Codex UI projector", () => {
       turnId,
       outcome: {
         status: "failed",
-        error: { code: "nativeFailure", message, retryable: false },
+        error: { code: "nativeFailure", message, retryable: false, diagnostic: "API Error: 503" },
       },
     });
 
     const error = {
       message,
       codexErrorInfo: "other",
-      additionalDetails: null,
+      additionalDetails: "API Error: 503",
     };
     expect(completed.messages).toEqual([
       {

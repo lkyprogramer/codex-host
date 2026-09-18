@@ -345,12 +345,14 @@ function invalidState(message: string): HarnessError {
   return { code: "invalidState", message, retryable: false };
 }
 
-function transportFailure(kind: ClaudeTransportFailureKind): HarnessError {
+function transportFailure(kind: ClaudeTransportFailureKind, detail?: string): HarnessError {
+  const diagnostic = detail ? { diagnostic: detail } : {};
   if (kind === "authentication") {
     return {
       code: "authenticationRequired",
       message: "Claude Code authentication is required",
       retryable: true,
+      ...diagnostic,
     };
   }
   if (kind === "protocol") {
@@ -369,6 +371,7 @@ function transportFailure(kind: ClaudeTransportFailureKind): HarnessError {
           ? "Claude Code cancellation could not be proven"
           : "Claude Code Turn failed",
     retryable: kind !== "textConflict",
+    ...diagnostic,
   };
 }
 

@@ -14,7 +14,7 @@ export type ClaudeTransportFailureKind =
 export type ClaudeTransportTurnResult =
   | { status: "succeeded" }
   | { status: "cancelled"; reason: string }
-  | { status: "failed"; kind: ClaudeTransportFailureKind };
+  | { status: "failed"; kind: ClaudeTransportFailureKind; detail?: string };
 
 export interface ClaudeQuestionOption {
   label: string;
