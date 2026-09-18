@@ -518,6 +518,7 @@ class ClaudeHarnessSession implements HarnessSession {
   #pendingClaimed = false;
   #submittedInput = false;
   #startupTask: Promise<ClaudeTurnTransport> | null = null;
+  #recycleTask: Promise<void> | null = null;
   readonly #randomUUID: () => string;
   #requestedModel: HarnessModelRef | undefined;
   #requestedPermissionModeId: HarnessPermissionModeId;
@@ -1023,6 +1024,7 @@ class ClaudeHarnessSession implements HarnessSession {
       this.#configurationTask ||
       this.#readingHistory ||
       this.#startupTask ||
+      this.#recycleTask ||
       this.#hardCancelTask ||
       this.#contextRefreshInFlight ||
       this.#contextRefreshPending ||
@@ -1398,6 +1400,7 @@ class ClaudeHarnessSession implements HarnessSession {
 
   #ensureTransport(): Promise<ClaudeTurnTransport> {
     if (this.#startupTask) return this.#startupTask;
+    if (this.#recycleTask) return this.#recycleTask.then(() => this.#ensureTransport());
     if (this.#transport) return Promise.resolve(this.#transport);
     const task = this.#startTransport();
     this.#startupTask = task;
@@ -2012,8 +2015,33 @@ class ClaudeHarnessSession implements HarnessSession {
     } else if (result.status === "cancelled") {
       this.#finish(active, { status: "cancelled", reason: result.reason });
     } else {
-      this.#finishFailed(active, transportFailure(result.kind));
+      this.#finishFailed(active, transportFailure(result.kind, result.detail));
+      // Claude Code pins a rejected OAuth refresh to the process: the dead refresh
+      // token stays in its in-memory set, so every later request in this process
+      // fails the same way even after another process stored fresh credentials.
+      // Only a new process re-reads them.
+      if (result.kind === "authentication") this.#recycleTransport();
     }
+  }
+
+  #recycleTransport(): void {
+    const transport = this.#transport;
+    if (!transport || this.#recycleTask || this.#hardCancelTask || this.#phase !== "open") return;
+    // Retain the Transport until shutdown is confirmed: no new process may resume
+    // the same native history while the old one could still write to it.
+    this.#recycleTask = transport
+      .close()
+      .then(
+        () => {
+          if (this.#phase !== "open" || this.#transport !== transport) return;
+          this.#transport = null;
+          this.#openMode = "resume";
+        },
+        () => this.#fault(faultError()),
+      )
+      .finally(() => {
+        this.#recycleTask = null;
+      });
   }
 
   #requestContextUsage(

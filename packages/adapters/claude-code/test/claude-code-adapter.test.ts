@@ -619,9 +619,9 @@ describe("Claude Code HarnessAdapter", () => {
     });
 
     await session.execute(textTurn("still-active"));
-    await expect(
-      lifecycle.suspend(new AbortController().signal),
-    ).resolves.toMatchObject({ status: "busy" });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
     expect(transports[0]?.close).not.toHaveBeenCalled();
     await session.close();
     await adapter.close();
@@ -2277,9 +2277,9 @@ describe("Claude Code HarnessAdapter", () => {
     });
     const lifecycle = session.resourceLifecycle;
     if (!lifecycle) throw new Error("Missing idle lifecycle");
-    await expect(
-      lifecycle.suspend(new AbortController().signal),
-    ).resolves.toMatchObject({ status: "busy" });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
     expect(transport.close).not.toHaveBeenCalled();
     transport.autonomousTurnHandler?.({
       nativeTurnKey: "task-notification-1",
@@ -5124,17 +5124,93 @@ describe("Claude Code HarnessAdapter", () => {
     await nextEvent(iterator);
     await nextEvent(iterator);
     await nextEvent(iterator);
-    transports[0]?.finish({ status: "failed", kind: "authentication" });
+    transports[0]?.finish({ status: "failed", kind: "native", detail: "API Error: 500" });
     expect(await nextEvent(iterator)).toMatchObject({
       type: "item.completed",
-      snapshot: { outcome: { status: "failed", error: { code: "authenticationRequired" } } },
+      snapshot: {
+        outcome: {
+          status: "failed",
+          error: { code: "nativeFailure", diagnostic: "API Error: 500" },
+        },
+      },
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "failed", error: { code: "nativeFailure", diagnostic: "API Error: 500" } },
+    });
+    await expect(session.execute(textTurn("retry"))).resolves.toMatchObject({ ok: true });
+    expect(transports).toHaveLength(1);
+    transports[0]?.finish({ status: "succeeded" });
+    await session.close();
+  });
+
+  it("recycles the native process after an authentication failure so the next Turn re-reads credentials", async () => {
+    const { adapter, dependencies, transports } = fixture();
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+
+    await session.execute(textTurn("expired"));
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    transports[0]?.finish({
+      status: "failed",
+      kind: "authentication",
+      detail: "authentication_failed; Login expired · Please run /login",
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "item.completed",
+      snapshot: {
+        outcome: {
+          status: "failed",
+          error: {
+            code: "authenticationRequired",
+            diagnostic: "authentication_failed; Login expired · Please run /login",
+          },
+        },
+      },
     });
     expect(await nextEvent(iterator)).toMatchObject({
       type: "turn.completed",
       outcome: { status: "failed", error: { code: "authenticationRequired" } },
     });
-    await expect(session.execute(textTurn("retry"))).resolves.toMatchObject({ ok: true });
-    transports[0]?.finish({ status: "succeeded" });
+    await vi.waitFor(() => expect(transports[0]?.close).toHaveBeenCalled());
+    // A queued follow-up arrives immediately: it must wait for the old process to
+    // stop, then resume the same native Session in a fresh process.
+    await expect(session.execute(textTurn("queued"))).resolves.toMatchObject({ ok: true });
+    expect(transports).toHaveLength(2);
+    expect(vi.mocked(dependencies.createTransport).mock.calls[1]?.[0]).toMatchObject({
+      openMode: "resume",
+      sessionId: transports[0]?.sessionId,
+    });
+    transports[1]?.finish({ status: "succeeded" });
+    await session.close();
+  });
+
+  it("does not resume the same native history while a recycled process is still closing", async () => {
+    const { adapter, transports } = fixture({ closeTimeoutMs: 20 });
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+
+    await session.execute(textTurn("expired"));
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    const transport = transports[0];
+    if (!transport) throw new Error("Expected an active Transport");
+    const closing = deferred<undefined>();
+    transport.close.mockImplementation(() => closing.promise);
+    transport.finish({ status: "failed", kind: "authentication" });
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    await vi.waitFor(() => expect(transport.close).toHaveBeenCalled());
+    const retry = session.execute(textTurn("queued"));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(transports).toHaveLength(1);
+    closing.resolve(undefined);
+    await expect(retry).resolves.toMatchObject({ ok: true });
+    expect(transports).toHaveLength(2);
+    transports[1]?.finish({ status: "succeeded" });
     await session.close();
   });
 
