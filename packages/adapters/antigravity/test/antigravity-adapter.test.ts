@@ -1046,6 +1046,151 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
+    // agy 1.2.6 print mode reports a retried-and-recovered API error as the
+    // terminal result: "Run: attempt 1 failed (...), retrying in 4s" in its log,
+    // then more successful generations, a complete final response, and still
+    // `status: "ERROR"` carrying the attempt-1 text.
+    const recoveredRetryError =
+      "API error (attempt 1): UNAVAILABLE (code 503): No capacity available for model gemini-3.8-flash-high on the server";
+
+    async function runErrorResultTurn(streamLines: string[]) {
+      const { command, cwd, cleanup } = await fakeStreamingAgy(streamLines);
+      const adapter = new AntigravityAdapter({ command });
+      const events: HostEvent[] = [];
+      try {
+        const opened = await adapter.open({ kind: "create", cwd });
+        expect(opened.ok).toBe(true);
+        if (!opened.ok) throw new Error(opened.error.message);
+        const session = opened.value;
+        const iterator = session.outputs[Symbol.asyncIterator]();
+        await session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse("turn-retry"),
+          input: [{ type: "text", text: "trigger retry" }],
+        });
+        for (;;) {
+          const event = await nextEvent(iterator);
+          events.push(event);
+          if (event.type === "turn.completed") break;
+        }
+        await session.close();
+      } finally {
+        await adapter.close();
+        await cleanup();
+      }
+      return events;
+    }
+
+    function retryStream(input: {
+      response: string;
+      error: string;
+      toolState?: "DONE" | "ERROR";
+    }): string[] {
+      return [
+        JSON.stringify({
+          event: "init",
+          init: { permission_mode: "default" },
+          conversation_id: "conv-retry",
+        }),
+        JSON.stringify({
+          event: "step_update",
+          step_update: {
+            conversation_id: "conv-retry",
+            step_index: 1,
+            state: input.toolState ?? "DONE",
+            step_type: "tool",
+            tool_name: "run_command",
+            tool_info: { name: "run_command", parameters: { CommandLine: "git status" } },
+          },
+        }),
+        ...(input.response
+          ? [
+              JSON.stringify({
+                event: "step_update",
+                step_update: {
+                  conversation_id: "conv-retry",
+                  step_index: 2,
+                  state: "ACTIVE",
+                  step_type: "agent_response",
+                  text_delta: input.response,
+                },
+              }),
+            ]
+          : []),
+        JSON.stringify({
+          event: "result",
+          result: {
+            conversation_id: "conv-retry",
+            status: "ERROR",
+            error: input.error,
+            num_turns: 1,
+            ...(input.response ? { response: input.response } : {}),
+          },
+        }),
+      ];
+    }
+
+    it("treats a recovered per-attempt API error next to a delivered response as success", async () => {
+      const events = await runErrorResultTurn(
+        retryStream({ response: "All changes pushed.", error: recoveredRetryError }),
+      );
+      expect(events.at(-1)).toMatchObject({
+        type: "turn.completed",
+        outcome: { status: "succeeded" },
+      });
+      expect(
+        events.find(
+          (event) => event.type === "item.completed" && event.snapshot.item.type === "agentMessage",
+        ),
+      ).toMatchObject({ snapshot: { outcome: { status: "succeeded" } } });
+      expect(JSON.stringify(events)).not.toContain("No capacity available");
+    });
+
+    it("treats a recovered malformed tool call retry next to a delivered response as success", async () => {
+      const recoveredToolParseError =
+        "Your previous response contained an improperly formatted function call: Malformed function call: Failed to parse function call: Function call is empty - no input to parse. Please retry with a properly formatted function call Retries remaining: 3";
+      const events = await runErrorResultTurn(
+        retryStream({ response: "Diagnosis completed.", error: recoveredToolParseError }),
+      );
+      expect(events.at(-1)).toMatchObject({
+        type: "turn.completed",
+        outcome: { status: "succeeded" },
+      });
+      expect(JSON.stringify(events)).not.toContain("Malformed function call");
+    });
+
+    it.each([
+      ["no response was delivered", { response: "", error: recoveredRetryError }],
+      [
+        "a native step ended in ERROR",
+        { response: "Partial answer", error: recoveredRetryError, toolState: "ERROR" as const },
+      ],
+      [
+        "the retries were exhausted",
+        {
+          response: "Partial answer",
+          error: `max retries exhausted: failed after 3 attempts: ${recoveredRetryError}`,
+        },
+      ],
+      [
+        "the tool parse retries were exhausted",
+        {
+          response: "Partial answer",
+          error:
+            "Your previous response contained an improperly formatted function call: Retries remaining: 0",
+        },
+      ],
+    ])("keeps the failed Turn when %s", async (_label, input) => {
+      const events = await runErrorResultTurn(retryStream(input));
+      expect(events.at(-1)).toMatchObject({
+        type: "turn.completed",
+        outcome: {
+          status: "failed",
+          error: { code: "nativeFailure", message: expect.stringContaining("status ERROR") },
+        },
+      });
+    });
+
     it("passes a structured CLI result error through to the failed Turn", async () => {
       const streamLines = [
         JSON.stringify({

@@ -139,6 +139,8 @@ interface ActiveTurn {
   nativePermissionMode: string | null;
   /** First tool denial of the Turn, kept to explain an otherwise empty result. */
   permissionDenial: string | null;
+  /** Any native step that ended in ERROR; a recovered API retry never produces one. */
+  sawErrorStep: boolean;
   latestUsage: HostUsage | null;
   contextUsagePromise: Promise<Pick<
     HostUsage,
@@ -252,6 +254,32 @@ export function formatAntigravityTurnPrompt(text: string): string {
   }
   return `${ANTIGRAVITY_WORKSPACE_FILE_INSTRUCTION}${text}`;
 }
+
+/**
+ * agy's run loop retries transient API failures ("Run: attempt %d failed (%v),
+ * retrying in %v") and malformed tool call formatting ("Retries remaining: %d"),
+ * but its print mode still reports the initial attempt's error as the terminal
+ * `result.error` with status ERROR, even though the trajectory went on to finish:
+ * every step ended DONE and the final response was delivered. An exhausted retry
+ * is worded differently ("max retries exhausted: failed after %d attempts: ...",
+ * "Retries remaining: 0", etc.), so a bare per-attempt error or intermediate retry
+ * prompt with retries remaining next to a delivered response is a recovered retry,
+ * not a failed Turn.
+ */
+export function isRecoveredAntigravityRetry(error: string | undefined): boolean {
+  if (!error) return false;
+  const text = error.trim();
+  const isExhausted =
+    /retries exhausted|giving up|after \d+ attempts|Retries remaining:\s*0\b/iu.test(text);
+  if (isExhausted) return false;
+
+  const isApiAttempt = /^API error \(attempt \d+\): /u.test(text);
+  const hasRemainingRetries = /Retries remaining:\s*[1-9]\d*/iu.test(text);
+
+  return isApiAttempt || hasRemainingRetries;
+}
+
+export const isRecoveredAntigravityApiRetry = isRecoveredAntigravityRetry;
 
 /**
  * Headless agy answers a permission request by denying it, then reports the
@@ -763,6 +791,7 @@ class AntigravitySession implements HarnessSession {
       receivedResult: false,
       nativePermissionMode: null,
       permissionDenial: null,
+      sawErrorStep: false,
       latestUsage: null,
       contextUsagePromise: null,
       queue: Promise.resolve(),
@@ -991,6 +1020,14 @@ class AntigravitySession implements HarnessSession {
       } else {
         this.#completeTurn(active, { status: "succeeded", checkpoint }, nativeTurnRef);
       }
+    } else if (
+      event.result.status === "ERROR" &&
+      !active.sawErrorStep &&
+      (active.agentText.length > 0 ||
+        active.completedItems.some((s) => s.item.type === "agentMessage")) &&
+      isRecoveredAntigravityRetry(event.result.error)
+    ) {
+      this.#completeTurn(active, { status: "succeeded", checkpoint }, nativeTurnRef);
     } else {
       const nativeError = event.result.error?.trim();
       const errorDetail = nativeError || active.stderr;
@@ -1034,6 +1071,7 @@ class AntigravitySession implements HarnessSession {
     active: ActiveTurn,
     step: AntigravityStepUpdateEvent["step_update"],
   ): Promise<void> {
+    if (step.state === "ERROR") active.sawErrorStep = true;
     if (step.step_type === "subagent") {
       if (active.agentItem) {
         this.#completeItem(active, active.agentItem, { status: "succeeded" });
