@@ -939,6 +939,11 @@ describe("Claude Code HarnessAdapter", () => {
     transport.inspectAccount.mockResolvedValueOnce(snapshot);
     await expect(adapter.inspectAccount()).resolves.toEqual(snapshot);
     expect(dependencies.createInspector).toHaveBeenCalledOnce();
+
+    // A live read that fails (e.g. times out) falls back to the bounded inspector.
+    transport.inspectAccount.mockRejectedValueOnce(new Error("Claude SDK account read timed out"));
+    await expect(adapter.inspectAccount()).resolves.toBeNull();
+    expect(dependencies.createInspector).toHaveBeenCalledTimes(2);
     await session.close();
   });
 

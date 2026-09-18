@@ -1112,6 +1112,26 @@ describe("ClaudeSdkTransport account usage", () => {
     expect(value.queryFactory).toHaveBeenCalledOnce();
     await value.transport.close();
   });
+
+  it("bounds a live usage read that never answers", async () => {
+    const value = fixture();
+    Object.assign(value.fakeQuery, {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: vi.fn(
+        () => new Promise(() => undefined),
+      ),
+    });
+    await value.transport.start();
+    vi.useFakeTimers();
+    try {
+      const read = value.transport.inspectAccount();
+      const settled = expect(read).rejects.toThrow("Claude SDK account read timed out");
+      await vi.advanceTimersByTimeAsync(10_000);
+      await settled;
+    } finally {
+      vi.useRealTimers();
+    }
+    await value.transport.close();
+  });
 });
 
 describe("ClaudeSdkTransport abort", () => {

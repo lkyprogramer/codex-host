@@ -40,6 +40,7 @@ const APPROVAL_TITLE_MAX_LENGTH = 120;
 const APPROVAL_DESCRIPTION_MAX_LENGTH = 500;
 const DEFAULT_ABORT_TIMEOUT_MS = 2_000;
 const INTERRUPT_TIMEOUT_MESSAGE = "Claude SDK interrupt timed out";
+const ACCOUNT_INSPECTION_TIMEOUT_MS = 10_000;
 
 class PushableInput<T> implements AsyncIterable<T> {
   #closed = false;
@@ -656,7 +657,14 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   async inspectAccount(): Promise<HarnessAccountSnapshot | null> {
     const activeQuery = this.#query;
     if (this.#closePromise || !this.#started || !activeQuery) return null;
-    return readAccountUsage(activeQuery);
+    // Bounded like the inspector path: a process busy in a Turn may answer the
+    // usage control request late, and the caller must not pin on it.
+    const timeout = rejectAfter(ACCOUNT_INSPECTION_TIMEOUT_MS, "Claude SDK account read timed out");
+    try {
+      return await Promise.race([readAccountUsage(activeQuery), timeout.promise]);
+    } finally {
+      timeout.cancel();
+    }
   }
 
   async abort(): Promise<void> {
@@ -1079,7 +1087,10 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
   }
 
   async inspectAccount(): Promise<HarnessAccountSnapshot | null> {
-    const timeout = rejectAfter(10_000, "Claude SDK account inspection timed out");
+    const timeout = rejectAfter(
+      ACCOUNT_INSPECTION_TIMEOUT_MS,
+      "Claude SDK account inspection timed out",
+    );
     try {
       const activeQuery = this.#createQuery();
       return await Promise.race([

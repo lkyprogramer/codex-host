@@ -2652,6 +2652,9 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       try {
         return await live;
       } catch {
+        // One live reader failing (timeout, closed mid-read) says nothing about
+        // the others being healthier, and each further attempt adds latency in
+        // front of the usage capsule. Go straight to the bounded inspector.
         break;
       }
     }

@@ -187,6 +187,7 @@ describe("AppServerHost hermetic Claude projection", () => {
             return { status: "succeeded" };
           },
           respondToInteraction: async () => undefined,
+          inspectAccount: async () => null,
           abort: async () => undefined,
           close: async () => undefined,
         };
