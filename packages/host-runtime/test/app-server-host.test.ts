@@ -1,6 +1,14 @@
 import type { ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -474,7 +482,7 @@ async function bindOfficialThread(
 }
 
 describe("AppServerHost installed Harness plugins", () => {
-  // A cold plugin import has its own 10s loader budget; RPC checks remain 2s.
+  // A cold plugin import has a 10s per-plugin loader budget; RPC checks remain 2s.
   it("discovers an unknown plugin, serves its descriptor, routes a Thread, and closes it", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "codexhost-plugin-host-"));
     const location = path.join(directory, "sample-agent");
@@ -580,6 +588,141 @@ describe("AppServerHost installed Harness plugins", () => {
       }
     }
   }, 15_000);
+
+  it("starts official Codex before a slow plugin factory returns", async () => {
+    const directory = mkdtempSync(path.join(tmpdir(), "codexhost-plugin-parallel-"));
+    const location = path.join(directory, "slow-agent");
+    const release = path.join(directory, "release");
+    mkdirSync(location);
+    writeFileSync(
+      path.join(directory, "enabled.json"),
+      JSON.stringify({ version: 1, enabled: ["slow-agent"] }),
+    );
+    writeFileSync(
+      path.join(location, "manifest.json"),
+      JSON.stringify({
+        manifestVersion: 1,
+        id: "slow-agent",
+        name: "Slow Agent",
+        version: "1.0.0",
+        adapterApiVersion: 1,
+        entry: "index.mjs",
+      }),
+    );
+    writeFileSync(
+      path.join(location, "index.mjs"),
+      `
+      import { access } from "node:fs/promises";
+      import { FakeHarnessAdapter } from ${JSON.stringify(pathToFileURL(path.resolve("packages/harness-adapter/dist/testing.js")).href)};
+      const release = ${JSON.stringify(pathToFileURL(release).href)};
+      async function waitForRelease() {
+        for (;;) {
+          try {
+            await access(new URL(release));
+            return;
+          } catch {
+            await new Promise((resolve) => setTimeout(resolve, 20));
+          }
+        }
+      }
+      export async function createHarnessAdapter() {
+        await waitForRelease();
+        return new FakeHarnessAdapter("slow-agent");
+      }
+    `,
+    );
+    const fixture = createFixture({ pluginDirectory: directory, externalAdapters: new Map() });
+    try {
+      await fixture.ready;
+      writeFileSync(release, "ok");
+      writeRequest(fixture.desktopInput, {
+        id: 920,
+        method: "codexhost/harness/inspect",
+        params: { harnessId: "slow-agent" },
+      });
+      expect(await fixture.collector.waitFor((message) => requestId(message, 920))).toMatchObject({
+        result: { status: "ready" },
+      });
+    } finally {
+      try {
+        await stopFixture(fixture);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  }, 10_000);
+
+  it("stops later plugin batches when Host closes during a blocked factory", async () => {
+    const ids = ["a-agent", "b-agent", "c-agent", "d-agent", "e-agent"];
+    const directory = mkdtempSync(path.join(tmpdir(), "codexhost-plugin-close-"));
+    const started = path.join(directory, "started");
+    const finished = path.join(directory, "finished");
+    mkdirSync(started);
+    mkdirSync(finished);
+    const release = path.join(directory, "release");
+    writeFileSync(
+      path.join(directory, "enabled.json"),
+      JSON.stringify({ version: 1, enabled: ids }),
+    );
+    for (const id of ids) {
+      const location = path.join(directory, id);
+      mkdirSync(location);
+      writeFileSync(
+        path.join(location, "manifest.json"),
+        JSON.stringify({
+          manifestVersion: 1,
+          id,
+          name: id,
+          version: "1.0.0",
+          adapterApiVersion: 1,
+          entry: "index.mjs",
+        }),
+      );
+      writeFileSync(
+        path.join(location, "index.mjs"),
+        `
+      import { access, writeFile } from "node:fs/promises";
+      import { FakeHarnessAdapter } from ${JSON.stringify(pathToFileURL(path.resolve("packages/harness-adapter/dist/testing.js")).href)};
+      const started = ${JSON.stringify(pathToFileURL(path.join(started, id)).href)};
+      const finished = ${JSON.stringify(pathToFileURL(path.join(finished, id)).href)};
+      const release = ${JSON.stringify(pathToFileURL(release).href)};
+      export async function createHarnessAdapter() {
+        await writeFile(new URL(started), "yes");
+        try {
+          for (;;) {
+            try {
+              await access(new URL(release));
+              return new FakeHarnessAdapter(${JSON.stringify(id)});
+            } catch {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+            }
+          }
+        } finally {
+          await writeFile(new URL(finished), "yes");
+        }
+      }
+    `,
+      );
+    }
+    const fixture = createFixture({ pluginDirectory: directory, externalAdapters: new Map() });
+    try {
+      await fixture.ready;
+      await vi.waitFor(() => expect(readdirSync(started)).toHaveLength(4));
+      fixture.host.close();
+      await expect(fixture.running).resolves.toBe(0);
+      expect(readdirSync(started).sort()).toEqual(["a-agent", "b-agent", "c-agent", "d-agent"]);
+    } finally {
+      writeFileSync(release, "ok");
+      await vi.waitFor(() =>
+        expect(readdirSync(finished).sort()).toEqual(readdirSync(started).sort()),
+      );
+      try {
+        await stopFixture(fixture);
+      } finally {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  }, 3_000);
 
   it("binds DeepSeek Session Import after its Adapter has been dynamically loaded", async () => {
     const directory = mkdtempSync(path.join(tmpdir(), "codexhost-dynamic-import-"));
