@@ -100,6 +100,7 @@ async function fixture(turns = 1) {
         start: vi.fn(async () => undefined),
         close: vi.fn(async () => undefined),
         abort: vi.fn(async () => undefined),
+        inspectAccount: vi.fn(async () => null),
         setAutonomousTurnHandler: () => undefined,
         setIdleTurnHandler: () => undefined,
         setThreadEventHandler: () => undefined,

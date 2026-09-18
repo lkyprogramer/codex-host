@@ -215,6 +215,8 @@ export interface ClaudeTurnTransport {
     onEvent: (event: ClaudeTurnEvent) => void,
   ): Promise<ClaudeTransportTurnResult>;
   respondToInteraction(response: ClaudeInteractionResponse): Promise<void>;
+  /** Account quota read through this live process, so no extra CLI has to be spawned. */
+  inspectAccount(): Promise<HarnessAccountSnapshot | null>;
   abort(): Promise<void>;
   close(): Promise<void>;
 }

@@ -991,6 +991,21 @@ class ClaudeHarnessSession implements HarnessSession {
     return this.#contextRefreshInFlight ?? Promise.resolve();
   }
 
+  /** Quota through the live process; null when no idle native process is available. */
+  inspectAccountFromLiveProcess(): Promise<HarnessAccountSnapshot | null> | null {
+    const transport = this.#transport;
+    if (
+      this.#phase !== "open" ||
+      !transport ||
+      this.#startupTask ||
+      this.#recycleTask ||
+      this.#hardCancelTask
+    ) {
+      return null;
+    }
+    return transport.inspectAccount();
+  }
+
   blocksRollback(sessionId: string): boolean {
     return (
       this.#sessionId === sessionId &&
@@ -2526,8 +2541,9 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   readonly #pendingSessions: ClaudePendingSessions;
   readonly #toolOutputLimit: number;
   readonly #continuationQuiescenceMs: number;
-  readonly #inspectionCache = new Map<string, HarnessInspection>();
-  readonly #inspectionInFlight = new Map<string, Promise<HarnessInspection>>();
+  /** Catalog is read with user-only settings, so it is account-global; cwd is only the spawn dir. */
+  #inspectionCache: HarnessInspection | null = null;
+  #inspectionInFlight: Promise<HarnessInspection> | null = null;
   readonly #inspectors = new Set<ClaudeModelInspector>();
   readonly #sessions = new Set<ClaudeHarnessSession>();
   #closePromise: Promise<void> | null = null;
@@ -2605,21 +2621,15 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
       };
     }
     const cwd = path.resolve(input.cwd ?? process.cwd());
-    if (!input.refresh) {
-      const cached = this.#inspectionCache.get(cwd);
-      if (cached) return cached;
-    }
-    const current = this.#inspectionInFlight.get(cwd);
-    if (current) return current;
+    if (!input.refresh && this.#inspectionCache) return this.#inspectionCache;
+    if (this.#inspectionInFlight) return this.#inspectionInFlight;
     const inspection = this.#inspectModels(cwd).then((result) => {
-      if (result.status === "ready") this.#inspectionCache.set(cwd, result);
+      if (result.status === "ready") this.#inspectionCache = result;
       return result;
     });
-    this.#inspectionInFlight.set(cwd, inspection);
+    this.#inspectionInFlight = inspection;
     void inspection.finally(() => {
-      if (this.#inspectionInFlight.get(cwd) === inspection) {
-        this.#inspectionInFlight.delete(cwd);
-      }
+      if (this.#inspectionInFlight === inspection) this.#inspectionInFlight = null;
     });
     return inspection;
   }
@@ -2634,6 +2644,17 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
   }
 
   async #readAccount(): Promise<HarnessAccountSnapshot | null> {
+    // Every extra CLI shares the same OAuth credentials; prefer a process that
+    // already exists over spawning another one that may race the token refresh.
+    for (const session of this.#sessions) {
+      const live = session.inspectAccountFromLiveProcess();
+      if (!live) continue;
+      try {
+        return await live;
+      } catch {
+        break;
+      }
+    }
     let inspector: ClaudeModelInspector | undefined;
     try {
       this.#dependencies.inspectInstallation();
@@ -2949,11 +2970,11 @@ export class ClaudeCodeAdapter implements HarnessAdapter {
 
   close(): Promise<void> {
     if (!this.#closePromise) {
-      this.#inspectionCache.clear();
+      this.#inspectionCache = null;
       this.#closePromise = Promise.all([
         ...[...this.#inspectors].map((inspector) => inspector.close()),
         ...[...this.#sessions].map((session) => session.close()),
-        ...this.#inspectionInFlight.values(),
+        ...(this.#inspectionInFlight ? [this.#inspectionInFlight] : []),
       ]).then(() => undefined);
     }
     return this.#closePromise;

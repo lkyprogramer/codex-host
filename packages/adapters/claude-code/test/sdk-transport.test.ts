@@ -1092,6 +1092,28 @@ describe("ClaudeSdkTransport Model control", () => {
   });
 });
 
+describe("ClaudeSdkTransport account usage", () => {
+  it("reads usage through the live Query without spawning", async () => {
+    const value = fixture();
+    const usage = vi.fn(async () => ({
+      rate_limits_available: true,
+      rate_limits: { five_hour: { utilization: 20, resets_at: null } },
+      subscription_type: "max",
+    }));
+    Object.assign(value.fakeQuery, {
+      usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET: usage,
+    });
+    await expect(value.transport.inspectAccount()).resolves.toBeNull();
+    await value.transport.start();
+    await expect(value.transport.inspectAccount()).resolves.toMatchObject({
+      plan: "max",
+      credits: { usedPercent: 20, periodType: "five_hour" },
+    });
+    expect(value.queryFactory).toHaveBeenCalledOnce();
+    await value.transport.close();
+  });
+});
+
 describe("ClaudeSdkTransport abort", () => {
   it("interrupts the active Query without closing the transport", async () => {
     const value = fixture();

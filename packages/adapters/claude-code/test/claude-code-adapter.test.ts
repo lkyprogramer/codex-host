@@ -9,6 +9,7 @@ import {
   nativeSessionRefSchema,
 } from "@codexhost/shared-contracts";
 
+import type { HarnessAccountSnapshot } from "@codexhost/shared-contracts";
 import type { HarnessOutput, HarnessSession } from "@codexhost/harness-adapter";
 import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import { ClaudeCodeAdapter, type ClaudeCodeAdapterOptions } from "../src/index.js";
@@ -53,6 +54,7 @@ class FakeClaudeTransport implements ClaudeTurnTransport {
   }
   readonly abort = vi.fn(async () => undefined);
   readonly close = vi.fn(async () => undefined);
+  readonly inspectAccount = vi.fn(async (): Promise<HarnessAccountSnapshot | null> => null);
   contextUsage: ClaudeTransportContextUsage | null = null;
   permissionMode: ClaudePermissionMode;
   readonly #onPermissionModeChanged: (permissionMode: ClaudePermissionMode) => void;
@@ -899,20 +901,45 @@ describe("Claude Code HarnessAdapter", () => {
       canSelectPermissionMode: true,
     });
     await expect(Promise.all([first, second])).resolves.toHaveLength(2);
+    // The catalog is read with user-only settings: another directory reuses it.
+    await expect(adapter.inspect({ cwd: "/another-directory" })).resolves.toMatchObject({
+      status: "ready",
+    });
+    expect(dependencies.createInspector).toHaveBeenCalledOnce();
 
-    await expect(adapter.inspect({ cwd: "/failure" })).resolves.toMatchObject({
+    await expect(adapter.inspect({ cwd: "/failure", refresh: true })).resolves.toMatchObject({
       status: "error",
     });
-    await expect(adapter.inspect({ cwd: "/failure" })).resolves.toMatchObject({
+    await expect(adapter.inspect({ cwd: "/failure", refresh: true })).resolves.toMatchObject({
       status: "unavailable",
       error: { code: "unavailable", retryable: false },
     });
-    await expect(adapter.inspect({ cwd: "/unsupported" })).resolves.toMatchObject({
+    await expect(adapter.inspect({ cwd: "/unsupported", refresh: true })).resolves.toMatchObject({
       status: "unavailable",
       error: { code: "unavailable", retryable: false },
     });
     expect(dependencies.createInspector).toHaveBeenCalledTimes(4);
     expect(close).toHaveBeenCalledTimes(4);
+  });
+
+  it("reads account usage through a live Session process before spawning an inspector", async () => {
+    const { adapter, dependencies, transports } = fixture();
+    await expect(adapter.inspectAccount()).resolves.toBeNull();
+    expect(dependencies.createInspector).toHaveBeenCalledOnce();
+
+    const session = await openSession(adapter);
+    await session.execute(textTurn("warm"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Expected a live Transport");
+    transport.finish({ status: "succeeded" });
+    const snapshot: HarnessAccountSnapshot = {
+      email: "user@example.com",
+      credits: { usedPercent: 12, periodType: "five_hour" },
+    };
+    transport.inspectAccount.mockResolvedValueOnce(snapshot);
+    await expect(adapter.inspectAccount()).resolves.toEqual(snapshot);
+    expect(dependencies.createInspector).toHaveBeenCalledOnce();
+    await session.close();
   });
 
   it("reports a missing installation without starting a Transport", async () => {
@@ -5280,6 +5307,7 @@ describe("Claude Code HarnessAdapter", () => {
         recap: async () => ({ status: "succeeded" }),
         runTurn: async () => ({ status: "succeeded" }),
         respondToInteraction: async () => undefined,
+        inspectAccount: async () => null,
         abort: async () => undefined,
         close: async () => undefined,
       }),

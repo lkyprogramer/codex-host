@@ -653,6 +653,12 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     return Promise.resolve();
   }
 
+  async inspectAccount(): Promise<HarnessAccountSnapshot | null> {
+    const activeQuery = this.#query;
+    if (this.#closePromise || !this.#started || !activeQuery) return null;
+    return readAccountUsage(activeQuery);
+  }
+
   async abort(): Promise<void> {
     const active = this.#active;
     const activeQuery = this.#query;
@@ -995,6 +1001,15 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   }
 }
 
+async function readAccountUsage(activeQuery: Query): Promise<HarnessAccountSnapshot | null> {
+  const getUsage = activeQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
+  if (typeof getUsage !== "function") return null;
+  const usage = await getUsage.call(activeQuery);
+  if (!usage.rate_limits_available || !usage.rate_limits) return null;
+  const account = await activeQuery.accountInfo();
+  return projectClaudeAccountUsage(usage, account);
+}
+
 function waitForProcessExit(child: ChildProcessWithoutNullStreams): Promise<void> {
   if (processExited(child)) return Promise.resolve();
   return new Promise((resolve) => {
@@ -1070,12 +1085,7 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
       return await Promise.race([
         (async () => {
           await activeQuery.initializationResult();
-          const getUsage = activeQuery.usage_EXPERIMENTAL_MAY_CHANGE_DO_NOT_RELY_ON_THIS_API_YET;
-          if (typeof getUsage !== "function") return null;
-          const usage = await getUsage.call(activeQuery);
-          if (!usage.rate_limits_available || !usage.rate_limits) return null;
-          const account = await activeQuery.accountInfo();
-          return projectClaudeAccountUsage(usage, account);
+          return readAccountUsage(activeQuery);
         })(),
         timeout.promise,
       ]);
