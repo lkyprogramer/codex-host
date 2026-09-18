@@ -23,6 +23,10 @@ node_modules/
 .eslintcache
 *.tsbuildinfo
 
+# Python bytecode (test fixtures, tooling)
+__pycache__/
+*.pyc
+
 # Build, test, and coverage output
 target/
 dist/
