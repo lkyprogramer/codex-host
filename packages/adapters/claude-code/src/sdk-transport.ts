@@ -796,15 +796,27 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
       failures.push(error);
     }
     const stopOwnedProcesses = async (): Promise<void> => {
+      // A Windows root that already left cannot be enumerated; Unix groups are
+      // still signalled so a wrapper's surviving children are covered.
+      const owned =
+        process.platform === "win32"
+          ? this.#children.filter((child) => !processExited(child))
+          : this.#children;
       const stopped = await Promise.allSettled(
-        this.#children.map((child) => closeClaudeProcessGroup(child, this.#closeTimeoutMs)),
+        owned.map((child) => closeClaudeProcessGroup(child, this.#closeTimeoutMs)),
       );
       for (const result of stopped) if (result.status === "rejected") failures.push(result.reason);
     };
+    // Ending the prompt stream makes the SDK close the CLI's stdin, and the CLI
+    // leaves on its own once in-flight work is done. Signal only what is still
+    // alive after that: Claude Code exits immediately on SIGTERM, and a kill that
+    // lands between an OAuth refresh and its write-back strands the rotated token
+    // for every process sharing the credentials.
+    this.#input.end();
+    await awaitNaturalExit(this.#children, this.#closeTimeoutMs);
     // taskkill needs a living root to enumerate the Windows tree. Unix groups remain addressable
     // after their root exits, so let the SDK initiate its native cleanup first there.
     if (process.platform === "win32") await stopOwnedProcesses();
-    this.#input.end();
     try {
       this.#query?.close();
     } catch (error) {
@@ -814,7 +826,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     const exitTimeout = rejectAfter(this.#closeTimeoutMs, "Claude SDK process did not exit");
     try {
       await Promise.race([
-        Promise.all(this.#children.map((child) => this.#waitForExit(child))),
+        Promise.all(this.#children.map(waitForProcessExit)),
         exitTimeout.promise,
       ]);
     } catch (error) {
@@ -981,14 +993,23 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     this.#children.push(child);
     return child;
   }
+}
 
-  #waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
-    if (processExited(child)) return Promise.resolve();
-    return new Promise((resolve) => {
-      child.once("exit", () => resolve());
-      child.once("error", () => resolve());
-    });
-  }
+function waitForProcessExit(child: ChildProcessWithoutNullStreams): Promise<void> {
+  if (processExited(child)) return Promise.resolve();
+  return new Promise((resolve) => {
+    child.once("exit", () => resolve());
+    child.once("error", () => resolve());
+  });
+}
+
+/** Bounded wait for the CLI to leave on stdin EOF; never fails, callers signal survivors. */
+async function awaitNaturalExit(
+  children: readonly ChildProcessWithoutNullStreams[],
+  graceMs: number,
+): Promise<void> {
+  if (children.every((child) => processExited(child))) return;
+  await Promise.race([Promise.all(children.map(waitForProcessExit)), delay(graceMs)]);
 }
 
 export class ClaudeSdkModelInspector implements ClaudeModelInspector {
@@ -1088,13 +1109,17 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
   }
 
   async #close(): Promise<void> {
+    // Same shutdown discipline as the session transport: let the CLI finish its
+    // in-flight request (a usage probe can be the one that refreshes OAuth) and
+    // leave on stdin EOF before any signal is sent.
     this.#input.end();
+    await awaitNaturalExit(this.#children, this.#closeTimeoutMs);
     this.#query?.close();
     for (const child of this.#children) {
       if (!processExited(child)) child.kill("SIGTERM");
     }
     await Promise.race([
-      Promise.all(this.#children.map((child) => this.#waitForExit(child))),
+      Promise.all(this.#children.map(waitForProcessExit)),
       delay(this.#closeTimeoutMs),
     ]);
     for (const child of this.#children) {
@@ -1116,13 +1141,5 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
     });
     this.#children.push(child);
     return child;
-  }
-
-  #waitForExit(child: ChildProcessWithoutNullStreams): Promise<void> {
-    if (processExited(child)) return Promise.resolve();
-    return new Promise((resolve) => {
-      child.once("exit", () => resolve());
-      child.once("error", () => resolve());
-    });
   }
 }

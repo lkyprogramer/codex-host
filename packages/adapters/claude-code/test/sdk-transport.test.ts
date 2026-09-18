@@ -1956,6 +1956,57 @@ describe("Claude history replacement fence", () => {
   });
 
   it.skipIf(process.platform === "win32")(
+    "lets the native process leave on its own before any signal is sent",
+    async () => {
+      const value = fixture();
+      await value.transport.start();
+      const spawnProcess = options(value).spawnClaudeCodeProcess;
+      if (!spawnProcess) throw new Error("Missing native process ownership hook");
+      // Exits with 3 on SIGTERM; finishes "in-flight work" and exits 0 shortly after.
+      const child = spawnProcess({
+        command: process.execPath,
+        args: [
+          "-e",
+          "process.on('SIGTERM',()=>process.exit(3)); process.stdin.resume(); setTimeout(()=>process.exit(0),40);",
+        ],
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        env: process.env,
+      }) as ChildProcessWithoutNullStreams;
+      try {
+        await value.transport.close();
+        expect(child.exitCode).toBe(0);
+        expect(child.signalCode).toBeNull();
+      } finally {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "signals a native process that does not leave within the grace period",
+    async () => {
+      const value = fixture();
+      await value.transport.start();
+      const spawnProcess = options(value).spawnClaudeCodeProcess;
+      if (!spawnProcess) throw new Error("Missing native process ownership hook");
+      const child = spawnProcess({
+        command: process.execPath,
+        args: ["-e", "process.on('SIGTERM',()=>process.exit(3)); setInterval(()=>{},1000);"],
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        env: process.env,
+      }) as ChildProcessWithoutNullStreams;
+      try {
+        await value.transport.close();
+        expect(child.exitCode).toBe(3);
+      } finally {
+        if (child.exitCode === null) child.kill("SIGKILL");
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
     "stops wrapper children even when the wrapper has exited",
     async () => {
       const value = fixture();
