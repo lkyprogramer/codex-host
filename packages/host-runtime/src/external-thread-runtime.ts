@@ -1,6 +1,6 @@
 import { awaitWithSignal } from "./abortable-read.js";
 import { validateOpenedHarnessSession } from "./harness-session-validation.js";
-import { ManagedHarnessSession } from "./managed-harness-session.js";
+import { ManagedHarnessSession, type ResumeOptions } from "./managed-harness-session.js";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -677,7 +677,7 @@ export class ExternalThreadRuntime {
 
   async #resumeSuspendedSession(
     thread: ExternalThread,
-    options?: { skipSnapshot?: boolean },
+    options?: ResumeOptions,
   ): Promise<HarnessSession> {
     const record = await this.#repository.find(thread.id);
     if (
@@ -696,7 +696,10 @@ export class ExternalThreadRuntime {
     const resumed = await this.#openResumedNativeSession(
       record,
       (session) => managed.validateResumedSession(session),
-      { skipSnapshot: options?.skipSnapshot === true },
+      {
+        skipSnapshot: options?.skipSnapshot === true,
+        ...(options?.historyOnly ? { historyOnly: true } : {}),
+      },
     );
     if (this.#threads.get(thread.id) !== thread) {
       await resumed.session.close().catch(() => undefined);

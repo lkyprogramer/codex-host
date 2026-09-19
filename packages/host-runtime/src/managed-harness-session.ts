@@ -87,12 +87,18 @@ function validSuspendResult(value: unknown): value is HarnessIdleSuspendResult {
  * releases a resumable native process. Every Host operation is serialized with
  * suspension, so a wake cannot race an incomplete native cleanup.
  */
+/** historyOnly resumes a suspended history-only Session without native execution. */
+export interface ResumeOptions {
+  skipSnapshot?: boolean;
+  historyOnly?: boolean;
+}
+
 export class ManagedHarnessSession {
   readonly harnessId: HarnessId;
   readonly initialUsage;
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
-  readonly #resume: (options?: { skipSnapshot?: boolean }) => Promise<HarnessSession>;
+  readonly #resume: (options?: ResumeOptions) => Promise<HarnessSession>;
   readonly #onActivity: () => void;
   readonly #onFault: (error: Error) => void;
   readonly #outputEndTimeoutMs: number;
@@ -113,7 +119,7 @@ export class ManagedHarnessSession {
 
   constructor(input: {
     session: HarnessSession;
-    resume(options?: { skipSnapshot?: boolean }): Promise<HarnessSession>;
+    resume(options?: ResumeOptions): Promise<HarnessSession>;
     onActivity(): void;
     onFault(error: Error): void;
     outputEndTimeoutMs?: number;
@@ -261,8 +267,13 @@ export class ManagedHarnessSession {
     this.#onActivity();
     return this.#enqueue(async () => {
       this.#assertOpen();
-      const session =
-        this.#deferredLive && !this.#suspended ? this.#current : await this.#resumeIfNeeded();
+      // A read never upgrades a history-only Session to live; after suspension it
+      // resumes with the same readiness so history stays local and cheap.
+      const session = this.#deferredLive
+        ? this.#suspended
+          ? await this.#resumeIfNeeded({ historyOnly: true })
+          : this.#current
+        : await this.#resumeIfNeeded();
       return operation(session);
     });
   }
@@ -374,8 +385,8 @@ export class ManagedHarnessSession {
     });
   }
 
-  async #resumeIfNeeded(): Promise<HarnessSession> {
-    if (this.#deferredLive) {
+  async #resumeIfNeeded(options?: { historyOnly?: boolean }): Promise<HarnessSession> {
+    if (this.#deferredLive && !options?.historyOnly) {
       const previous = this.#current;
       const previousGeneration = this.#generation;
       this.#generation += 1;
@@ -407,7 +418,7 @@ export class ManagedHarnessSession {
     if (!this.#suspended) return this.#current;
     let resumed: HarnessSession | undefined;
     try {
-      resumed = await this.#resume();
+      resumed = await this.#resume(options?.historyOnly ? { historyOnly: true } : undefined);
       this.#validateResume(resumed);
     } catch (error) {
       await resumed?.close().catch(() => undefined);
@@ -416,6 +427,7 @@ export class ManagedHarnessSession {
       throw failure;
     }
     this.#suspended = null;
+    this.#deferredLive = resumed.executionReady === false;
     this.#attach(resumed);
     return resumed;
   }

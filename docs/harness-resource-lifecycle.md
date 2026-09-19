@@ -13,6 +13,7 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 - Host 保留轻量 Thread 和输出通道。原生输出因挂起正常结束，不应被误报为 Session 故障；恢复后的旧代迟到事件不能污染新代。
 - 挂起与恢复、发送、配置、完整历史读取及历史派生共享操作保护。超时不能让尚未完成的关闭与新操作并发。
 - `status` / `wait-many` 读取 Host 状态，不唤醒挂起进程。完整历史 / evidence 读取可以恢复原生连接，以保留真实历史语义。
+- `executionReady=false` 的 history-only Session 被挂起后，读取以 history-only 恢复；只有执行才升级为 live Session。
 - 未声明合同的旧插件保持兼容，自动回收明确不启用；不能为了统一行为而取消未知后台工作。
 
 ## 释放范围与任务静默
@@ -35,4 +36,4 @@ Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关�
 
 新增或启用一个 Adapter 的自动挂起，需要定向覆盖：空闲回收、活动与交互拒绝、后台子任务、取消信号、关闭失败、并发唤醒、同一身份与配置恢复，以及真实受管进程退出。模型聊天成功、stub 的 `close` 被调用和主进程退出都不能单独替代这组证据。
 
-本次排查与各 Harness 的当前接入状态、验证结果见 [2026-09-13 排查记录](harness-resource-review-20260913.md)。
+本次排查与各 Harness 的当前接入状态、验证结果见 [2026-09-13 排查记录](harness-resource-review-20260913.md)。Cursor 于 2026-09-19 接入统一合同，见 [Cursor 空闲挂起记录](cursor-idle-suspend-20260919.md)。

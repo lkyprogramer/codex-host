@@ -4,8 +4,11 @@ import {
   HarnessOutputChannel,
   type HarnessAdapter,
   type HarnessError,
+  type HarnessIdleSuspendResult,
+  type HarnessIdleSuspendSignal,
   type HarnessInspection,
   type HarnessOutput,
+  type HarnessResourceLifecycle,
   type HarnessResult,
   type HarnessSession,
   type HarnessSessionState,
@@ -391,6 +394,9 @@ export class CursorSession implements HarnessSession {
   readonly outputs = this.#channel.outputs;
   readonly #interactions = new CursorInteractions((output) => this.#channel.emit(output));
   readonly #submitted = new Set<string>();
+  readonly resourceLifecycle: HarnessResourceLifecycle = {
+    suspend: (signal) => this.#suspendIdle(signal),
+  };
   #active: { command: TurnStartCommand; cancelled: boolean; task: Promise<void> } | undefined;
   #configuring = false;
   #closed = false;
@@ -687,6 +693,29 @@ export class CursorSession implements HarnessSession {
       this.#channel.emit({ kind: "event", event: { type: "session.faulted", error: fault } });
       void this.close().catch(() => {});
     }
+  }
+  async #suspendIdle(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
+    if (signal.aborted) {
+      return { status: "unknown", reason: "Cursor idle suspension was aborted" };
+    }
+    if (this.#closed || this.transport.closed) {
+      return { status: "unknown", reason: "Cursor Session is closed or faulted" };
+    }
+    if (this.#active || this.#configuring) {
+      return {
+        status: "busy",
+        reason: "Cursor Session still has native work or observation in progress",
+      };
+    }
+    // Resume loads the native Session from Cursor's local history; until a Turn
+    // has been verified there, that history may be missing. Keep the Session live.
+    if (this.#fresh) {
+      return { status: "unknown", reason: "Cursor has not persisted this Native Session yet" };
+    }
+    // close() marks the Session closed before awaiting the ACP process, so no
+    // late callback can publish work after this admission check.
+    await this.close();
+    return { status: "suspended", scope: "cursor-acp-session" };
   }
   close(): Promise<void> {
     this.#closePromise ??= this.#close();

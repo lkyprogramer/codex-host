@@ -846,6 +846,188 @@ describe("Cursor replay identity", () => {
   });
 });
 
+describe("Cursor idle suspension", () => {
+  it("suspends a persisted idle Session and resumes the same native identity", async () => {
+    const opens: Array<{ sessionId: string | undefined; options: unknown }> = [];
+    vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+      sessionId,
+      options,
+    ) {
+      opens.push({ sessionId, options });
+      this.sessionId = sessionId ?? info.sessionId;
+      // session/load replays persisted prompts; session/new has nothing to replay.
+      this.replay = sessionId
+        ? native.turns.map((turn) => ({
+            sessionId: this.sessionId,
+            update: {
+              sessionUpdate: "user_message_chunk" as const,
+              content: { type: "text" as const, text: turn.text },
+            },
+          }))
+        : [];
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "prompt").mockImplementation(async (text) => {
+      native.turns.push({ id: randomUUID(), text });
+      return { stopReason: "end_turn" };
+    });
+    const close = vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const adapter = new CursorAdapter();
+    try {
+      const opened = await adapter.open({ kind: "create", cwd: process.cwd() });
+      if (!opened.ok) throw new Error(opened.error.message);
+      const session = opened.value;
+      const lifecycle = session.resourceLifecycle;
+      if (!lifecycle) throw new Error("Missing idle lifecycle");
+      const output: HarnessOutput[] = [];
+      const done = (async () => {
+        for await (const item of session.outputs) output.push(item);
+      })();
+      expect((await session.execute(start)).ok).toBe(true);
+      await vi.waitFor(() =>
+        expect(output.some((x) => x.kind === "event" && x.event.type === "turn.completed")).toBe(
+          true,
+        ),
+      );
+
+      await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+        status: "suspended",
+        scope: "cursor-acp-session",
+      });
+      expect(close).toHaveBeenCalledTimes(1);
+      await done;
+      expect((await session.execute({ ...start, turnId: hostTurnIdSchema.parse("two") })).ok).toBe(
+        false,
+      );
+
+      const nativeRef = session.initialState.nativeRef;
+      if (!nativeRef) throw new Error("Missing Cursor native identity");
+      const resumed = await adapter.open({ kind: "resume", cwd: process.cwd(), nativeRef });
+      if (!resumed.ok) throw new Error(resumed.error.message);
+      expect(resumed.value.initialState.nativeRef).toEqual(nativeRef);
+      expect(resumed.value.executionReady).toBe(true);
+      expect(opens.at(-1)).toMatchObject({ sessionId: nativeRef.nativeSessionId });
+      await resumed.value.close();
+    } finally {
+      await adapter.close();
+    }
+  });
+  it("keeps an unpersisted Session live and reports abort as unknown", async () => {
+    const f = session();
+    const close = vi.spyOn(f.transport, "close");
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).resolves.toEqual({
+      status: "unknown",
+      reason: "Cursor has not persisted this Native Session yet",
+    });
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(f.session.resourceLifecycle.suspend(aborted.signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Cursor idle suspension was aborted",
+    });
+    expect(close).not.toHaveBeenCalled();
+    await f.session.close();
+    await f.done;
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).resolves.toEqual({ status: "unknown", reason: "Cursor Session is closed or faulted" });
+  });
+  it("refuses suspension while a snapshot read holds a replay process", async () => {
+    const f = session();
+    expect((await f.session.execute(start)).ok).toBe(true);
+    await vi.waitFor(() =>
+      expect(f.output.some((x) => x.kind === "event" && x.event.type === "turn.completed")).toBe(
+        true,
+      ),
+    );
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let opening!: () => void;
+    const opened = new Promise<void>((resolve) => {
+      opening = resolve;
+    });
+    vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (
+      this: CursorTransport,
+    ) {
+      opening();
+      await released;
+      this.replay = native.turns.map((turn) => ({
+        sessionId: info.sessionId,
+        update: {
+          sessionUpdate: "user_message_chunk" as const,
+          content: { type: "text" as const, text: turn.text },
+        },
+      }));
+      return info;
+    });
+    vi.spyOn(CursorTransport.prototype, "close").mockResolvedValue();
+    const snapshot = f.session.readSnapshot();
+    await opened;
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "busy" });
+    release();
+    expect((await snapshot).ok).toBe(true);
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).resolves.toEqual({ status: "suspended", scope: "cursor-acp-session" });
+    await f.done;
+  });
+  it("refuses suspension while a Turn is running with a pending approval", async () => {
+    const f = session();
+    const close = vi.spyOn(f.transport, "close");
+    let release!: () => void;
+    const released = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    f.transport.action = async (text, callbacks) => {
+      void callbacks.permission({
+        sessionId: info.sessionId,
+        toolCall: { toolCallId: "p", title: "shell" },
+        options: [{ kind: "allow_once", optionId: "yes", name: "Allow" }],
+      });
+      await released;
+      native.turns.push({ id: randomUUID(), text });
+      return { stopReason: "end_turn" };
+    };
+    expect((await f.session.execute(start)).ok).toBe(true);
+    await vi.waitFor(() => expect(f.output.some((x) => x.kind === "interaction")).toBe(true));
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "busy" });
+    expect(close).not.toHaveBeenCalled();
+    release();
+    await vi.waitFor(() =>
+      expect(f.output.some((x) => x.kind === "event" && x.event.type === "turn.completed")).toBe(
+        true,
+      ),
+    );
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).resolves.toEqual({ status: "suspended", scope: "cursor-acp-session" });
+    expect(close).toHaveBeenCalledTimes(1);
+    await f.done;
+  });
+  it("does not report suspension when native process cleanup rejects", async () => {
+    const f = session();
+    expect((await f.session.execute(start)).ok).toBe(true);
+    await vi.waitFor(() =>
+      expect(f.output.some((x) => x.kind === "event" && x.event.type === "turn.completed")).toBe(
+        true,
+      ),
+    );
+    vi.spyOn(f.transport, "close").mockRejectedValue(new Error("owned group remains"));
+    await expect(
+      f.session.resourceLifecycle.suspend(new AbortController().signal),
+    ).rejects.toBeInstanceOf(AggregateError);
+    await f.done;
+  });
+});
 describe("Cursor cleanup ownership", () => {
   it("keeps a Session owned when native process cleanup rejects", async () => {
     vi.spyOn(CursorTransport.prototype, "open").mockImplementation(async function (

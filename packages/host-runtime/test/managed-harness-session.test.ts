@@ -309,6 +309,88 @@ describe("ManagedHarnessSession", () => {
     await managed.close();
   });
 
+  it("resumes a suspended history Session as history for reads and live only for execution", async () => {
+    const history = session();
+    Object.defineProperty(history, "executionReady", { value: false });
+    lifecycle(history);
+    const historyAgain = session();
+    Object.defineProperty(historyAgain, "executionReady", { value: false });
+    lifecycle(historyAgain);
+    const live = session();
+    lifecycle(live);
+    const resume = vi.fn(async (options?: { skipSnapshot?: boolean; historyOnly?: boolean }) =>
+      options?.historyOnly ? historyAgain : live,
+    );
+    const managed = new ManagedHarnessSession({
+      session: history,
+      resume,
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+
+    await expect(managed.resourceLifecycle?.suspend(new AbortController().signal)).resolves.toEqual(
+      { status: "suspended", scope: "native-session" },
+    );
+    expect(history.closed).toBe(true);
+
+    await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(resume).toHaveBeenLastCalledWith({ historyOnly: true });
+    expect(live.closed).toBe(false);
+    await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(resume).toHaveBeenCalledTimes(1);
+
+    const started = await managed.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("turn-live"),
+      input: [{ type: "text", text: "continue" }],
+    });
+    expect(started.ok).toBe(true);
+    expect(resume).toHaveBeenCalledTimes(2);
+    expect(resume).toHaveBeenLastCalledWith({ skipSnapshot: true });
+    expect(historyAgain.closed).toBe(true);
+    live.succeedTurn();
+    for (let index = 0; index < 8; index += 1) {
+      const next = await outputs.next();
+      if (next.done) break;
+      if (next.value.kind === "event" && next.value.event.type === "session.faulted") {
+        throw new Error("history resume must not fault the Session");
+      }
+      if (next.value.kind === "event" && next.value.event.type === "turn.completed") break;
+    }
+    await managed.close();
+  });
+
+  it("treats a live Session returned by a history resume as live", async () => {
+    const history = session();
+    Object.defineProperty(history, "executionReady", { value: false });
+    lifecycle(history);
+    const live = session();
+    lifecycle(live);
+    const resume = vi.fn(async () => live);
+    const managed = new ManagedHarnessSession({
+      session: history,
+      resume,
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    managed.outputs[Symbol.asyncIterator]();
+    await managed.resourceLifecycle?.suspend(new AbortController().signal);
+    await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(resume).toHaveBeenLastCalledWith({ historyOnly: true });
+
+    const started = await managed.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("turn-live"),
+      input: [{ type: "text", text: "continue" }],
+    });
+    expect(started.ok).toBe(true);
+    expect(resume).toHaveBeenCalledTimes(1);
+    expect(live.closed).toBe(false);
+    await managed.close();
+  });
+
   it("faults instead of opening a live Session when history cleanup fails", async () => {
     const history = session();
     Object.defineProperty(history, "executionReady", { value: false });
