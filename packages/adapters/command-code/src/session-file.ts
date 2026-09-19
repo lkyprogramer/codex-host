@@ -12,7 +12,6 @@
  * uses `text`, `thinking` and `tool_use` blocks. Anything else is skipped rather
  * than guessed.
  */
-import { randomUUID } from "node:crypto";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -28,6 +27,7 @@ import {
   hostItemIdSchema,
   nativeTurnRefSchema,
   type HarnessId,
+  type HostItemId,
   type JsonValue,
 } from "@codexhost/shared-contracts";
 
@@ -59,9 +59,9 @@ interface StoredMessage {
   timestampMs: number | undefined;
 }
 
+/** Same precedence as the CLI (`HOME ?? USERPROFILE ?? homedir()`), including an empty `HOME`. */
 export function commandCodeHomeDirectory(environment: NodeJS.ProcessEnv): string {
-  const home = environment.HOME ?? environment.USERPROFILE;
-  return home && home.trim() ? home : os.homedir();
+  return environment.HOME ?? environment.USERPROFILE ?? os.homedir();
 }
 
 export function commandCodeProjectsDirectory(environment: NodeJS.ProcessEnv): string {
@@ -98,7 +98,8 @@ function parseHeader(line: string | undefined): CommandCodeSessionHeader | null 
   };
 }
 
-async function readBoundedFile(filePath: string): Promise<string | null> {
+/** Whole transcript text, or null when missing, not a file or beyond the size bound. */
+export async function readCommandCodeTranscript(filePath: string): Promise<string | null> {
   try {
     const info = await stat(filePath);
     if (!info.isFile() || info.size > MAX_SESSION_FILE_BYTES) return null;
@@ -112,7 +113,7 @@ async function readBoundedFile(filePath: string): Promise<string | null> {
 export async function readCommandCodeSessionFile(
   filePath: string,
 ): Promise<CommandCodeSessionFile | null> {
-  const content = await readBoundedFile(filePath);
+  const content = await readCommandCodeTranscript(filePath);
   if (content === null) return null;
   const header = parseHeader(content.split(/\r?\n/u, 1)[0]);
   return header ? { path: filePath, header } : null;
@@ -264,6 +265,14 @@ interface TurnAccumulator {
 }
 
 /**
+ * Item identity derived from the stored entry and block position, so a
+ * re-read of the same transcript yields the same IDs.
+ */
+function historyItemId(entryId: string, ordinal: number): HostItemId {
+  return hostItemIdSchema.parse(`command-code-item-v1-${entryId}-${ordinal}`);
+}
+
+/**
  * Replays the active branch as Host Turns. Outcomes are not recorded in the
  * file: a Turn that produced assistant content is reported as succeeded, an
  * unanswered prompt as unknown.
@@ -314,13 +323,13 @@ export function commandCodeSessionTurns(input: {
     if (message.timestampMs !== undefined) current.lastTimestampMs = message.timestampMs;
     if (message.role === "assistant" && Array.isArray(message.content)) {
       current.sawAssistant = true;
-      for (const block of message.content) {
+      for (const [ordinal, block] of message.content.entries()) {
         if (!isRecord(block)) continue;
         if (block.type === "text" && typeof block.text === "string" && block.text.trim()) {
           current.items.push({
             item: {
               type: "agentMessage",
-              itemId: hostItemIdSchema.parse(newItemId()),
+              itemId: historyItemId(message.id, ordinal),
               text: block.text,
             },
             outcome: { status: "succeeded" },
@@ -333,7 +342,7 @@ export function commandCodeSessionTurns(input: {
           current.items.push({
             item: {
               type: "reasoning",
-              itemId: hostItemIdSchema.parse(newItemId()),
+              itemId: historyItemId(message.id, ordinal),
               text: block.thinking,
             },
             outcome: { status: "succeeded" },
@@ -345,7 +354,7 @@ export function commandCodeSessionTurns(input: {
         ) {
           const item: HostItem & { type: "toolExecution" } = {
             type: "toolExecution",
-            itemId: hostItemIdSchema.parse(newItemId()),
+            itemId: historyItemId(message.id, ordinal),
             toolName: block.name,
             arguments: jsonValue(block.input ?? {}),
           };
@@ -379,8 +388,4 @@ export function latestCommandCodePromptId(content: string): string | undefined {
   return activeBranchMessages(storedEntries(content))
     .reverse()
     .find((message) => message.role === "user" && message.source === "user")?.id;
-}
-
-function newItemId(): string {
-  return randomUUID();
 }

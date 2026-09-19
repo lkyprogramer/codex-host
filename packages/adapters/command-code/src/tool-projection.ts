@@ -1,4 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
 import { createTwoFilesPatch } from "diff";
@@ -37,11 +38,15 @@ export function isCommandCodeFileMutatingTool(toolName: string): boolean {
 }
 
 /** Absolute target of a file-mutating tool call, or null when the input is not usable. */
+/** Absolute target of a file-mutating tool call; the CLI expands a leading `~/` itself. */
 export function commandCodeToolTargetFile(input: unknown, cwd: string): string | null {
   if (!isRecord(input)) return null;
   const filePath = input.file_path;
   if (typeof filePath !== "string" || !filePath.trim() || filePath.includes("\0")) return null;
-  return path.isAbsolute(filePath) ? path.resolve(filePath) : path.resolve(cwd, filePath);
+  const expanded = filePath.startsWith("~/")
+    ? path.join(os.homedir(), filePath.slice(2))
+    : filePath;
+  return path.isAbsolute(expanded) ? path.resolve(expanded) : path.resolve(cwd, expanded);
 }
 
 export function displayPath(absolutePath: string, cwd: string): string {
@@ -100,20 +105,31 @@ export function commandCodeFileChange(input: {
 
 /**
  * Reverses an `edit_file` call on the file's current text to recover the
- * pre-edit content. Reading the file before the tool runs races the CLI, which
- * executes right after `tool_running`; the tool input is exact, so undoing the
- * replacement is the reliable source. A `new_string` that also occurs earlier
- * in the file can pick the wrong occurrence; the snapshot then remains the fallback.
+ * pre-edit content when the pre-execution snapshot cannot be trusted. Only the
+ * exact-match, single-or-all replacement forms are reversible: an empty
+ * `old_string` creates the file, `replacement_count` replaces a prefix of the
+ * occurrences, and the CLI's lenient matching (quotes, whitespace) means the
+ * replaced text may differ from `old_string`, so those forms return null.
  */
 export function reverseCommandCodeEdit(input: unknown, after: string): string | null {
   if (!isRecord(input)) return null;
-  const { old_string: oldString, new_string: newString, replace_all: replaceAll } = input;
+  const {
+    old_string: oldString,
+    new_string: newString,
+    replace_all: replaceAll,
+    replacement_count: replacementCount,
+  } = input;
   if (typeof oldString !== "string" || typeof newString !== "string") return null;
-  if (oldString === newString || !newString) return null;
-  if (!after.includes(newString)) return null;
+  if (!oldString || oldString === newString || !newString) return null;
+  if (replacementCount !== undefined || !after.includes(newString)) return null;
+  // A function replacement keeps `$&`, `$$` and friends in `old_string` literal.
   return replaceAll === true
-    ? after.replaceAll(newString, oldString)
-    : after.replace(newString, oldString);
+    ? after.replaceAll(newString, () => oldString)
+    : after.replace(newString, () => oldString);
+}
+
+function isCreateEdit(input: unknown): boolean {
+  return isRecord(input) && input.old_string === "";
 }
 
 export interface CommandCodeMutation {
@@ -125,17 +141,30 @@ export interface CommandCodeMutation {
   before: Promise<string | null | undefined>;
 }
 
-/** Resolves a completed file-mutating tool call into a File Change, or null when no patch is provable. */
+/**
+ * Resolves a completed file-mutating tool call into a File Change, or null
+ * when no patch is provable. The pre-execution snapshot is authoritative when
+ * it demonstrably predates the write (it differs from the current text or the
+ * file did not exist); a snapshot equal to the current text either raced the
+ * CLI or the edit was a no-op, and only then is the edit reversed from its
+ * exact input.
+ */
 export async function resolveCommandCodeFileChange(
   mutation: CommandCodeMutation,
 ): Promise<HostFileChange | null> {
   const after = await snapshotCommandCodeFile(mutation.absolutePath);
   if (after === undefined) return null;
+  const snapshot = await mutation.before;
   let before: string | null | undefined;
-  if (mutation.toolName === "edit_file" && after !== null) {
+  if (mutation.toolName === "edit_file" && isCreateEdit(mutation.input)) {
+    before = null;
+  } else if (snapshot !== undefined && snapshot !== after) {
+    before = snapshot;
+  } else if (mutation.toolName === "edit_file" && after !== null) {
     before = reverseCommandCodeEdit(mutation.input, after);
+  } else {
+    before = snapshot;
   }
-  before ??= await mutation.before;
   if (before === undefined) return null;
   return commandCodeFileChange({
     absolutePath: mutation.absolutePath,
@@ -152,7 +181,9 @@ export function startCommandCodeToolItem(
   cwd: string,
 ): HostCommandExecutionItem | HostToolExecutionItem {
   if (isCommandCodeCommandTool(toolName) && isRecord(input) && typeof input.command === "string") {
-    return { type: "commandExecution", itemId, command: input.command, cwd };
+    const commandCwd =
+      typeof input.cwd === "string" && input.cwd.trim() ? path.resolve(cwd, input.cwd) : cwd;
+    return { type: "commandExecution", itemId, command: input.command, cwd: commandCwd };
   }
   return { type: "toolExecution", itemId, toolName, arguments: jsonValue(input ?? {}) };
 }

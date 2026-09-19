@@ -246,7 +246,16 @@ export class CommandCodeTurnProjection {
       this.#completeItem(entry.item, outcome);
     }
     this.#tools.clear();
-    for (const toolCallId of [...this.#subagents.keys()]) this.stopSubagent(toolCallId, outcome);
+    // The print process is gone with the Turn, so a child that never reported
+    // `subagent_stop` did not finish, whatever the parent outcome.
+    for (const toolCallId of [...this.#subagents.keys()]) {
+      this.stopSubagent(
+        toolCallId,
+        outcome.status === "succeeded"
+          ? { status: "cancelled", reason: "Print run ended before the subagent finished" }
+          : outcome,
+      );
+    }
     if (this.#compactionItem) {
       this.#completeItem(this.#compactionItem, outcome);
       this.#compactionItem = null;

@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { HarnessOutput, HarnessSession, HostEvent } from "@codexhost/harness-adapter";
@@ -65,6 +65,17 @@ if (flag("-m") === "totally/unknown-model") {
     setInterval(() => {}, 1000);
     return;
   }
+  if (prompt.includes("denied")) {
+    emit({ type: "tool_queued", toolCallId: "c-deny", toolName: "run_command", input: { command: "rm -rf /" } });
+    emit({ type: "tool_denied", toolCallId: "c-deny", toolName: "run_command" });
+    emit({ type: "tool_queued", toolCallId: "c-err", toolName: "read_file", input: { file_path: path.join(cwd, "missing.txt") } });
+    emit({ type: "tool_running", toolCallId: "c-err", toolName: "read_file" });
+    emit({ type: "tool_errored", toolCallId: "c-err", toolName: "read_file", error: "ENOENT: missing.txt" });
+  }
+  if (prompt.includes("cwdshell")) {
+    emit({ type: "tool_queued", toolCallId: "c-cwd", toolName: "shell_command", input: { command: "ls", cwd: "sub" } });
+    emit({ type: "tool_completed", toolCallId: "c-cwd", toolName: "shell_command", result: [{ type: "text", text: "a\n" }] });
+  }
   if (prompt.includes("think")) {
     emit({ type: "thinking_start" });
     emit({ type: "thinking_delta", delta: "plan" });
@@ -109,8 +120,9 @@ if (flag("-m") === "totally/unknown-model") {
     session.compaction();
     emit({ type: "compaction_done", tokensSaved: 100 });
   }
-  const finalText = prompt.includes("sayfirst") ? "I'll update the file now." : prompt.includes("noresponse") ? "" : "Hello";
-  if (!prompt.includes("sayfirst") && !prompt.includes("noresponse")) {
+  const silent = prompt.includes("noresponse") || prompt.includes("refused");
+  const finalText = prompt.includes("sayfirst") ? "I'll update the file now." : silent ? "" : "Hello";
+  if (!prompt.includes("sayfirst") && !silent) {
     emit({ type: "text_delta", delta: "Hel" });
     emit({ type: "text_delta", delta: "lo" });
   }
@@ -125,6 +137,8 @@ if (flag("-m") === "totally/unknown-model") {
   const usage = { inputTokens: 12, outputTokens: 6, cacheReadTokens: 1, cacheWriteTokens: 0 };
   emit({ type: "run_end", result: { finalText, stopReason: "end_turn", turnCount: 1, usage } });
   session.flush();
+  // The transcript vanished before the run reported: identity must not bind.
+  if (prompt.includes("vanish")) session.remove();
   result({ subtype: "success", sessionId, stopReason: "end_turn", usage, durationMs: 7, finalText });
   if (prompt.includes("noresponse")) {
     process.stderr.write("Error: No response from the model\n");
@@ -133,6 +147,11 @@ if (flag("-m") === "totally/unknown-model") {
   if (prompt.includes("refused")) {
     process.stderr.write("Error: This prompt was refused by policy\n");
     process.exit(1);
+  }
+  if (prompt.includes("linger")) {
+    // Mod-host teardown after the result line; a SIGTERM here would exit 130.
+    setTimeout(() => process.exit(0), 1500);
+    return;
   }
   process.exit(0);
 })();
@@ -489,11 +508,7 @@ describe("Command Code Adapter", () => {
           },
         },
       });
-      // The streamed answer of a refused run is still delivered, as a failed Item.
-      expect(completedItems(refused.events).at(-1)).toMatchObject({
-        item: { type: "agentMessage", text: "Hello" },
-        outcome: { status: "failed" },
-      });
+      expect(completedItems(refused.events)).toEqual([]);
     } finally {
       await adapter.close();
     }
@@ -659,6 +674,7 @@ describe("Command Code Adapter", () => {
         "agentMessage",
       ]);
       expect(resumed.value.initialState.nativeRef).toEqual(nativeRef);
+      expect(resumed.value.executionReady).toBe(false);
       expect(
         await resumed.value.execute({
           type: "turn.start",
@@ -711,6 +727,151 @@ describe("Command Code Adapter", () => {
       ).toMatchObject({ ok: false, error: { code: "unsupported" } });
     } finally {
       await fresh.close();
+    }
+  });
+
+  it("keeps the native outcome when cancel arrives after the result line", async () => {
+    const fake = await fixture();
+    const adapter = open(fake);
+    try {
+      const opened = await adapter.open({ kind: "create", cwd: fake.cwd });
+      if (!opened.ok) throw new Error(opened.error.message);
+      const session = opened.value;
+      const outputs = session.outputs[Symbol.asyncIterator]();
+      const turnId = hostTurnIdSchema.parse("linger");
+      await session.execute({
+        type: "turn.start",
+        turnId,
+        input: [{ type: "text", text: "linger" }],
+      });
+      // Usage is published at turn_end, run_end and finally from the result line;
+      // cancelling after the third reading means the result line is already in.
+      let usageReadings = 0;
+      for (;;) {
+        const next = await outputs.next();
+        if (next.done || next.value.kind !== "event") throw new Error("ended early");
+        if (next.value.event.type === "session.usage.changed" && ++usageReadings === 3) break;
+      }
+      expect(await session.execute({ type: "turn.cancel", turnId })).toEqual({
+        ok: true,
+        value: { cancellationRequested: true },
+      });
+      const rest = await collectTurn(outputs, turnId);
+      expect(terminal(rest.events)).toMatchObject({
+        outcome: { status: "succeeded" },
+        nativeTurnRef: { nativeTurnKey: expect.stringMatching(/^p-/u) },
+      });
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("keys a cancelled Turn on a resumed Session by its already-persisted prompt", async () => {
+    const fake = await fixture();
+    const adapter = open(fake);
+    try {
+      const opened = await adapter.open({ kind: "create", cwd: fake.cwd });
+      if (!opened.ok) throw new Error(opened.error.message);
+      const session = opened.value;
+      const outputs = session.outputs[Symbol.asyncIterator]();
+      const first = await runTurn(session, outputs, "first", "read");
+      const firstKey = terminal(first.events).nativeTurnRef?.nativeTurnKey;
+      const turnId = hostTurnIdSchema.parse("hang-resumed");
+      await session.execute({
+        type: "turn.start",
+        turnId,
+        input: [{ type: "text", text: "hang" }],
+      });
+      // Let the fixture append the prompt (a resumed transcript flushes at once).
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      await session.execute({ type: "turn.cancel", turnId });
+      const cancelled = await collectTurn(outputs, turnId);
+      expect(terminal(cancelled.events)).toMatchObject({
+        outcome: { status: "cancelled" },
+        nativeTurnRef: { nativeTurnKey: expect.stringMatching(/^p-/u) },
+      });
+      expect(terminal(cancelled.events).nativeTurnRef?.nativeTurnKey).not.toBe(firstKey);
+      const snapshot = await session.readSnapshot();
+      expect(snapshot.ok && snapshot.value.turns.map((turn) => turn.outcome.status)).toEqual([
+        "succeeded",
+        "cancelled",
+      ]);
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("never binds identity to a transcript that is gone by the terminal", async () => {
+    const fake = await fixture();
+    const adapter = open(fake);
+    try {
+      const opened = await adapter.open({ kind: "create", cwd: fake.cwd });
+      if (!opened.ok) throw new Error(opened.error.message);
+      const outputs = opened.value.outputs[Symbol.asyncIterator]();
+      const { events } = await runTurn(opened.value, outputs, "vanish", "vanish");
+      expect(events.some((event) => event.type === "session.state.changed")).toBe(false);
+      expect(terminal(events)).toMatchObject({ outcome: { status: "succeeded" } });
+      expect(terminal(events)).not.toHaveProperty("nativeTurnRef");
+      expect(opened.value.initialState.nativeRef).toBeUndefined();
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("projects denied and errored tools and a shell cwd, and ends outputs when closed mid-Turn", async () => {
+    const fake = await fixture();
+    const adapter = open(fake);
+    try {
+      const opened = await adapter.open({ kind: "create", cwd: fake.cwd });
+      if (!opened.ok) throw new Error(opened.error.message);
+      const session = opened.value;
+      const outputs = session.outputs[Symbol.asyncIterator]();
+      const { events } = await runTurn(session, outputs, "tools", "denied cwdshell");
+      const items = completedItems(events);
+      expect(items[0]).toMatchObject({
+        item: { type: "toolExecution", toolName: "run_command" },
+        outcome: {
+          status: "failed",
+          error: { message: expect.stringMatching(/denied or unknown/u) },
+        },
+      });
+      expect(items[1]).toMatchObject({
+        item: { type: "toolExecution", toolName: "read_file" },
+        outcome: {
+          status: "failed",
+          error: { message: expect.stringMatching(/ENOENT: missing.txt/u) },
+        },
+      });
+      expect(items[2]).toMatchObject({
+        item: {
+          type: "commandExecution",
+          command: "ls",
+          cwd: path.join(await realpath(fake.cwd), "sub"),
+        },
+      });
+
+      const turnId = hostTurnIdSchema.parse("closing");
+      await session.execute({
+        type: "turn.start",
+        turnId,
+        input: [{ type: "text", text: "hang" }],
+      });
+      const closing = session.close();
+      const { events: closed } = await collectTurn(outputs, turnId);
+      expect(terminal(closed)).toMatchObject({
+        outcome: { status: "cancelled", reason: "Session closed" },
+      });
+      await closing;
+      expect((await outputs.next()).done).toBe(true);
+      expect(
+        await session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse("after-close"),
+          input: [{ type: "text", text: "hi" }],
+        }),
+      ).toMatchObject({ ok: false, error: { code: "invalidState" } });
+    } finally {
+      await adapter.close();
     }
   });
 

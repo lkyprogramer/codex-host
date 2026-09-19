@@ -141,12 +141,29 @@ export function commandCodeResultError(
       retryable: false,
     };
   }
+  // The error path prints its result line before exiting with the documented
+  // code, so the code decides retryability the same way it does without a line.
+  const retryable = isRetryableExit(exitCode) && !/insufficient credits/iu.test(native);
   return {
     code: "nativeFailure",
     message: native ? `Command Code Turn failed: ${native}` : "Command Code Turn failed",
-    retryable: !(exitCode === EXIT_INSUFFICIENT_CREDITS || /insufficient credits/iu.test(native)),
+    retryable,
     ...diagnosticFields(diagnostics),
   };
+}
+
+/** Transient service conditions and unknown exits are retryable; deterministic rejections are not. */
+function isRetryableExit(code: number | null): boolean {
+  switch (code) {
+    case EXIT_ERROR:
+    case EXIT_PERMISSION_DENIED:
+    case EXIT_MAX_TURNS_REACHED:
+    case EXIT_NO_RESPONSE:
+    case EXIT_INSUFFICIENT_CREDITS:
+      return false;
+    default:
+      return true;
+  }
 }
 
 export type CommandCodeTerminalDecision =

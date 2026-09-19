@@ -38,6 +38,8 @@ export {
   commandCodeFileChange,
   commandCodeToolOutput,
   completeCommandCodeToolItem,
+  resolveCommandCodeFileChange,
+  reverseCommandCodeEdit,
   startCommandCodeToolItem,
 } from "./tool-projection.js";
 export { accumulateCommandCodeUsage, commandCodeHostUsage } from "./usage.js";

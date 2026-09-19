@@ -17,6 +17,7 @@ import {
   parseCommandCodeModels,
   isCommandCodeAuthenticationText,
   parseCommandCodeStreamLine,
+  reverseCommandCodeEdit,
 } from "../src/index.js";
 
 /** Captured from `cmd -p --output-format json` (1.58.0) on an account without credits. */
@@ -145,9 +146,31 @@ describe("Command Code print protocol", () => {
         "",
       ),
     ).toMatchObject({ code: "nativeFailure", retryable: false });
+    // The error path always prints a result line, so the exit code decides retryability.
     expect(
-      commandCodeResultError({ type: "result", subtype: "error", error: "POST failed" }, 1, ""),
+      commandCodeResultError({ type: "result", subtype: "error", error: "POST failed" }, 6, ""),
     ).toMatchObject({ code: "nativeFailure", retryable: true });
+    expect(
+      commandCodeResultError({ type: "result", subtype: "error", error: "spend cap" }, 4, ""),
+    ).toMatchObject({ code: "nativeFailure", retryable: false });
+    expect(
+      commandCodeResultError({ type: "result", subtype: "error", error: "boom" }, 1, ""),
+    ).toMatchObject({ code: "nativeFailure", retryable: false });
+  });
+
+  it("reverses only exact edits and keeps replacement patterns literal", () => {
+    const after = "run: echo hi\n";
+    expect(
+      reverseCommandCodeEdit({ old_string: "echo $$HOME $& $' x", new_string: "echo hi" }, after),
+    ).toBe("run: echo $$HOME $& $' x\n");
+    expect(
+      reverseCommandCodeEdit({ old_string: "a", new_string: "b", replace_all: true }, "b b b"),
+    ).toBe("a a a");
+    expect(
+      reverseCommandCodeEdit({ old_string: "a", new_string: "b", replacement_count: 2 }, "b b b"),
+    ).toBeNull();
+    expect(reverseCommandCodeEdit({ old_string: "", new_string: "fresh" }, "fresh")).toBeNull();
+    expect(reverseCommandCodeEdit({ old_string: "x", new_string: "y" }, "no match")).toBeNull();
   });
 
   it("lets the exit code qualify a success result line", () => {

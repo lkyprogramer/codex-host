@@ -81,7 +81,8 @@ const projectDir = path.join(home, ".commandcode", "projects", "fixture-project"
 /**
  * Mirrors the CLI's v3 store: entries are buffered in memory and the file is
  * only written on the first assistant message or an explicit flush (the CLI's
- * finally block). A run killed before either leaves no transcript behind.
+ * finally block); once it exists, entries append immediately. A fresh run
+ * killed before either leaves no transcript behind.
  */
 const store = (sessionId, cwd) => {
   const file = path.join(projectDir, sessionId + ".jsonl");
@@ -109,11 +110,17 @@ const store = (sessionId, cwd) => {
   const append = (id, entry) => {
     pending.push({ id, parentId: lastId, timestamp: new Date().toISOString(), ...entry });
     lastId = id;
-    if (entry.type === "message" && entry.message.role === "assistant") flush();
+    // A resumed transcript is already flushed, so every entry appends at once;
+    // a new one waits for the first assistant message.
+    if (written || (entry.type === "message" && entry.message.role === "assistant")) flush();
   };
   return {
     file,
     flush,
+    remove: () => {
+      pending.splice(0);
+      if (fs.existsSync(file)) fs.unlinkSync(file);
+    },
     prompt: (text) =>
       append("p-" + process.pid + "-" + Date.now().toString(36), {
         type: "message",

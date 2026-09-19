@@ -158,6 +158,17 @@ describe("Command Code session file", () => {
     expect(second?.nativeTurnRef.nativeTurnKey).toBe("m6");
     expect(second?.outcome).toMatchObject({ status: "unknown" });
     expect(latestCommandCodePromptId(TRANSCRIPT)).toBe("m6");
+    // Item identity is derived from the stored entry, so a re-read matches.
+    const again = commandCodeSessionTurns({
+      content: TRANSCRIPT,
+      harnessId,
+      nativeSessionId: "s-1",
+      toolOutputLimit: 3,
+    });
+    expect(again.map((turn) => turn.items.map(({ item }) => item.itemId))).toEqual(
+      turns.map((turn) => turn.items.map(({ item }) => item.itemId)),
+    );
+    expect(first?.items[0]?.item.itemId).toBe("command-code-item-v1-m2-0");
   });
 
   it("finds a Session by ID across project directories and validates its header", async () => {

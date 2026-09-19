@@ -1,5 +1,3 @@
-import { readFile } from "node:fs/promises";
-
 import {
   HarnessOutputChannel,
   type HarnessError,
@@ -59,7 +57,11 @@ import {
   spawnCommandCodePrint,
   type CommandCodePrintProcess,
 } from "./print-turn.js";
-import { findCommandCodeSessionFile, latestCommandCodePromptId } from "./session-file.js";
+import {
+  findCommandCodeSessionFile,
+  latestCommandCodePromptId,
+  readCommandCodeTranscript,
+} from "./session-file.js";
 import {
   commandCodeErrorMessage,
   type CommandCodeAgentEvent,
@@ -118,13 +120,11 @@ export function invalidState(message: string): HarnessError {
   return { code: "invalidState", message, retryable: false };
 }
 
-async function latestPromptIdOf(filePath: string | undefined): Promise<string | undefined> {
+/** Newest prompt ID in the transcript; `null` when the transcript is missing or unreadable. */
+async function latestPromptIdOf(filePath: string | undefined): Promise<string | undefined | null> {
   if (!filePath) return undefined;
-  try {
-    return latestCommandCodePromptId(await readFile(filePath, "utf8"));
-  } catch {
-    return undefined;
-  }
+  const content = await readCommandCodeTranscript(filePath);
+  return content === null ? null : latestCommandCodePromptId(content);
 }
 
 export class CommandCodeSession implements HarnessSession {
@@ -134,6 +134,8 @@ export class CommandCodeSession implements HarnessSession {
   readonly initialUsage: HostUsage | null = null;
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly resourceLifecycle: HarnessResourceLifecycle;
+  /** False for a history-only open without the CLI; the Host resumes live before executing. */
+  readonly executionReady: boolean;
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly #catalog: HarnessModelCatalog | undefined;
   readonly #cwd: string;
@@ -179,6 +181,7 @@ export class CommandCodeSession implements HarnessSession {
     this.#toolOutputLimit = input.toolOutputLimit;
     this.#turns = input.turns;
     this.#onClosed = input.onClosed;
+    this.executionReady = input.executable !== undefined;
     this.initialState = this.#state();
     this.outputs = this.#channel.outputs;
     this.resourceLifecycle = { suspend: (signal) => this.#suspend(signal) };
@@ -251,15 +254,20 @@ export class CommandCodeSession implements HarnessSession {
   async #close(): Promise<void> {
     this.#closed = true;
     const active = this.#active;
-    if (active) {
-      active.cancellationRequested = true;
-      const stopping = active.process.stop();
-      this.#completeTurn(active, { status: "cancelled", reason: "Session closed" });
-      await stopping;
-      await active.queue.catch(() => undefined);
+    try {
+      if (active) {
+        active.cancellationRequested = true;
+        const stopping = active.process.stop();
+        this.#completeTurn(active, { status: "cancelled", reason: "Session closed" });
+        await stopping;
+        await active.queue.catch(() => undefined);
+      }
+    } finally {
+      // Outputs must end even when the process group could not be confirmed
+      // gone; the rejection still reaches the Adapter's cleanup aggregate.
+      this.#channel.end();
+      this.#onClosed();
     }
-    this.#channel.end();
-    this.#onClosed();
   }
 
   async #suspend(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
@@ -301,45 +309,27 @@ export class CommandCodeSession implements HarnessSession {
         error: { code: "invalidRequest", message: "Command Code Turn is empty", retryable: false },
       };
     }
+    const transcriptMissing: HarnessError = {
+      code: "sessionNotFound",
+      message:
+        "Command Code Session transcript was not found under ~/.commandcode/projects; the Session cannot be continued",
+      retryable: false,
+    };
     if (this.#nativeRef && !this.#sessionFilePath) {
       const file = await findCommandCodeSessionFile(
         this.#environment,
         this.#nativeRef.nativeSessionId,
       );
-      if (this.#active) {
-        return {
-          ok: false,
-          error: {
-            code: "sessionBusy",
-            message: "Command Code Turn is already running",
-            retryable: true,
-          },
-        };
-      }
-      if (!file) {
-        return {
-          ok: false,
-          error: {
-            code: "sessionNotFound",
-            message:
-              "Command Code Session transcript was not found under ~/.commandcode/projects; the Session cannot be continued",
-            retryable: false,
-          },
-        };
-      }
+      const interrupted = this.#notStartable();
+      if (interrupted) return { ok: false, error: interrupted };
+      if (!file) return { ok: false, error: transcriptMissing };
       this.#sessionFilePath = file.path;
     }
+    // A transcript deleted between Turns must not become a retryable CLI error.
     const priorPromptId = await latestPromptIdOf(this.#sessionFilePath);
-    if (this.#active) {
-      return {
-        ok: false,
-        error: {
-          code: "sessionBusy",
-          message: "Command Code Turn is already running",
-          retryable: true,
-        },
-      };
-    }
+    const interrupted = this.#notStartable();
+    if (interrupted) return { ok: false, error: interrupted };
+    if (priorPromptId === null) return { ok: false, error: transcriptMissing };
     const arguments_ = commandCodePrintArguments({
       ...(this.#sessionFilePath ? { sessionFilePath: this.#sessionFilePath } : {}),
       ...(this.#model ? { model: this.#model } : {}),
@@ -404,6 +394,19 @@ export class CommandCodeSession implements HarnessSession {
     return { ok: true, value: { turnId: command.turnId } };
   }
 
+  /** Re-checked after every await in `#start`: close and cancel-failure are not serialized by the Host. */
+  #notStartable(): HarnessError | null {
+    if (this.#closed) return invalidState("Command Code Session is closed");
+    if (this.#active) {
+      return {
+        code: "sessionBusy",
+        message: "Command Code Turn is already running",
+        retryable: true,
+      };
+    }
+    return null;
+  }
+
   #enqueue(active: ActiveTurn, work: () => Promise<void> | void): void {
     active.queue = active.queue.then(work).catch((error: unknown) => {
       if (this.#active !== active) return;
@@ -465,22 +468,25 @@ export class CommandCodeSession implements HarnessSession {
         return;
       }
       case "tool_denied":
-        // Headless confirmTool denies any tool that carries a risk marker, in every mode.
+        // Emitted for unknown tool names as well as for risk-marked tools that a
+        // headless run cannot ask approval for.
         await projection.finishTool(event.toolCallId, event.toolName, undefined, {
           code: "nativeFailure",
-          message: `Command Code declined tool '${event.toolName}' (headless runs cannot ask for approval)`,
+          message: `Command Code did not run tool '${event.toolName}' (denied or unknown in a headless run)`,
           retryable: false,
         });
         return;
-      case "tool_hook_blocked":
+      case "tool_hook_blocked": {
+        const reason = commandCodeErrorMessage(event.hookOutput);
         await projection.finishTool(event.toolCallId, event.toolName, undefined, {
           code: "nativeFailure",
           message: `Command Code blocked tool '${event.toolName}' before execution${
             this.#permissionMode === "bypass" ? "" : ` (permission mode '${this.#permissionMode}')`
-          }`,
+          }${reason ? `: ${reason}` : ""}`,
           retryable: false,
         });
         return;
+      }
       case "subagent_start":
         projection.startSubagent(
           event.toolCallId,
@@ -575,8 +581,10 @@ export class CommandCodeSession implements HarnessSession {
     }
     const exitCode = active.exit?.code ?? null;
     let outcome: TurnOutcome;
-    if (active.cancellationRequested || active.interrupted) {
+    if (active.cancellationRequested) {
       outcome = { status: "cancelled", reason: "Cancelled by user" };
+    } else if (active.interrupted) {
+      outcome = { status: "cancelled", reason: "Interrupted by Command Code" };
     } else if (active.result) {
       const decision = commandCodeTerminalDecision({
         result: active.result,
@@ -694,9 +702,12 @@ export class CommandCodeSession implements HarnessSession {
     if (!active || active.command.turnId !== command.turnId) {
       return { ok: false, error: invalidState("Command Code Turn is not active") };
     }
-    // Once the result line is in, the native Turn has finished; the request is
-    // accepted but the native outcome stands.
-    if (!active.result) active.cancellationRequested = true;
+    // Once the result line is in, the native Turn has finished: the request is
+    // accepted, the native outcome stands, and the run is left to exit on its
+    // own (bounded by the result grace timer) rather than signalled into a
+    // misleading exit 130.
+    if (active.result) return { ok: true, value: { cancellationRequested: true } };
+    active.cancellationRequested = true;
     try {
       await active.process.stop();
     } catch (error) {
