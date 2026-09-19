@@ -161,6 +161,7 @@ This is an integration overview, not certification of every native version. Conf
 | Kiro CLI | ACP agent engine v3 | Supported, including cross-directory Fork | Invalid permission values are rejected; subagent observation without transcript reads |
 | CodeBuddy | ACP | Unsupported | Native configuration and interactions; no Host-simulated history derivation |
 | Cursor CLI | ACP + native history | Unsupported | Reasoning through native model variants; unattended execution uses native `--force` |
+| Command Code | CLI print-mode NDJSON + native transcript | Unsupported | One `-p` process per Turn; permission modes are Skip / Read-only / Plan only, see [integration notes](command-code-harness-integration.md) |
 
 **Antigravity:** uses native `--dangerously-skip-permissions` only. codexhost does not add tool approvals or workspace access restrictions; see [permissions](antigravity-tool-approval.md) and [subagents](antigravity-subagents.md).
 
@@ -226,7 +227,7 @@ This path does not add a public service or TCP port. Harness credentials remain 
 <details>
 <summary><h3>How it works</h3></summary>
 
-codexhost integrates through each Harness's native interface: SDK for Claude Code, RPC for Pi / OMP, ACP for Grok / Kiro / CodeBuddy / Cursor, managed Web for DeepSeek, and CLI / Hook for Antigravity.
+codexhost integrates through each Harness's native interface: SDK for Claude Code, RPC for Pi / OMP, ACP for Grok / Kiro / CodeBuddy / Cursor, managed Web for DeepSeek, CLI / Hook for Antigravity, and CLI print mode for Command Code.
 
 - **Desktop:** retain the official shell and enhance selection and presentation through CDP / Electron Inspector and the Renderer Extension.
 - **Host:** forward official Codex requests; own external protocol projection, operation reservations, persistence, and recovery.

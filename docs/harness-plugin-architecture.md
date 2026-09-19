@@ -112,7 +112,7 @@ ACP 实现的可复用边界见[ACP 接入与复用](acp-layer-follow-up.md)。
 
 ## 发行、信任与 Native 平台
 
-[发行清单](../scripts/release/harness-plugins.json)拥有当前十个预装插件及各自运行依赖白名单。构建为每个插件生成独立 Bundle、资源、Manifest 和 `build-receipt.json`，记录 Bundle hash、实际依赖版本/许可、API 版本和 Node target。SDK 版本不是用户安装的原生 Harness 版本；未知 native version 为 `null`。
+[发行清单](../scripts/release/harness-plugins.json)拥有当前十一个预装插件及各自运行依赖白名单。构建为每个插件生成独立 Bundle、资源、Manifest 和 `build-receipt.json`，记录 Bundle hash、实际依赖版本/许可、API 版本和 Node target。SDK 版本不是用户安装的原生 Harness 版本；未知 native version 为 `null`。
 
 API v1 采用整数精确匹配；加性可选字段保持兼容，破坏性合同变化需要新的 API 版本。不引入插件市场、自动依赖安装、热替换或任意插件 UI。实际发行集合与 Host 运行时注册分开维护。
 

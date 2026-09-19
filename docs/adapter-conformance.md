@@ -73,9 +73,9 @@ await writeFile(receiptPath, serializeConformanceReceipt(receipt));
 
 `fork`、`rollback`、`permissionAtCreate`、`subagents` 均为能力条件：未声明是 `skipped`；声明但 fixture 没有执行原生场景是 `notCovered`；只有原生场景验证 identity/readback/cleanup 后才能是 `passed`。
 
-收据顶层区分 `passed`、`incomplete` 和 `failed`：任何失败优先为 `failed`；存在 `notCovered` 或缺少原生清理读回时为 `incomplete`；只有全部适用场景及清理证据完成才为 `passed`。不支持能力的 `skipped` 不会降低状态。当前十个 Adapter 的核心生命周期回归通过时，仍可能正确返回 `incomplete`，不能把这个结果称为全能力认证。
+收据顶层区分 `passed`、`incomplete` 和 `failed`：任何失败优先为 `failed`；存在 `notCovered` 或缺少原生清理读回时为 `incomplete`；只有全部适用场景及清理证据完成才为 `passed`。不支持能力的 `skipped` 不会降低状态。当前十一个 Adapter 的核心生命周期回归通过时，仍可能正确返回 `incomplete`，不能把这个结果称为全能力认证。
 
-当前十个 Adapter 都已接入同一 driver。下面的证据来自实际 Adapter 和可控 native 边界；它不代表安装 Bundle、真实 Provider、Desktop 重启或所有可选能力已通过。最终执行结果见[整改验证报告](full-project-review-2026-09-12/remediation/README.md)。
+当前十一个 Adapter 都已接入同一 driver。下面的证据来自实际 Adapter 和可控 native 边界；它不代表安装 Bundle、真实 Provider、Desktop 重启或所有可选能力已通过。最终执行结果见[整改验证报告](full-project-review-2026-09-12/remediation/README.md)。
 
 | Adapter | 实际接线 | 验证边界 |
 | --- | --- | --- |
@@ -89,5 +89,6 @@ await writeFile(receiptPath, serializeConformanceReceipt(receipt));
 | OMP | 实际 Adapter + RPC fixture；create 完成当前 transport 订阅探测后发布 Session | 原生方法是否支持以该 transport 探测为准 |
 | OpenCode | 实际 Adapter + SDK transport fixture | 不把 SDK 版本当作实际 server 版本 |
 | Kiro | 实际 Adapter + ACP fixture | 不替代 Kiro engine/原生历史验收 |
+| Command Code | 实际 Adapter + 打印模式 child-process fixture，读取进程 marker / PID 与 fixture 写入的转录 | `subagents` 为 `notCovered`；不代表真实 CLI 成功流已验证 |
 
 所有 fixture 的未知 `nativeVersion`/Bundle SHA 保持 `null`。公共 driver 的通过范围是本次实际执行的场景，不能因为核心生命周期通过就把未执行的 fork、rollback、permission 或 subagent 场景提升为通过。

@@ -9,7 +9,8 @@
     "packages/adapters/antigravity",
     "packages/adapters/kiro-cli",
     "packages/adapters/codebuddy",
-    "packages/adapters/cursor-cli"
+    "packages/adapters/cursor-cli",
+    "packages/adapters/command-code"
   ],
   "runtimePackages": {
     "pi": ["diff", "zod"],
@@ -21,6 +22,7 @@
     "antigravity": ["zod"],
     "kiro-cli": ["@agentclientprotocol/sdk", "diff", "zod"],
     "codebuddy": ["@agentclientprotocol/sdk", "diff", "zod"],
-    "cursor-cli": ["@agentclientprotocol/sdk", "diff", "zod"]
+    "cursor-cli": ["@agentclientprotocol/sdk", "diff", "zod"],
+    "command-code": ["diff", "zod"]
   }
 }

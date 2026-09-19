@@ -42,6 +42,7 @@ README 提供使用概览；架构与运行时文档随当前源码维护；评�
 | [Kiro Adapter](../packages/adapters/kiro-cli/README.md) | ACP 配置确认、权限与取消、并发交互、close 和 conformance。 |
 | [CodeBuddy 接入](codebuddy-harness-integration.md) | ACP、原生配置、无人值守策略与历史能力限制。 |
 | [Cursor 实验接入](cursor-cli-experimental.md) | 动态目录、原生 ACP / SQLite、Diff 与尚未认证的版本边界。 |
+| [Command Code 接入](command-code-harness-integration.md) | CLI 打印模式 NDJSON、原生转录续接、三档权限与未经真实额度验证的边界。 |
 
 ## 安装、远程与平台
 

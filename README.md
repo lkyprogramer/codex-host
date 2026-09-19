@@ -171,6 +171,7 @@ codexhost 优先通过已登录的 [GitHub CLI](https://cli.github.com/)（`gh a
 | Kiro CLI | ACP agent engine v3 | 支持，含跨目录 Fork | 未知权限值明确拒绝；原生子代理可观察，不提供过程正文读取 |
 | CodeBuddy | ACP | 不支持 | 配置与交互走原生协议，不由 Host 模拟历史派生 |
 | Cursor CLI | ACP + 原生历史 | 不支持 | 推理强度通过原生模型变体选择；无人值守映射原生 `--force` |
+| Command Code | CLI 打印模式 NDJSON + 原生转录 | 不支持 | 每 Turn 一个 `-p` 进程；权限档仅 Skip / Read-only / Plan，见[接入说明](docs/command-code-harness-integration.md) |
 
 **Antigravity：**仅提供 **Skip permissions（危险）**，使用原生 `--dangerously-skip-permissions`；codexhost 不添加工具审批或工作区访问限制。提问与子代理是独立能力，详见[权限说明](docs/antigravity-tool-approval.md)和[子代理说明](docs/antigravity-subagents.md)。
 
@@ -238,7 +239,7 @@ Windows 作为被控 Host 时，可以保留 Codex Desktop 官方配对、账号
 <details>
 <summary><h3>怎么做的</h3></summary>
 
-codexhost 按 Harness 的原生接口接入：Claude Code 使用 SDK，Pi / OMP 使用 RPC，Grok / Kiro / CodeBuddy / Cursor 使用 ACP，DeepSeek 使用托管 Web，Antigravity 使用 CLI / Hook。
+codexhost 按 Harness 的原生接口接入：Claude Code 使用 SDK，Pi / OMP 使用 RPC，Grok / Kiro / CodeBuddy / Cursor 使用 ACP，DeepSeek 使用托管 Web，Antigravity 使用 CLI / Hook，Command Code 使用 CLI 打印模式。
 
 - **Desktop**：保留官方外壳，以 CDP / Electron Inspector 和 Renderer Extension 增强选择与展示。
 - **Host**：CLI Shim 转发官方 Codex 请求；外部 Thread 通过公共协议投影、操作占位、持久化和恢复流程处理。

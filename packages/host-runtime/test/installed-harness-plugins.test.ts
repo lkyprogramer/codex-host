@@ -25,6 +25,7 @@ const preinstalledIds = [
   "kiro-cli",
   "codebuddy",
   "cursor-cli",
+  "command-code",
 ];
 
 const unavailable: HarnessInspection = {
@@ -101,6 +102,7 @@ describe("installed Harness composition", () => {
     const expected = {
       codebuddy: [],
       "cursor-cli": [],
+      "command-code": [],
       pi: ["/compact"],
       "claude-code": ["/compact", "/init", "/recap"],
       "deepseek-harness": ["/compact", "/dsh-goal", "/plan"],
@@ -152,6 +154,7 @@ describe("installed Harness composition", () => {
     ["kiro-cli", "CODEXHOST_KIRO_COMMAND"],
     ["codebuddy", "CODEXHOST_CODEBUDDY_COMMAND"],
     ["cursor-cli", "CODEXHOST_CURSOR_COMMAND"],
+    ["command-code", "CODEXHOST_COMMAND_CODE_COMMAND"],
   ])(
     "preserves the explicit %s command rather than finding another local installation",
     async (id, commandVariable) => {
