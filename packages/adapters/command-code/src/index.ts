@@ -6,7 +6,6 @@ export type { CommandCodeAdapterOptions } from "./command-code-adapter.js";
 export { COMMAND_CODE_CAPABILITIES } from "./command-code-session.js";
 export { COMMAND_CODE_COMMAND_ENV, resolveCommandCodeExecutable } from "./command.js";
 export {
-  COMMAND_CODE_EFFORT_OPTIONS,
   commandCodeModelArguments,
   decodeCommandCodeModelRef,
   encodeCommandCodeModelRef,
@@ -21,8 +20,10 @@ export type { CommandCodePermissionMode } from "./permission-modes.js";
 export {
   commandCodeExitError,
   commandCodeResultError,
+  commandCodeTerminalDecision,
   isCommandCodeAuthenticationText,
 } from "./print-errors.js";
+export type { CommandCodeTerminalDecision } from "./print-errors.js";
 export { COMMAND_CODE_DEFAULT_MAX_TURNS, commandCodePrintArguments } from "./print-turn.js";
 export type { CommandCodePrintPlan } from "./print-turn.js";
 export {

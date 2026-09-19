@@ -1,14 +1,14 @@
 /**
  * One Host Turn is one `command-code -p` process. Print mode has no long-lived
  * transport: the prompt goes in on stdin, AgentEvent frames stream out on
- * stdout, the final `result` line closes the run, and the next Turn resumes
- * the persisted Session by transcript path.
+ * stdout, the final `result` line closes the run, the exit code qualifies it,
+ * and the next Turn resumes the persisted Session by transcript path.
  */
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import readline from "node:readline";
 import type { Readable, Writable } from "node:stream";
 
-import type { HarnessModelRef, HarnessThinkingOptionId } from "@codexhost/shared-contracts";
+import type { HarnessModelRef } from "@codexhost/shared-contracts";
 import {
   commandInvocation,
   trackOwnedProcessTree,
@@ -27,12 +27,7 @@ export const COMMAND_CODE_DEFAULT_MAX_TURNS = 100;
 export interface CommandCodePrintPlan {
   /** Transcript of the Session to continue; a new Session starts when absent. */
   sessionFilePath?: string;
-  /** Continue by ID when the transcript path is not known. */
-  nativeSessionId?: string;
-  /** Derive a new Session from the resumed one instead of appending to it. */
-  forkSession?: boolean;
   model?: HarnessModelRef;
-  effort?: HarnessThinkingOptionId;
   permissionMode: CommandCodePermissionMode;
   maxTurns: number;
 }
@@ -52,12 +47,10 @@ export function commandCodePrintArguments(plan: CommandCodePrintPlan): string[] 
     "--max-turns",
     String(plan.maxTurns),
   ];
+  // `--resume <id>` only looks in the cwd's own project directory and fails when
+  // the file is missing, so the transcript path is the single resume form.
   if (plan.sessionFilePath) arguments_.push("--session", plan.sessionFilePath);
-  else if (plan.nativeSessionId) arguments_.push("--resume", plan.nativeSessionId);
-  if (plan.forkSession && (plan.sessionFilePath || plan.nativeSessionId)) {
-    arguments_.push("--fork-session");
-  }
-  arguments_.push(...commandCodeModelArguments(plan.model, plan.effort));
+  arguments_.push(...commandCodeModelArguments(plan.model));
   arguments_.push(...commandCodePermissionArguments(plan.permissionMode));
   return arguments_;
 }

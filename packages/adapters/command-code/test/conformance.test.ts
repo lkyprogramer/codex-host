@@ -11,8 +11,8 @@ import { fakeCommandCode } from "./fake-cli.js";
 /**
  * Print-mode stand-in for the public conformance driver. Each process records
  * its start and exit with the Thread environment marker it was spawned with,
- * persists the v3 transcript so a fresh Adapter can resume by ID, and holds
- * open on the cancellable prompt until the Adapter stops it.
+ * persists the v3 transcript with the CLI's timing so a fresh Adapter can
+ * resume by ID, and holds open on the cancellable prompt until stopped.
  */
 const CONFORMANCE_SCRIPT = String.raw`
 const statusPath = process.env.CODEXHOST_CONFORMANCE_STATUS;
@@ -34,10 +34,8 @@ if (args.includes("--list-models")) {
     : flag("--resume") ?? "cc-conformance-" + marker + "-" + process.pid;
   process.on("exit", () => record("exit", sessionId));
   record("start", sessionId);
-  const file = writeSession(sessionId, process.cwd(), [
-    { type: "message", id: "p-" + process.pid + "-" + Date.now().toString(36), parentId: null, timestamp: new Date().toISOString(),
-      message: { role: "user", content: [{ type: "text", text: prompt }], meta: { source: "user" } } },
-  ]);
+  const session = store(sessionId, process.cwd());
+  session.prompt(prompt);
   emit({ type: "run_start", sessionId });
   emit({ type: "turn_start", turnNumber: resumed ? 2 : 1 });
   if (prompt.includes("fixture cancellable")) {
@@ -45,10 +43,8 @@ if (args.includes("--list-models")) {
     return;
   }
   emit({ type: "text_delta", delta: "fixture native response" });
-  writeSession(sessionId, process.cwd(), [
-    { type: "message", id: "a-" + process.pid + "-" + Date.now().toString(36), parentId: lastMessageId(file), timestamp: new Date().toISOString(),
-      message: { role: "assistant", content: [{ type: "text", text: "fixture native response" }] } },
-  ]);
+  session.assistant("fixture native response");
+  session.flush();
   result({ subtype: "success", sessionId, stopReason: "end_turn", usage: { inputTokens: 1, outputTokens: 1 }, durationMs: 1, finalText: "fixture native response" });
   process.exit(0);
 })();

@@ -28,7 +28,7 @@ export function commandCodeHostUsage(value: CommandCodeUsage | undefined): HostU
   return Object.keys(usage).length > 0 ? usage : null;
 }
 
-/** Turn counters accumulate across a Session; a later reading replaces the earlier one. */
+/** Sums two readings; the Session keeps a running total across print runs. */
 export function accumulateCommandCodeUsage(
   previous: HostUsage | null,
   latest: HostUsage,

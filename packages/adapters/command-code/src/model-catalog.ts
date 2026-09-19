@@ -8,19 +8,17 @@
  * Model Ref alphabet rejects, so each ID travels base64url-encoded behind a
  * versioned prefix and is decoded back before reaching `-m`.
  *
- * `--effort` is a session-wide flag whose accepted values "depend on the
- * model"; the CLI does not list them per Model, so the catalog offers the
- * documented levels for every Model and lets the CLI reject a mismatch.
+ * No Thinking options are offered: `--effort` is not a per-run parameter but a
+ * write to the user's `~/.commandcode/config.json` (`reasoningEffort[model]`),
+ * so a selection here would silently change every other Thread and the user's
+ * own interactive sessions. Effort therefore follows the user's CLI config.
  */
 import {
   HARNESS_MODEL_REF_MAX_LENGTH,
   harnessModelCatalogSchema,
   harnessModelRefSchema,
-  harnessThinkingOptionIdSchema,
   type HarnessModelCatalog,
   type HarnessModelRef,
-  type HarnessThinkingOption,
-  type HarnessThinkingOptionId,
 } from "@codexhost/shared-contracts";
 
 const MODEL_REF_PREFIX = "command-code-model-v1.";
@@ -30,12 +28,6 @@ const MODEL_ROW_PATTERN = /^(?<id>[a-z0-9][a-z0-9._:/-]*)\s{2,}(?<description>\S
 const DEFAULT_MARKER_PATTERN = /\(default\)\s*$/iu;
 
 const ANSI_PATTERN = /\u001B\[[0-9;]*[A-Za-z]/gu;
-
-export const COMMAND_CODE_EFFORT_OPTIONS: readonly HarnessThinkingOption[] = [
-  { id: harnessThinkingOptionIdSchema.parse("low"), label: "Low effort" },
-  { id: harnessThinkingOptionIdSchema.parse("medium"), label: "Medium effort" },
-  { id: harnessThinkingOptionIdSchema.parse("high"), label: "High effort" },
-];
 
 export function encodeCommandCodeModelRef(nativeModelId: string): HarnessModelRef {
   const id = nativeModelId.trim();
@@ -77,21 +69,11 @@ export function parseCommandCodeModels(output: string): HarnessModelCatalog {
   return harnessModelCatalogSchema.parse({
     models,
     ...(defaultModel ? { defaultModel } : {}),
-    thinkingOptions: [...COMMAND_CODE_EFFORT_OPTIONS],
+    thinkingOptions: [],
   });
 }
 
-export function isCommandCodeEffort(value: HarnessThinkingOptionId): boolean {
-  return COMMAND_CODE_EFFORT_OPTIONS.some(({ id }) => id === value);
-}
-
-/** CLI flags for the selected Model and effort; none when nothing was selected. */
-export function commandCodeModelArguments(
-  model: HarnessModelRef | undefined,
-  effort: HarnessThinkingOptionId | undefined,
-): string[] {
-  const arguments_: string[] = [];
-  if (model) arguments_.push("-m", decodeCommandCodeModelRef(model));
-  if (effort) arguments_.push("--effort", effort);
-  return arguments_;
+/** `-m` for the selected Model; the CLI resolves the listed display ID to its canonical form. */
+export function commandCodeModelArguments(model: HarnessModelRef | undefined): string[] {
+  return model ? ["-m", decodeCommandCodeModelRef(model)] : [];
 }

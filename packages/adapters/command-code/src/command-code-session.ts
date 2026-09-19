@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
@@ -14,14 +13,9 @@ import {
   type HarnessSession,
   type HarnessSessionCapabilities,
   type HarnessSessionState,
-  type HostAgentMessageItem,
   type HostCommand,
   type HostEvent,
-  type HostItem,
   type HostItemOutcome,
-  type HostItemSnapshot,
-  type HostReasoningItem,
-  type HostSubagentDelegationItem,
   type HostThreadSnapshot,
   type HostTurnSnapshot,
   type HostUsage,
@@ -42,23 +36,14 @@ import {
 import {
   harnessIdSchema,
   harnessModelRefSchema,
-  harnessThinkingOptionIdSchema,
-  hostItemIdSchema,
-  nativeCheckpointRefSchema,
   nativeSessionRefSchema,
   nativeTurnRefSchema,
   type HarnessId,
-  type HarnessThinkingOptionId,
-  type HostItemId,
   type NativeSessionRef,
   type NativeTurnRef,
 } from "@codexhost/shared-contracts";
 
-import {
-  COMMAND_CODE_EFFORT_OPTIONS,
-  decodeCommandCodeModelRef,
-  isCommandCodeEffort,
-} from "./model-catalog.js";
+import { decodeCommandCodeModelRef } from "./model-catalog.js";
 import {
   commandCodePermissionModeId,
   decodeCommandCodePermissionModeId,
@@ -66,7 +51,7 @@ import {
 } from "./permission-modes.js";
 import {
   commandCodeExitError,
-  commandCodeResultError,
+  commandCodeTerminalDecision,
   isCommandCodeAuthenticationText,
 } from "./print-errors.js";
 import {
@@ -81,25 +66,20 @@ import {
   type CommandCodeResultLine,
   type CommandCodeStreamLine,
 } from "./stream-events.js";
-import {
-  commandCodeToolTargetFile,
-  completeCommandCodeToolItem,
-  isCommandCodeFileMutatingTool,
-  resolveCommandCodeFileChange,
-  snapshotCommandCodeFile,
-  startCommandCodeToolItem,
-  type CommandCodeMutation,
-} from "./tool-projection.js";
+import { CommandCodeTurnProjection } from "./turn-projection.js";
 import { accumulateCommandCodeUsage, commandCodeHostUsage } from "./usage.js";
 
 export const COMMAND_CODE_HARNESS_ID = harnessIdSchema.parse("command-code");
 const DIAGNOSTIC_LIMIT = 8_000;
-const EXIT_GRACE_MS = 2_000;
+/** How long a run may linger after its result line before the line alone decides the Turn. */
+const RESULT_EXIT_GRACE_MS = 5_000;
+const STOP_GRACE_MS = 2_000;
 
 export const COMMAND_CODE_CAPABILITIES: HarnessSessionCapabilities = {
   configuration: {
     selectModel: true,
-    selectThinkingOption: true,
+    // `--effort` writes the user's global per-Model default; see model-catalog.ts.
+    selectThinkingOption: false,
     selectPermissionMode: true,
     permissionModeScope: "live",
   },
@@ -110,28 +90,22 @@ export const COMMAND_CODE_CAPABILITIES: HarnessSessionCapabilities = {
   subagents: { observe: true, readTranscript: false },
 };
 
-interface ToolEntry {
-  item: Extract<HostItem, { type: "commandExecution" | "toolExecution" }>;
-  /** Deferred File Change: resolved once the tool reports completion. */
-  mutation: CommandCodeMutation | null;
-  started: boolean;
-}
-
 interface ActiveTurn {
   command: TurnStartCommand;
+  projection: CommandCodeTurnProjection;
   process: CommandCodePrintProcess;
   cancellationRequested: boolean;
-  receivedResult: boolean;
   interrupted: boolean;
+  result: CommandCodeResultLine | null;
+  exit: { code: number | null; signal: NodeJS.Signals | null } | null;
+  resultTimer: NodeJS.Timeout | null;
   runError: string | null;
   diagnostics: string;
-  agentItem: HostAgentMessageItem | null;
-  reasoningItem: HostReasoningItem | null;
-  compactionItem: HostItem | null;
-  tools: Map<string, ToolEntry>;
-  subagents: Map<string, HostSubagentDelegationItem>;
-  completedItems: HostItemSnapshot[];
   runUsage: HostUsage | null;
+  /** Identity reported by `run_start` on the create path, held back until the transcript exists. */
+  pendingSessionId: string | null;
+  /** Newest stored prompt before this run; only a newer one proves this Turn was persisted. */
+  priorPromptId: string | undefined;
   /** Serializes stream handling so async file snapshots keep Item order. */
   queue: Promise<void>;
 }
@@ -142,6 +116,15 @@ function errorMessage(error: unknown): string {
 
 export function invalidState(message: string): HarnessError {
   return { code: "invalidState", message, retryable: false };
+}
+
+async function latestPromptIdOf(filePath: string | undefined): Promise<string | undefined> {
+  if (!filePath) return undefined;
+  try {
+    return latestCommandCodePromptId(await readFile(filePath, "utf8"));
+  } catch {
+    return undefined;
+  }
 }
 
 export class CommandCodeSession implements HarnessSession {
@@ -155,7 +138,7 @@ export class CommandCodeSession implements HarnessSession {
   readonly #catalog: HarnessModelCatalog | undefined;
   readonly #cwd: string;
   readonly #environment: NodeJS.ProcessEnv;
-  readonly #executable: string;
+  readonly #executable: string | undefined;
   readonly #maxTurns: number;
   readonly #onClosed: () => void;
   readonly #toolOutputLimit: number;
@@ -164,7 +147,6 @@ export class CommandCodeSession implements HarnessSession {
   #closeTask: Promise<void> | null = null;
   #closed = false;
   #model: HarnessModelRef | undefined;
-  #effort: HarnessThinkingOptionId | undefined;
   #nativeRef: NativeSessionRef | undefined;
   #permissionMode: CommandCodePermissionMode;
   #sessionFilePath: string | undefined;
@@ -174,10 +156,10 @@ export class CommandCodeSession implements HarnessSession {
     catalog?: HarnessModelCatalog;
     cwd: string;
     environment: NodeJS.ProcessEnv;
-    executable: string;
+    /** Undefined only for a history-only open; starting a Turn then reports notInstalled. */
+    executable: string | undefined;
     maxTurns: number;
     model?: HarnessModelRef;
-    effort?: HarnessThinkingOptionId;
     nativeRef?: NativeSessionRef;
     permissionMode: CommandCodePermissionMode;
     sessionFilePath?: string;
@@ -191,7 +173,6 @@ export class CommandCodeSession implements HarnessSession {
     this.#executable = input.executable;
     this.#maxTurns = input.maxTurns;
     this.#model = input.model;
-    this.#effort = input.effort;
     this.#nativeRef = input.nativeRef;
     this.#permissionMode = input.permissionMode;
     this.#sessionFilePath = input.sessionFilePath;
@@ -243,7 +224,15 @@ export class CommandCodeSession implements HarnessSession {
       case "model.select":
         return this.#selectModel(command);
       case "thinking.select":
-        return this.#selectThinking(command);
+        return {
+          ok: false,
+          error: {
+            code: "unsupported",
+            message:
+              "Command Code effort is not selectable per Thread; it follows the CLI's per-Model config",
+            retryable: false,
+          },
+        };
       case "permissionMode.select":
         return this.#selectPermissionMode(command);
       case "interaction.respond":
@@ -296,6 +285,12 @@ export class CommandCodeSession implements HarnessSession {
         },
       };
     }
+    if (!this.#executable) {
+      return {
+        ok: false,
+        error: { code: "notInstalled", message: "Command Code is not installed", retryable: false },
+      };
+    }
     const text = command.input
       .map(({ text: part }) => part)
       .join("\n")
@@ -311,31 +306,66 @@ export class CommandCodeSession implements HarnessSession {
         this.#environment,
         this.#nativeRef.nativeSessionId,
       );
-      if (file) this.#sessionFilePath = file.path;
+      if (this.#active) {
+        return {
+          ok: false,
+          error: {
+            code: "sessionBusy",
+            message: "Command Code Turn is already running",
+            retryable: true,
+          },
+        };
+      }
+      if (!file) {
+        return {
+          ok: false,
+          error: {
+            code: "sessionNotFound",
+            message:
+              "Command Code Session transcript was not found under ~/.commandcode/projects; the Session cannot be continued",
+            retryable: false,
+          },
+        };
+      }
+      this.#sessionFilePath = file.path;
+    }
+    const priorPromptId = await latestPromptIdOf(this.#sessionFilePath);
+    if (this.#active) {
+      return {
+        ok: false,
+        error: {
+          code: "sessionBusy",
+          message: "Command Code Turn is already running",
+          retryable: true,
+        },
+      };
     }
     const arguments_ = commandCodePrintArguments({
       ...(this.#sessionFilePath ? { sessionFilePath: this.#sessionFilePath } : {}),
-      ...(this.#nativeRef ? { nativeSessionId: this.#nativeRef.nativeSessionId } : {}),
       ...(this.#model ? { model: this.#model } : {}),
-      ...(this.#effort ? { effort: this.#effort } : {}),
       permissionMode: this.#permissionMode,
       maxTurns: this.#maxTurns,
     });
+    const projection = new CommandCodeTurnProjection({
+      turnId: command.turnId,
+      cwd: this.#cwd,
+      toolOutputLimit: this.#toolOutputLimit,
+      emit: (event) => this.#event(event),
+    });
     const active: ActiveTurn = {
       command,
+      projection,
       process: undefined as unknown as CommandCodePrintProcess,
       cancellationRequested: false,
-      receivedResult: false,
       interrupted: false,
+      result: null,
+      exit: null,
+      resultTimer: null,
       runError: null,
       diagnostics: "",
-      agentItem: null,
-      reasoningItem: null,
-      compactionItem: null,
-      tools: new Map(),
-      subagents: new Map(),
-      completedItems: [],
       runUsage: null,
+      pendingSessionId: null,
+      priorPromptId,
       queue: Promise.resolve(),
     };
     try {
@@ -357,22 +387,10 @@ export class CommandCodeSession implements HarnessSession {
               error: { code: "nativeFailure", message: error.message, retryable: true },
             });
           }),
-        onExit: (code) =>
-          this.#enqueue(active, () => {
-            if (this.#active !== active || active.receivedResult) return;
-            if (active.cancellationRequested || active.interrupted) {
-              this.#completeTurn(active, { status: "cancelled", reason: "Cancelled by user" });
-              return;
-            }
-            const error =
-              active.runError && isCommandCodeAuthenticationText(active.runError)
-                ? ({
-                    code: "authenticationRequired",
-                    message: active.runError,
-                    retryable: false,
-                  } as const)
-                : commandCodeExitError(code, active.diagnostics);
-            this.#completeTurn(active, { status: "failed", error });
+        onExit: (code, signal) =>
+          this.#enqueue(active, async () => {
+            active.exit = { code, signal };
+            await this.#finalize(active);
           }),
       });
     } catch (error) {
@@ -399,17 +417,17 @@ export class CommandCodeSession implements HarnessSession {
   async #handleLine(active: ActiveTurn, line: CommandCodeStreamLine): Promise<void> {
     if (this.#active !== active) return;
     if (line.type === "result") {
-      active.receivedResult = true;
-      await this.#handleResult(active, line);
+      this.#handleResult(active, line);
       return;
     }
     await this.#handleEvent(active, line.event);
   }
 
   async #handleEvent(active: ActiveTurn, event: CommandCodeAgentEvent): Promise<void> {
+    const projection = active.projection;
     switch (event.type) {
       case "run_start":
-        this.#bindNativeSession(active, event.sessionId);
+        this.#observeSessionId(active, event.sessionId);
         return;
       case "turn_end": {
         const usage = commandCodeHostUsage(event.usage);
@@ -420,66 +438,64 @@ export class CommandCodeSession implements HarnessSession {
         return;
       }
       case "text_delta":
-        this.#closeReasoning(active);
-        this.#appendAgentText(active, event.delta);
+        projection.appendText(event.delta);
         return;
       case "thinking_delta":
-        this.#appendReasoning(active, event.delta);
+        projection.appendReasoning(event.delta);
         return;
       case "thinking_end":
-        this.#closeReasoning(active);
+        projection.closeReasoning();
         return;
       case "tool_queued":
-        this.#openTool(active, event.toolCallId, event.toolName, event.input);
+        projection.openTool(event.toolCallId, event.toolName, event.input);
         return;
       case "tool_running":
-        this.#openTool(active, event.toolCallId, event.toolName, undefined);
+        projection.openTool(event.toolCallId, event.toolName, undefined);
         return;
       case "tool_completed":
-        await this.#finishTool(active, event.toolCallId, event.toolName, event.result, null);
+        await projection.finishTool(event.toolCallId, event.toolName, event.result, null);
         return;
-      case "tool_errored":
-        await this.#finishTool(active, event.toolCallId, event.toolName, undefined, {
+      case "tool_errored": {
+        const detail = commandCodeErrorMessage(event.error);
+        await projection.finishTool(event.toolCallId, event.toolName, undefined, {
           code: "nativeFailure",
-          message: `Command Code tool '${event.toolName}' failed${
-            commandCodeErrorMessage(event.error) ? `: ${commandCodeErrorMessage(event.error)}` : ""
+          message: `Command Code tool '${event.toolName}' failed${detail ? `: ${detail}` : ""}`,
+          retryable: false,
+        });
+        return;
+      }
+      case "tool_denied":
+        // Headless confirmTool denies any tool that carries a risk marker, in every mode.
+        await projection.finishTool(event.toolCallId, event.toolName, undefined, {
+          code: "nativeFailure",
+          message: `Command Code declined tool '${event.toolName}' (headless runs cannot ask for approval)`,
+          retryable: false,
+        });
+        return;
+      case "tool_hook_blocked":
+        await projection.finishTool(event.toolCallId, event.toolName, undefined, {
+          code: "nativeFailure",
+          message: `Command Code blocked tool '${event.toolName}' before execution${
+            this.#permissionMode === "bypass" ? "" : ` (permission mode '${this.#permissionMode}')`
           }`,
           retryable: false,
         });
         return;
-      case "tool_denied":
-      case "tool_hook_blocked":
-        await this.#finishTool(active, event.toolCallId, event.toolName, undefined, {
-          code: "nativeFailure",
-          message: `Command Code blocked tool '${event.toolName}' under its '${this.#permissionMode}' permission mode`,
-          retryable: false,
-        });
-        return;
       case "subagent_start":
-        this.#startSubagent(
-          active,
+        projection.startSubagent(
           event.toolCallId,
           event.description ?? event.subagentType ?? "Subagent",
           event.background === true,
         );
         return;
       case "subagent_stop":
-        this.#stopSubagent(active, event.toolCallId, { status: "succeeded" });
+        projection.stopSubagent(event.toolCallId, { status: "succeeded" });
         return;
       case "compaction_start":
-        this.#closeAgentText(active);
-        active.compactionItem = { type: "contextCompaction", itemId: this.#newItemId() };
-        this.#event({
-          type: "item.started",
-          turnId: active.command.turnId,
-          item: active.compactionItem,
-        });
+        projection.startCompaction();
         return;
       case "compaction_done":
-        if (active.compactionItem) {
-          this.#completeItem(active, active.compactionItem, { status: "succeeded" });
-          active.compactionItem = null;
-        }
+        projection.endCompaction();
         return;
       case "interrupted":
         active.interrupted = true;
@@ -500,7 +516,13 @@ export class CommandCodeSession implements HarnessSession {
     }
   }
 
-  #bindNativeSession(active: ActiveTurn, sessionId: string): void {
+  /**
+   * A resumed Session must be continued by the CLI under the same ID. A
+   * created Session only learns its ID here; publishing it before the
+   * transcript exists would leave the Thread pointing at nothing if this
+   * first run is cancelled before the CLI persists anything.
+   */
+  #observeSessionId(active: ActiveTurn, sessionId: string): void {
     if (this.#nativeRef) {
       if (this.#nativeRef.nativeSessionId === sessionId) return;
       this.#completeTurn(active, {
@@ -514,260 +536,99 @@ export class CommandCodeSession implements HarnessSession {
       void active.process.stop().catch(() => undefined);
       return;
     }
-    this.#nativeRef = nativeSessionRefSchema.parse({
-      harnessId: this.harnessId,
-      nativeSessionId: sessionId,
-      formatVersion: 1,
-    });
-    this.#event({ type: "session.state.changed", state: this.#state() });
+    active.pendingSessionId ??= sessionId;
   }
 
-  async #handleResult(active: ActiveTurn, result: CommandCodeResultLine): Promise<void> {
-    if (this.#active !== active) return;
-    if (result.sessionId) this.#bindNativeSession(active, result.sessionId);
+  #handleResult(active: ActiveTurn, result: CommandCodeResultLine): void {
+    if (this.#active !== active || active.result) return;
+    active.result = result;
+    if (result.sessionId) this.#observeSessionId(active, result.sessionId);
     if (this.#active !== active) return;
     const usage = commandCodeHostUsage(result.usage);
     if (usage) {
       active.runUsage = usage;
       this.#publishUsage(active);
     }
-    if (active.agentItem === null && result.finalText?.trim()) {
-      this.#appendAgentText(active, result.finalText);
+    if (result.finalText) active.projection.appendFinalText(result.finalText);
+    if (active.exit) {
+      // Exit was observed first (never expected from the stream order, but the
+      // Turn must still reach its terminal).
+      this.#enqueue(active, () => this.#finalize(active));
+      return;
     }
-    const nativeSessionId = this.#nativeRef?.nativeSessionId;
-    const turnKey = nativeSessionId ? await this.#resolveTurnKey(nativeSessionId) : undefined;
-    const nativeTurnRef =
-      nativeSessionId && turnKey
-        ? nativeTurnRefSchema.parse({
-            harnessId: this.harnessId,
-            nativeSessionId,
-            nativeTurnKey: turnKey,
-            formatVersion: 1,
-          })
-        : undefined;
-    const checkpoint =
-      nativeSessionId && turnKey
-        ? nativeCheckpointRefSchema.parse({
-            harnessId: this.harnessId,
-            nativeSessionId,
-            checkpointId: turnKey,
-            formatVersion: 1,
-          })
-        : undefined;
-    const withCheckpoint = checkpoint ? { checkpoint } : {};
+    // The exit code qualifies the result line, so wait for it — but not forever.
+    active.resultTimer = setTimeout(() => {
+      this.#enqueue(active, async () => {
+        if (this.#active !== active || active.exit) return;
+        void active.process.stop().catch(() => undefined);
+        await this.#finalize(active);
+      });
+    }, RESULT_EXIT_GRACE_MS);
+    active.resultTimer.unref?.();
+  }
+
+  async #finalize(active: ActiveTurn): Promise<void> {
+    if (this.#active !== active) return;
+    if (active.resultTimer) {
+      clearTimeout(active.resultTimer);
+      active.resultTimer = null;
+    }
+    const exitCode = active.exit?.code ?? null;
+    let outcome: TurnOutcome;
     if (active.cancellationRequested || active.interrupted) {
-      this.#completeTurn(
-        active,
-        { status: "cancelled", reason: "Cancelled by user", ...withCheckpoint },
-        nativeTurnRef,
-      );
-    } else if (result.subtype === "success") {
-      this.#completeTurn(active, { status: "succeeded", ...withCheckpoint }, nativeTurnRef);
+      outcome = { status: "cancelled", reason: "Cancelled by user" };
+    } else if (active.result) {
+      const decision = commandCodeTerminalDecision({
+        result: active.result,
+        exitCode,
+        diagnostics: active.diagnostics,
+      });
+      outcome =
+        decision.status === "succeeded"
+          ? { status: "succeeded" }
+          : { status: "failed", error: decision.error };
+    } else if (active.runError && isCommandCodeAuthenticationText(active.runError)) {
+      outcome = {
+        status: "failed",
+        error: { code: "authenticationRequired", message: active.runError, retryable: false },
+      };
     } else {
-      this.#completeTurn(
-        active,
-        {
-          status: "failed",
-          error: commandCodeResultError(result, active.diagnostics),
-          ...withCheckpoint,
-        },
-        nativeTurnRef,
-      );
+      outcome = { status: "failed", error: commandCodeExitError(exitCode, active.diagnostics) };
     }
+    const nativeTurnRef = await this.#resolveNativeTurnRef(active);
+    if (this.#active !== active) return;
+    this.#completeTurn(active, outcome, nativeTurnRef);
   }
 
   /**
-   * The CLI keys history by the stored prompt message, so the live Turn reads
-   * the newest prompt ID back from the transcript; a fallback ordinal keeps the
-   * Turn identifiable when the file is not readable.
+   * Binds a created Session once its transcript is on disk and keys the Turn
+   * by the prompt the CLI stored for it. A run that never persisted its prompt
+   * (early failure, cancelled before the first Model reply) yields no Turn
+   * identity rather than borrowing the previous Turn's.
    */
-  async #resolveTurnKey(nativeSessionId: string): Promise<string> {
-    if (!this.#sessionFilePath) {
-      const file = await findCommandCodeSessionFile(this.#environment, nativeSessionId);
-      if (file) this.#sessionFilePath = file.path;
-    }
-    if (this.#sessionFilePath) {
-      try {
-        const id = latestCommandCodePromptId(await readFile(this.#sessionFilePath, "utf8"));
-        if (id) return id;
-      } catch {
-        /* fall through to the ordinal key */
-      }
-    }
-    return `turn:${this.#turns.length + 1}`;
-  }
-
-  #openTool(active: ActiveTurn, toolCallId: string, toolName: string, input: unknown): void {
-    const existing = active.tools.get(toolCallId);
-    if (existing) {
-      if (!existing.started && !existing.mutation) this.#emitToolStart(active, existing);
-      return;
-    }
-    this.#closeReasoning(active);
-    this.#closeAgentText(active);
-    const item = startCommandCodeToolItem(this.#newItemId(), toolName, input, this.#cwd);
-    const target = isCommandCodeFileMutatingTool(toolName)
-      ? commandCodeToolTargetFile(input, this.#cwd)
-      : null;
-    const entry: ToolEntry = {
-      item,
-      mutation: target
-        ? {
-            toolName,
-            input,
-            absolutePath: target,
-            cwd: this.#cwd,
-            before: snapshotCommandCodeFile(target),
-          }
-        : null,
-      started: false,
-    };
-    active.tools.set(toolCallId, entry);
-    // A file edit only becomes a File Change once its patch is known; until
-    // then it stays uncarded rather than showing an empty diff.
-    if (!entry.mutation) this.#emitToolStart(active, entry);
-  }
-
-  #emitToolStart(active: ActiveTurn, entry: ToolEntry): void {
-    entry.started = true;
-    this.#event({ type: "item.started", turnId: active.command.turnId, item: entry.item });
-  }
-
-  async #finishTool(
-    active: ActiveTurn,
-    toolCallId: string,
-    toolName: string,
-    result: unknown,
-    error: HarnessError | null,
-  ): Promise<void> {
-    let entry = active.tools.get(toolCallId);
-    if (!entry) {
-      this.#openTool(active, toolCallId, toolName, undefined);
-      entry = active.tools.get(toolCallId);
-      if (!entry) return;
-    }
-    active.tools.delete(toolCallId);
-    const outcome: HostItemOutcome = error ? { status: "failed", error } : { status: "succeeded" };
-    if (entry.mutation && !error) {
-      const change = await resolveCommandCodeFileChange(entry.mutation);
-      if (this.#active !== active) return;
-      if (change) {
-        const item: HostItem = { type: "fileChange", itemId: entry.item.itemId, changes: [change] };
-        this.#event({ type: "item.started", turnId: active.command.turnId, item });
-        this.#completeItem(active, item, outcome);
-        return;
-      }
-    }
-    if (!entry.started) this.#emitToolStart(active, entry);
-    this.#completeItem(
-      active,
-      completeCommandCodeToolItem(entry.item, result, this.#toolOutputLimit),
-      outcome,
-    );
-  }
-
-  #startSubagent(
-    active: ActiveTurn,
-    toolCallId: string,
-    description: string,
-    background: boolean,
-  ): void {
-    if (active.subagents.has(toolCallId)) return;
-    this.#closeAgentText(active);
-    const item: HostSubagentDelegationItem = {
-      type: "subagentDelegation",
-      itemId: this.#newItemId(),
-      operation: "spawn",
-      subagents: [
-        {
-          subagentId: toolCallId,
-          nativeSubagentId: toolCallId,
-          description,
-          background,
-          status: "running",
-        },
-      ],
-    };
-    active.subagents.set(toolCallId, item);
-    this.#event({ type: "item.started", turnId: active.command.turnId, item });
-    this.#event({
-      type: "subagent.state.changed",
-      nativeSubagentId: toolCallId,
-      status: "running",
-    });
-  }
-
-  #stopSubagent(active: ActiveTurn, toolCallId: string, outcome: HostItemOutcome): void {
-    const item = active.subagents.get(toolCallId);
-    if (!item) return;
-    active.subagents.delete(toolCallId);
-    const status =
-      outcome.status === "succeeded"
-        ? "completed"
-        : outcome.status === "failed"
-          ? "failed"
-          : "interrupted";
-    const updated: HostSubagentDelegationItem = {
-      ...item,
-      subagents: item.subagents.map((state) => ({ ...state, status })),
-    };
-    this.#event({
-      type: "item.updated",
-      turnId: active.command.turnId,
-      itemId: item.itemId,
-      update: { type: "subagents.replace", subagents: updated.subagents },
-    });
-    this.#event({ type: "subagent.state.changed", nativeSubagentId: toolCallId, status });
-    this.#completeItem(active, updated, outcome);
-  }
-
-  #appendAgentText(active: ActiveTurn, text: string): void {
-    if (!text) return;
-    if (!active.agentItem) {
-      active.agentItem = { type: "agentMessage", itemId: this.#newItemId(), text };
-      this.#event({ type: "item.started", turnId: active.command.turnId, item: active.agentItem });
-      return;
-    }
-    active.agentItem = { ...active.agentItem, text: active.agentItem.text + text };
-    this.#event({
-      type: "item.updated",
-      turnId: active.command.turnId,
-      itemId: active.agentItem.itemId,
-      update: { type: "text.append", text },
-    });
-  }
-
-  #closeAgentText(active: ActiveTurn): void {
-    if (!active.agentItem) return;
-    this.#completeItem(active, active.agentItem, { status: "succeeded" });
-    active.agentItem = null;
-  }
-
-  #appendReasoning(active: ActiveTurn, text: string): void {
-    if (!text) return;
-    if (!active.reasoningItem) {
-      this.#closeAgentText(active);
-      active.reasoningItem = { type: "reasoning", itemId: this.#newItemId(), text };
-      this.#event({
-        type: "item.started",
-        turnId: active.command.turnId,
-        item: active.reasoningItem,
+  async #resolveNativeTurnRef(active: ActiveTurn): Promise<NativeTurnRef | undefined> {
+    if (!this.#nativeRef && active.pendingSessionId) {
+      const file = await findCommandCodeSessionFile(this.#environment, active.pendingSessionId);
+      if (this.#active !== active) return undefined;
+      if (!file) return undefined;
+      this.#nativeRef = nativeSessionRefSchema.parse({
+        harnessId: this.harnessId,
+        nativeSessionId: active.pendingSessionId,
+        formatVersion: 1,
       });
-      return;
+      this.#sessionFilePath = file.path;
+      this.#event({ type: "session.state.changed", state: this.#state() });
     }
-    active.reasoningItem = { ...active.reasoningItem, text: active.reasoningItem.text + text };
-    this.#event({
-      type: "item.updated",
-      turnId: active.command.turnId,
-      itemId: active.reasoningItem.itemId,
-      update: { type: "text.append", text },
+    if (!this.#nativeRef) return undefined;
+    const promptId = await latestPromptIdOf(this.#sessionFilePath);
+    if (this.#active !== active) return undefined;
+    if (!promptId || promptId === active.priorPromptId) return undefined;
+    return nativeTurnRefSchema.parse({
+      harnessId: this.harnessId,
+      nativeSessionId: this.#nativeRef.nativeSessionId,
+      nativeTurnKey: promptId,
+      formatVersion: 1,
     });
-  }
-
-  #closeReasoning(active: ActiveTurn): void {
-    if (!active.reasoningItem) return;
-    this.#completeItem(active, active.reasoningItem, { status: "succeeded" });
-    active.reasoningItem = null;
   }
 
   #publishUsage(active: ActiveTurn): void {
@@ -784,29 +645,17 @@ export class CommandCodeSession implements HarnessSession {
   #completeTurn(active: ActiveTurn, outcome: TurnOutcome, nativeTurnRef?: NativeTurnRef): void {
     if (this.#active !== active) return;
     this.#active = null;
+    if (active.resultTimer) {
+      clearTimeout(active.resultTimer);
+      active.resultTimer = null;
+    }
     const itemOutcome: HostItemOutcome =
       outcome.status === "failed"
         ? { status: "failed", error: outcome.error }
         : outcome.status === "cancelled"
           ? { status: "cancelled", ...(outcome.reason ? { reason: outcome.reason } : {}) }
           : { status: "succeeded" };
-    this.#closeReasoning(active);
-    if (active.agentItem) {
-      this.#completeItem(active, active.agentItem, itemOutcome);
-      active.agentItem = null;
-    }
-    for (const entry of active.tools.values()) {
-      if (!entry.started) this.#emitToolStart(active, entry);
-      this.#completeItem(active, entry.item, itemOutcome);
-    }
-    active.tools.clear();
-    for (const toolCallId of [...active.subagents.keys()]) {
-      this.#stopSubagent(active, toolCallId, itemOutcome);
-    }
-    if (active.compactionItem) {
-      this.#completeItem(active, active.compactionItem, itemOutcome);
-      active.compactionItem = null;
-    }
+    active.projection.finish(itemOutcome);
     if (active.runUsage) {
       this.#usage = accumulateCommandCodeUsage(this.#usage, active.runUsage);
       active.runUsage = null;
@@ -814,9 +663,8 @@ export class CommandCodeSession implements HarnessSession {
     if (nativeTurnRef) {
       this.#turns.push({
         nativeTurnRef,
-        ...(outcome.checkpoint ? { checkpoint: outcome.checkpoint } : {}),
         input: active.command.input,
-        items: active.completedItems,
+        items: active.projection.completedItems,
         outcome:
           outcome.status === "failed"
             ? { status: "failed", error: outcome.error }
@@ -829,7 +677,7 @@ export class CommandCodeSession implements HarnessSession {
     // The process is already gone on the normal path; bound the wait otherwise.
     void Promise.race([
       active.process.exited,
-      new Promise<void>((resolve) => setTimeout(resolve, EXIT_GRACE_MS).unref?.()),
+      new Promise<void>((resolve) => setTimeout(resolve, STOP_GRACE_MS).unref?.()),
     ])
       .then(() => active.process.stop())
       .catch(() => undefined);
@@ -841,30 +689,30 @@ export class CommandCodeSession implements HarnessSession {
     });
   }
 
-  #completeItem(active: ActiveTurn, item: HostItem, outcome: HostItemOutcome): void {
-    const snapshot = { item, outcome } satisfies HostItemSnapshot;
-    active.completedItems.push(snapshot);
-    this.#event({ type: "item.completed", turnId: active.command.turnId, snapshot });
-  }
-
   async #cancel(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>> {
     const active = this.#active;
     if (!active || active.command.turnId !== command.turnId) {
       return { ok: false, error: invalidState("Command Code Turn is not active") };
     }
-    active.cancellationRequested = true;
+    // Once the result line is in, the native Turn has finished; the request is
+    // accepted but the native outcome stands.
+    if (!active.result) active.cancellationRequested = true;
     try {
       await active.process.stop();
     } catch (error) {
       this.#closed = true;
-      return {
-        ok: false,
-        error: {
-          code: "nativeFailure",
-          message: `Command Code cancellation cleanup failed: ${errorMessage(error)}`,
-          retryable: false,
-        },
+      const failure: HarnessError = {
+        code: "nativeFailure",
+        message: `Command Code cancellation cleanup failed: ${errorMessage(error)}`,
+        retryable: false,
       };
+      // The process could not be confirmed stopped: end the Session rather
+      // than leaving a Turn that can never reach a terminal.
+      this.#completeTurn(active, { status: "failed", error: failure });
+      this.#event({ type: "session.faulted", error: failure });
+      this.#channel.end();
+      this.#onClosed();
+      return { ok: false, error: failure };
     }
     return { ok: true, value: { cancellationRequested: true } };
   }
@@ -912,24 +760,6 @@ export class CommandCodeSession implements HarnessSession {
     return { ok: true, value: { completed: true } };
   }
 
-  #selectThinking(command: ThinkingSelectCommand): HarnessResult<ThinkingSelectCompleted> {
-    if (this.#active) return this.#busy();
-    const requested = harnessThinkingOptionIdSchema.safeParse(command.thinkingOptionId);
-    if (!requested.success || !isCommandCodeEffort(requested.data)) {
-      return {
-        ok: false,
-        error: {
-          code: "invalidRequest",
-          message: "Command Code effort must be low, medium or high",
-          retryable: false,
-        },
-      };
-    }
-    this.#effort = requested.data;
-    this.#event({ type: "session.state.changed", state: this.#state() });
-    return { ok: true, value: { completed: true } };
-  }
-
   #selectPermissionMode(
     command: PermissionModeSelectCommand,
   ): HarnessResult<PermissionModeSelectCompleted> {
@@ -955,17 +785,11 @@ export class CommandCodeSession implements HarnessSession {
             resolvedModelLabel: decodeCommandCodeModelRef(this.#model),
           }
         : {}),
-      ...(this.#effort ? { effectiveThinkingOptionId: this.#effort } : {}),
-      availableThinkingOptions: [...COMMAND_CODE_EFFORT_OPTIONS],
       effectivePermissionModeId: commandCodePermissionModeId(this.#permissionMode),
     };
   }
 
   #event(event: HostEvent): void {
     this.#channel.emit({ kind: "event", event });
-  }
-
-  #newItemId(): HostItemId {
-    return hostItemIdSchema.parse(randomUUID());
   }
 }

@@ -26,7 +26,6 @@ import type {
 } from "@codexhost/harness-adapter";
 import {
   hostItemIdSchema,
-  nativeCheckpointRefSchema,
   nativeTurnRefSchema,
   type HarnessId,
   type JsonValue,
@@ -165,32 +164,66 @@ export async function sameCommandCodeCwd(left: string, right: string): Promise<b
   return process.platform === "win32" ? a.toLowerCase() === b.toLowerCase() : a === b;
 }
 
-function storedMessage(value: unknown): StoredMessage | null {
-  if (!isRecord(value) || value.type !== "message" || typeof value.id !== "string") return null;
+interface StoredEntry {
+  id: string;
+  parentId: string | null;
+  message: StoredMessage | null;
+}
+
+/**
+ * Every transcript record after the header carries `id` / `parentId`, and the
+ * CLI threads non-message records (`compaction`, `model_change`,
+ * `effort_change`, `session_info`, `custom`, `label`) into the same chain.
+ * They must stay in the walk or the branch breaks at the first compaction.
+ */
+function storedEntry(value: unknown): StoredEntry | null {
+  if (!isRecord(value) || value.type === "session" || typeof value.id !== "string") return null;
+  const parentId = typeof value.parentId === "string" ? value.parentId : null;
+  if (value.type !== "message") return { id: value.id, parentId, message: null };
   const message = value.message;
-  if (!isRecord(message) || typeof message.role !== "string") return null;
+  if (!isRecord(message) || typeof message.role !== "string") {
+    return { id: value.id, parentId, message: null };
+  }
   const meta = isRecord(message.meta) ? message.meta : undefined;
   const timestampMs =
     typeof value.timestamp === "string" ? Date.parse(value.timestamp) : Number.NaN;
   return {
     id: value.id,
-    parentId: typeof value.parentId === "string" ? value.parentId : null,
-    role: message.role,
-    content: message.content,
-    source: typeof meta?.source === "string" ? meta.source : undefined,
-    timestampMs: Number.isFinite(timestampMs) ? timestampMs : undefined,
+    parentId,
+    message: {
+      id: value.id,
+      parentId,
+      role: message.role,
+      content: message.content,
+      source: typeof meta?.source === "string" ? meta.source : undefined,
+      timestampMs: Number.isFinite(timestampMs) ? timestampMs : undefined,
+    },
   };
 }
 
-/** The active branch: the chain from the newest message back to the root. */
-function activeBranch(messages: StoredMessage[]): StoredMessage[] {
-  const byId = new Map(messages.map((message) => [message.id, message]));
+function storedEntries(content: string): StoredEntry[] {
+  const entries: StoredEntry[] = [];
+  for (const line of content.split(/\r?\n/u).slice(1)) {
+    if (!line.trim()) continue;
+    try {
+      const entry = storedEntry(JSON.parse(line));
+      if (entry) entries.push(entry);
+    } catch {
+      continue;
+    }
+  }
+  return entries;
+}
+
+/** Messages on the active branch: the chain from the newest entry back to the root. */
+function activeBranchMessages(entries: StoredEntry[]): StoredMessage[] {
+  const byId = new Map(entries.map((entry) => [entry.id, entry]));
   const branch: StoredMessage[] = [];
   const visited = new Set<string>();
-  let current = messages.at(-1);
+  let current = entries.at(-1);
   while (current && !visited.has(current.id)) {
     visited.add(current.id);
-    branch.push(current);
+    if (current.message) branch.push(current.message);
     current = current.parentId ? byId.get(current.parentId) : undefined;
   }
   return branch.reverse();
@@ -241,18 +274,6 @@ export function commandCodeSessionTurns(input: {
   nativeSessionId: string;
   toolOutputLimit: number;
 }): HostTurnSnapshot[] {
-  const messages: StoredMessage[] = [];
-  for (const line of input.content.split(/\r?\n/u).slice(1)) {
-    if (!line.trim()) continue;
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(line);
-    } catch {
-      continue;
-    }
-    const message = storedMessage(parsed);
-    if (message) messages.push(message);
-  }
   const turns: HostTurnSnapshot[] = [];
   let current: TurnAccumulator | null = null;
   const finish = (): void => {
@@ -263,12 +284,6 @@ export function commandCodeSessionTurns(input: {
         harnessId: input.harnessId,
         nativeSessionId: input.nativeSessionId,
         nativeTurnKey: turnKey,
-        formatVersion: 1,
-      }),
-      checkpoint: nativeCheckpointRefSchema.parse({
-        harnessId: input.harnessId,
-        nativeSessionId: input.nativeSessionId,
-        checkpointId: turnKey,
         formatVersion: 1,
       }),
       input: [{ type: "text", text: contentText(current.prompt.content) } satisfies HostTextInput],
@@ -283,7 +298,7 @@ export function commandCodeSessionTurns(input: {
     });
     current = null;
   };
-  for (const message of activeBranch(messages)) {
+  for (const message of activeBranchMessages(storedEntries(input.content))) {
     if (message.role === "user" && message.source === "user") {
       finish();
       current = {
@@ -361,17 +376,7 @@ export function commandCodeSessionTurns(input: {
 
 /** Identity of the newest prompt on the active branch, used as the live Turn key. */
 export function latestCommandCodePromptId(content: string): string | undefined {
-  const messages: StoredMessage[] = [];
-  for (const line of content.split(/\r?\n/u).slice(1)) {
-    if (!line.trim()) continue;
-    try {
-      const message = storedMessage(JSON.parse(line));
-      if (message) messages.push(message);
-    } catch {
-      continue;
-    }
-  }
-  return activeBranch(messages)
+  return activeBranchMessages(storedEntries(content))
     .reverse()
     .find((message) => message.role === "user" && message.source === "user")?.id;
 }

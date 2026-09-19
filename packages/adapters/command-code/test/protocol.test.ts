@@ -1,12 +1,7 @@
-import {
-  harnessModelRefSchema,
-  harnessPermissionModeIdSchema,
-  harnessThinkingOptionIdSchema,
-} from "@codexhost/shared-contracts";
+import { harnessModelRefSchema, harnessPermissionModeIdSchema } from "@codexhost/shared-contracts";
 import { describe, expect, it } from "vitest";
 
 import {
-  COMMAND_CODE_EFFORT_OPTIONS,
   accumulateCommandCodeUsage,
   commandCodeErrorMessage,
   commandCodeExitError,
@@ -15,10 +10,12 @@ import {
   commandCodePermissionArguments,
   commandCodePrintArguments,
   commandCodeResultError,
+  commandCodeTerminalDecision,
   decodeCommandCodeModelRef,
   decodeCommandCodePermissionModeId,
   encodeCommandCodeModelRef,
   parseCommandCodeModels,
+  isCommandCodeAuthenticationText,
   parseCommandCodeStreamLine,
 } from "../src/index.js";
 
@@ -90,7 +87,7 @@ describe("Command Code print protocol", () => {
     ).toMatchObject({ type: "event", event: { type: "tool_completed", toolCallId: "c1" } });
   });
 
-  it("maps documented exit codes and result subtypes to typed errors", () => {
+  it("maps exits without a result line, argument rejections and authentication wording", () => {
     expect(commandCodeExitError(3, "")).toMatchObject({ code: "authenticationRequired" });
     expect(commandCodeExitError(10, "")).toMatchObject({
       code: "nativeFailure",
@@ -105,22 +102,87 @@ describe("Command Code print protocol", () => {
       code: "processExited",
       stderrTail: "api_key=[redacted] leaked",
     });
-    expect(commandCodeResultError({ type: "result", subtype: "max_turns" }, "")).toMatchObject({
+    expect(
+      commandCodeExitError(
+        1,
+        'Error: unknown model "totally/unknown-model".\nRun "cmd --list-models"',
+      ),
+    ).toMatchObject({
+      code: "invalidRequest",
+      retryable: false,
+      message: 'Command Code rejected the run: Error: unknown model "totally/unknown-model".',
+    });
+    expect(commandCodeExitError(1, 'Unknown effort "medium". Supported: high, max.')).toMatchObject(
+      {
+        code: "invalidRequest",
+        retryable: false,
+      },
+    );
+    // Only the CLI's own wording is authentication; ordinary tool text is not.
+    expect(
+      isCommandCodeAuthenticationText('Error: Not authenticated. Please run "cmd login" first.'),
+    ).toBe(true);
+    expect(isCommandCodeAuthenticationText("You are not logged in")).toBe(true);
+    expect(isCommandCodeAuthenticationText("failed to load credentials for MCP server")).toBe(
+      false,
+    );
+    expect(isCommandCodeAuthenticationText("wrote design in docs/login-flow.md")).toBe(false);
+    expect(commandCodeResultError({ type: "result", subtype: "max_turns" }, 8, "")).toMatchObject({
       code: "nativeFailure",
       retryable: false,
     });
     expect(
       commandCodeResultError(
-        { type: "result", subtype: "error", error: "You are not logged in" },
+        { type: "result", subtype: "error", error: "Error: Not authenticated." },
+        3,
         "",
       ),
-    ).toMatchObject({ code: "authenticationRequired" });
+    ).toMatchObject({ code: "authenticationRequired", retryable: false });
     expect(
       commandCodeResultError(
         { type: "result", subtype: "error", error: "insufficient credits" },
+        10,
         "",
       ),
     ).toMatchObject({ code: "nativeFailure", retryable: false });
+    expect(
+      commandCodeResultError({ type: "result", subtype: "error", error: "POST failed" }, 1, ""),
+    ).toMatchObject({ code: "nativeFailure", retryable: true });
+  });
+
+  it("lets the exit code qualify a success result line", () => {
+    const success = { type: "result", subtype: "success", finalText: "" } as const;
+    expect(commandCodeTerminalDecision({ result: success, exitCode: 0, diagnostics: "" })).toEqual({
+      status: "succeeded",
+    });
+    // The process outlived its grace period: the line alone decides.
+    expect(
+      commandCodeTerminalDecision({ result: success, exitCode: null, diagnostics: "" }),
+    ).toEqual({ status: "succeeded" });
+    expect(
+      commandCodeTerminalDecision({
+        result: success,
+        exitCode: 9,
+        diagnostics: "Error: No response",
+      }),
+    ).toMatchObject({ status: "failed", error: { code: "nativeFailure", retryable: false } });
+    expect(
+      commandCodeTerminalDecision({
+        result: success,
+        exitCode: 1,
+        diagnostics: "Error: refused by policy\n",
+      }),
+    ).toMatchObject({
+      status: "failed",
+      error: { message: "Command Code did not complete the prompt: refused by policy" },
+    });
+    expect(
+      commandCodeTerminalDecision({
+        result: { type: "result", subtype: "error", error: "boom" },
+        exitCode: 1,
+        diagnostics: "",
+      }),
+    ).toMatchObject({ status: "failed", error: { message: "Command Code Turn failed: boom" } });
   });
 
   it("projects and accumulates print-mode usage", () => {
@@ -159,7 +221,7 @@ describe("Command Code Model catalog", () => {
       "claude-sonnet-5",
     ]);
     expect(catalog.defaultModel).toEqual(encodeCommandCodeModelRef("deepseek/deepseek-v4-flash"));
-    expect(catalog.thinkingOptions).toEqual(COMMAND_CODE_EFFORT_OPTIONS);
+    expect(catalog.thinkingOptions).toEqual([]);
     for (const model of catalog.models) {
       expect(decodeCommandCodeModelRef(model.ref)).toBe(model.label);
     }
@@ -178,17 +240,17 @@ describe("Command Code Model catalog", () => {
     expect(() => encodeCommandCodeModelRef("   ")).toThrow(/empty/u);
   });
 
-  it("translates the selection into -m and --effort flags", () => {
-    const effort = harnessThinkingOptionIdSchema.parse("high");
-    expect(commandCodeModelArguments(undefined, undefined)).toEqual([]);
-    expect(commandCodeModelArguments(encodeCommandCodeModelRef("claude-sonnet-5"), effort)).toEqual(
-      ["-m", "claude-sonnet-5", "--effort", "high"],
-    );
+  it("translates the selection into a -m flag and never into --effort", () => {
+    expect(commandCodeModelArguments(undefined)).toEqual([]);
+    expect(commandCodeModelArguments(encodeCommandCodeModelRef("claude-sonnet-5"))).toEqual([
+      "-m",
+      "claude-sonnet-5",
+    ]);
   });
 });
 
 describe("Command Code print arguments", () => {
-  it("builds a fresh run, a resume by transcript path and a resume by ID", () => {
+  it("builds a fresh run and a resume by transcript path only", () => {
     expect(commandCodePrintArguments({ permissionMode: "bypass", maxTurns: 100 })).toEqual([
       "-p",
       "--output-format",
@@ -200,30 +262,19 @@ describe("Command Code print arguments", () => {
       "100",
       "--dangerously-skip-permissions",
     ]);
-    expect(
-      commandCodePrintArguments({
-        sessionFilePath: "/tmp/s.jsonl",
-        nativeSessionId: "s",
-        permissionMode: "plan",
-        maxTurns: 5,
-      }),
-    ).toEqual(expect.arrayContaining(["--session", "/tmp/s.jsonl", "--permission-mode", "plan"]));
-    const byId = commandCodePrintArguments({
-      nativeSessionId: "abc",
-      forkSession: true,
-      permissionMode: "read-only",
+    const resumed = commandCodePrintArguments({
+      sessionFilePath: "/tmp/s.jsonl",
+      permissionMode: "plan",
       maxTurns: 5,
     });
-    expect(byId).toEqual(expect.arrayContaining(["--resume", "abc", "--fork-session"]));
-    expect(byId).not.toContain("--session");
-    expect(byId).not.toContain("--dangerously-skip-permissions");
-    expect(byId).not.toContain("--permission-mode");
-  });
-
-  it("never forks a fresh Session", () => {
-    expect(
-      commandCodePrintArguments({ forkSession: true, permissionMode: "bypass", maxTurns: 1 }),
-    ).not.toContain("--fork-session");
+    expect(resumed).toEqual(
+      expect.arrayContaining(["--session", "/tmp/s.jsonl", "--permission-mode", "plan"]),
+    );
+    expect(resumed).not.toContain("--resume");
+    expect(resumed).not.toContain("--dangerously-skip-permissions");
+    expect(commandCodePrintArguments({ permissionMode: "read-only", maxTurns: 5 })).not.toContain(
+      "--permission-mode",
+    );
   });
 });
 

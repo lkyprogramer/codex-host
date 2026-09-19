@@ -78,22 +78,59 @@ const readPrompt = () =>
   });
 const home = process.env.HOME;
 const projectDir = path.join(home, ".commandcode", "projects", "fixture-project");
-/** Appends a v3 transcript the way the CLI does: header first, then message nodes. */
-const writeSession = (sessionId, cwd, entries) => {
-  fs.mkdirSync(projectDir, { recursive: true });
+/**
+ * Mirrors the CLI's v3 store: entries are buffered in memory and the file is
+ * only written on the first assistant message or an explicit flush (the CLI's
+ * finally block). A run killed before either leaves no transcript behind.
+ */
+const store = (sessionId, cwd) => {
   const file = path.join(projectDir, sessionId + ".jsonl");
-  if (!fs.existsSync(file)) {
-    fs.writeFileSync(
-      file,
-      JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd }) + "\n",
-    );
+  const existing = fs.existsSync(file);
+  const pending = [];
+  let written = existing;
+  let lastId = null;
+  if (existing) {
+    const lines = fs.readFileSync(file, "utf8").trim().split("\n").slice(1);
+    const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
+    lastId = last ? last.id : null;
   }
-  for (const entry of entries) fs.appendFileSync(file, JSON.stringify(entry) + "\n");
-  return file;
-};
-const lastMessageId = (file) => {
-  const lines = fs.readFileSync(file, "utf8").trim().split("\n").slice(1);
-  const last = lines.length ? JSON.parse(lines[lines.length - 1]) : null;
-  return last ? last.id : null;
+  const flush = () => {
+    if (!pending.length && written) return;
+    fs.mkdirSync(projectDir, { recursive: true });
+    if (!written) {
+      fs.writeFileSync(
+        file,
+        JSON.stringify({ type: "session", version: 3, id: sessionId, timestamp: new Date().toISOString(), cwd }) + "\n",
+      );
+      written = true;
+    }
+    for (const entry of pending.splice(0)) fs.appendFileSync(file, JSON.stringify(entry) + "\n");
+  };
+  const append = (id, entry) => {
+    pending.push({ id, parentId: lastId, timestamp: new Date().toISOString(), ...entry });
+    lastId = id;
+    if (entry.type === "message" && entry.message.role === "assistant") flush();
+  };
+  return {
+    file,
+    flush,
+    prompt: (text) =>
+      append("p-" + process.pid + "-" + Date.now().toString(36), {
+        type: "message",
+        message: { role: "user", content: [{ type: "text", text }], meta: { source: "user" } },
+      }),
+    assistant: (text) =>
+      append("a-" + process.pid + "-" + Date.now().toString(36), {
+        type: "message",
+        message: { role: "assistant", content: [{ type: "text", text }] },
+      }),
+    compaction: () =>
+      append("c-" + process.pid + "-" + Date.now().toString(36), {
+        type: "compaction",
+        summary: "compacted",
+        firstKeptEntryId: lastId,
+        tokensBefore: 1,
+      }),
+  };
 };
 `;

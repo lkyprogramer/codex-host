@@ -27,11 +27,7 @@ import {
   CommandCodeSession,
   invalidState,
 } from "./command-code-session.js";
-import {
-  decodeCommandCodeModelRef,
-  isCommandCodeEffort,
-  parseCommandCodeModels,
-} from "./model-catalog.js";
+import { decodeCommandCodeModelRef, parseCommandCodeModels } from "./model-catalog.js";
 import {
   COMMAND_CODE_DEFAULT_PERMISSION_MODE,
   COMMAND_CODE_PERMISSION_MODE_CATALOG,
@@ -128,7 +124,9 @@ export class CommandCodeAdapter implements HarnessAdapter {
       return { status: "unavailable", error: invalidState("Command Code Adapter is closed") };
     }
     if (this.#inspectionInFlight) return this.#inspectionInFlight;
-    // The Model catalog is account-wide, so a cached reading serves every cwd.
+    // `--list-models` prints the CLI's built-in table without contacting the
+    // service or checking authentication, so one reading serves every cwd and
+    // says nothing about login state; that surfaces on the first Turn.
     if (!input.refresh && this.#inspection) return this.#inspection;
     const inspection = this.#inspectNative().then((result) => {
       if (result.status === "ready") this.#inspection = result;
@@ -225,8 +223,10 @@ export class CommandCodeAdapter implements HarnessAdapter {
         };
       }
     }
+    const historyOnly = input.kind === "resume" && input.historyOnly === true;
     const executable = this.#executable();
-    if (!executable) {
+    // Replaying the transcript needs no CLI; only starting a Turn does.
+    if (!executable && !historyOnly) {
       return {
         ok: false,
         error: { code: "notInstalled", message: "Command Code is not installed", retryable: false },
@@ -236,7 +236,7 @@ export class CommandCodeAdapter implements HarnessAdapter {
     const cwd = await canonicalCommandCodePath(input.cwd);
     const environment = { ...this.#environment, ...(input.environment ?? {}) };
     let catalog = this.#inspection?.catalog;
-    if (!catalog && !(input.kind === "resume" && input.historyOnly)) {
+    if (!catalog && !historyOnly) {
       const inspection = await this.inspect({ cwd });
       if (inspection.status === "ready") catalog = inspection.catalog;
     }
@@ -249,16 +249,6 @@ export class CommandCodeAdapter implements HarnessAdapter {
           error: { code: "invalidRequest", message: errorMessage(error), retryable: false },
         };
       }
-    }
-    if (input.thinkingOptionId && !isCommandCodeEffort(input.thinkingOptionId)) {
-      return {
-        ok: false,
-        error: {
-          code: "invalidRequest",
-          message: "Command Code effort must be low, medium or high",
-          retryable: false,
-        },
-      };
     }
 
     let nativeRef: NativeSessionRef | undefined;
@@ -323,7 +313,6 @@ export class CommandCodeAdapter implements HarnessAdapter {
       executable,
       maxTurns: this.#maxTurns,
       ...(input.model ? { model: input.model } : {}),
-      ...(input.thinkingOptionId ? { effort: input.thinkingOptionId } : {}),
       ...(nativeRef ? { nativeRef } : {}),
       permissionMode,
       ...(sessionFile ? { sessionFilePath: sessionFile.path } : {}),

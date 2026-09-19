@@ -69,10 +69,20 @@ const TRANSCRIPT =
       meta: { source: "tool" },
     },
   }) +
+  // A compaction node on the chain, as the CLI writes after auto-compaction.
+  line({
+    type: "compaction",
+    id: "k1",
+    parentId: "m3",
+    timestamp: "2026-09-19T03:58:09.500Z",
+    summary: "compacted",
+    firstKeptEntryId: "m1",
+    tokensBefore: 10,
+  }) +
   line({
     type: "message",
     id: "m4",
-    parentId: "m3",
+    parentId: "k1",
     timestamp: "2026-09-19T03:58:10.000Z",
     message: { role: "assistant", content: [{ type: "text", text: "OK" }] },
   }) +
@@ -99,11 +109,18 @@ const TRANSCRIPT =
       meta: { source: "user" },
     },
   }) +
+  line({
+    type: "model_change",
+    id: "k2",
+    parentId: "m6",
+    timestamp: "2026-09-19T03:58:12.500Z",
+    model: "claude-sonnet-5",
+  }) +
   // A CLI-injected user message without a source is not a Turn boundary.
   line({
     type: "message",
     id: "m7",
-    parentId: "m6",
+    parentId: "k2",
     timestamp: "2026-09-19T03:58:13.000Z",
     message: { role: "user", content: [{ type: "text", text: "Insufficient credits" }], meta: {} },
   });
@@ -114,7 +131,7 @@ describe("Command Code session file", () => {
     for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
   });
 
-  it("replays the active branch as Host Turns with tool outputs paired by tool_use_id", () => {
+  it("replays the active branch across non-message nodes with tool outputs paired by tool_use_id", () => {
     const turns = commandCodeSessionTurns({
       content: TRANSCRIPT,
       harnessId,
@@ -135,6 +152,7 @@ describe("Command Code session file", () => {
       arguments: { file_path: "/work/README.md" },
       output: { content: [{ type: "text", text: "hel" }], truncated: true },
     });
+    expect(first).not.toHaveProperty("checkpoint");
     expect(first?.outcome).toEqual({ status: "succeeded" });
     expect(first?.startedAtMs).toBe(Date.parse("2026-09-19T03:58:07.691Z"));
     expect(second?.nativeTurnRef.nativeTurnKey).toBe("m6");
