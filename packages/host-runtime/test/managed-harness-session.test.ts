@@ -332,9 +332,11 @@ describe("ManagedHarnessSession", () => {
     await expect(managed.resourceLifecycle?.suspend(new AbortController().signal)).resolves.toEqual(
       { status: "suspended", scope: "native-session" },
     );
+    expect(managed.nativeSuspended).toBe(true);
     expect(history.closed).toBe(true);
 
     await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(managed.nativeSuspended).toBe(false);
     expect(resume).toHaveBeenCalledTimes(1);
     expect(resume).toHaveBeenLastCalledWith({ historyOnly: true });
     expect(live.closed).toBe(false);

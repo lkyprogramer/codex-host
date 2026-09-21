@@ -26,6 +26,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import type { ExternalThreadRepository } from "../src/external-thread-repository.js";
 import { ExternalThreadRuntime } from "../src/external-thread-runtime.js";
+import { ManagedHarnessSession } from "../src/managed-harness-session.js";
 
 const harnessId = harnessIdSchema.parse("pi");
 const hostThreadId = hostThreadIdSchema.parse("thread-1");
@@ -663,6 +664,28 @@ describe("deferred live resume", () => {
 });
 
 describe("bounded native history", () => {
+  function delay(ms: number): Promise<void> {
+    return new Promise((resolve) => {
+      setTimeout(resolve, ms);
+    });
+  }
+
+  function historyOnlySession(nativeSessionRef = record().nativeSessionRef): FakeHarnessSession {
+    if (!nativeSessionRef) throw new Error("fixture missing native session");
+    const session = new FakeHarnessSession(harnessId, undefined, undefined, nativeSessionRef);
+    Object.defineProperty(session, "executionReady", { value: false });
+    Object.defineProperty(session, "resourceLifecycle", {
+      configurable: true,
+      value: {
+        suspend: async () => {
+          await session.close();
+          return { status: "suspended" as const, scope: "native-session" };
+        },
+      },
+    });
+    return session;
+  }
+
   it("shares a hung read, returns timeout, and discards its late result", async () => {
     const adapter = new FakeHarnessAdapter(harnessId);
     const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
@@ -706,6 +729,200 @@ describe("bounded native history", () => {
       expect(alignSnapshot).not.toHaveBeenCalled();
     } finally {
       release();
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("times out a hung cold restore on the restore budget", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    const open = vi.fn(async () => new Promise<never>(() => undefined));
+    const restoringAdapter: HarnessAdapter = {
+      harnessId: adapter.harnessId,
+      inspect: (input) => adapter.inspect(input),
+      open,
+      close: () => adapter.close(),
+    };
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", restoringAdapter]]),
+      historyRestoreTimeoutMs: 20,
+      repository: {
+        find: async () => stored,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    try {
+      const started = Date.now();
+      await expect(runtime.resolve(hostThreadId)).resolves.toMatchObject({
+        kind: "error",
+        error: { code: -32081, message: "External Thread history read timed out" },
+      });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ historyOnly: true }));
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("lets a cold restore finish after the snapshot-refresh budget", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    const history = historyOnlySession(stored.nativeSessionRef);
+    const open = vi.fn(async () => {
+      await delay(50);
+      return { ok: true as const, value: history };
+    });
+    const restoringAdapter: HarnessAdapter = {
+      harnessId: adapter.harnessId,
+      inspect: (input) => adapter.inspect(input),
+      open,
+      close: () => adapter.close(),
+    };
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", restoringAdapter]]),
+      historyReadTimeoutMs: 20,
+      historyRestoreTimeoutMs: 200,
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    try {
+      const started = Date.now();
+      const resolved = await runtime.resolve(hostThreadId);
+      expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+      expect(resolved).toMatchObject({ kind: "external" });
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ historyOnly: true }));
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("keeps an already-open snapshot on the short refresh budget", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const original = opened.value.readSnapshot.bind(opened.value);
+    vi.spyOn(opened.value, "readSnapshot").mockImplementation(async () => {
+      await delay(50);
+      return original();
+    });
+    const stored = record();
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      historyReadTimeoutMs: 200,
+      historyRestoreTimeoutMs: 20,
+      repository: {
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const thread = runtime.register({
+      record: stored,
+      session: opened.value,
+      sessionId: hostThreadId,
+      thread: { id: hostThreadId },
+      turns: [],
+    });
+    try {
+      await expect(runtime.refresh(thread)).resolves.toBeNull();
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("gives a suspended history Session the restore budget instead of the snapshot-refresh budget", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    const history = historyOnlySession(stored.nativeSessionRef);
+    const open = vi
+      .spyOn(adapter, "open")
+      .mockImplementation(async () => new Promise(() => undefined));
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      historyReadTimeoutMs: 10_000,
+      historyRestoreTimeoutMs: 20,
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const thread = runtime.register({
+      record: stored,
+      session: history,
+      sessionId: hostThreadId,
+      thread: { id: hostThreadId },
+      turns: [],
+    });
+    try {
+      await expect(
+        thread.session.resourceLifecycle?.suspend(new AbortController().signal),
+      ).resolves.toMatchObject({ status: "suspended" });
+      expect(thread.session).toBeInstanceOf(ManagedHarnessSession);
+      expect((thread.session as ManagedHarnessSession).nativeSuspended).toBe(true);
+      const started = Date.now();
+      await expect(runtime.refresh(thread)).resolves.toMatchObject({
+        code: -32081,
+        message: "External Thread history read timed out",
+      });
+      expect(Date.now() - started).toBeLessThan(1_000);
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ historyOnly: true }));
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("lets a suspended history resume finish after the snapshot-refresh budget", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    const history = historyOnlySession(stored.nativeSessionRef);
+    const resumed = historyOnlySession(stored.nativeSessionRef);
+    const open = vi.spyOn(adapter, "open").mockImplementation(async () => {
+      await delay(50);
+      return { ok: true as const, value: resumed };
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      historyReadTimeoutMs: 20,
+      historyRestoreTimeoutMs: 200,
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const thread = runtime.register({
+      record: stored,
+      session: history,
+      sessionId: hostThreadId,
+      thread: { id: hostThreadId },
+      turns: [],
+    });
+    try {
+      await expect(
+        thread.session.resourceLifecycle?.suspend(new AbortController().signal),
+      ).resolves.toMatchObject({ status: "suspended" });
+      const started = Date.now();
+      await expect(runtime.refresh(thread)).resolves.toBeNull();
+      expect(Date.now() - started).toBeGreaterThanOrEqual(40);
+      expect(open).toHaveBeenCalledWith(expect.objectContaining({ historyOnly: true }));
+      expect((thread.session as ManagedHarnessSession).nativeSuspended).toBe(false);
+    } finally {
       runtime.clear();
       await adapter.close();
     }

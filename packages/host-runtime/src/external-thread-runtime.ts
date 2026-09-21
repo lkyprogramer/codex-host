@@ -196,6 +196,9 @@ function errorMessage(error: unknown): string {
 }
 
 const EXTERNAL_READ_TIMEOUT_MS = 10_000;
+// Cold restore and post-suspend history resume spawn a native process. Cursor
+// ACP authenticate + session/load commonly exceed the snapshot-refresh budget.
+const EXTERNAL_RESTORE_TIMEOUT_MS = 60_000;
 const DEFAULT_IDLE_SUSPEND_TIMEOUT_MS = 60_000;
 
 interface IdleSuspendTimer {
@@ -232,6 +235,7 @@ export class ExternalThreadRuntime {
   readonly #idleUnknownReported = new Set<ExternalThread>();
   readonly #epoch: string;
   readonly #historyReadTimeoutMs: number;
+  readonly #historyRestoreTimeoutMs: number;
   readonly #idleSuspendTimeoutMs: number;
   readonly #canSuspend: (thread: ExternalThread) => boolean;
 
@@ -243,6 +247,7 @@ export class ExternalThreadRuntime {
     diagnose(error: unknown): void;
     epoch?: string;
     historyReadTimeoutMs?: number;
+    historyRestoreTimeoutMs?: number;
     idleSuspendTimeoutMs?: number;
     canSuspend?(thread: ExternalThread): boolean;
   }) {
@@ -253,6 +258,7 @@ export class ExternalThreadRuntime {
     this.#diagnose = input.diagnose;
     this.#epoch = input.epoch ?? randomUUID();
     this.#historyReadTimeoutMs = input.historyReadTimeoutMs ?? EXTERNAL_READ_TIMEOUT_MS;
+    this.#historyRestoreTimeoutMs = input.historyRestoreTimeoutMs ?? EXTERNAL_RESTORE_TIMEOUT_MS;
     this.#idleSuspendTimeoutMs = input.idleSuspendTimeoutMs ?? DEFAULT_IDLE_SUSPEND_TIMEOUT_MS;
     this.#canSuspend =
       input.canSuspend ??
@@ -581,7 +587,10 @@ export class ExternalThreadRuntime {
     try {
       return {
         kind: "external",
-        thread: await awaitWithSignal(restoring, AbortSignal.timeout(this.#historyReadTimeoutMs)),
+        thread: await awaitWithSignal(
+          restoring,
+          AbortSignal.timeout(this.#historyRestoreTimeoutMs),
+        ),
         historyFresh: true,
       };
     } catch (error) {
@@ -590,7 +599,9 @@ export class ExternalThreadRuntime {
         error:
           error instanceof ExternalThreadOpenError
             ? error.rpcError
-            : { code: -32076, message: "External Thread recovery failed" },
+            : error instanceof Error && error.name === "TimeoutError"
+              ? { code: -32081, message: "External Thread history read timed out" }
+              : { code: -32076, message: "External Thread recovery failed" },
       };
     }
   }
@@ -599,10 +610,11 @@ export class ExternalThreadRuntime {
     let refresh = this.#refreshes.get(thread);
     if (!refresh) {
       const abort = new AbortController();
-      const signal = AbortSignal.any([
-        abort.signal,
-        AbortSignal.timeout(this.#historyReadTimeoutMs),
-      ]);
+      const resumeBudget =
+        thread.session instanceof ManagedHarnessSession && thread.session.nativeSuspended
+          ? this.#historyRestoreTimeoutMs
+          : this.#historyReadTimeoutMs;
+      const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(resumeBudget)]);
       const latestTurn = thread.turns.at(-1);
       const activeTurn = thread.activeTurnId;
       const current = () =>

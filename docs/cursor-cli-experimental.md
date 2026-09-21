@@ -59,11 +59,13 @@ prompt text from its native `~/.cursor/acp-sessions/<id>/store.db`, using a read
 SQLite connection. A small bounded decoder follows the observed native root/turn
 references. This is an undocumented native format, not a supported Cursor API.
 
-The snapshot body comes from a fresh native ACP `session/load`. It is accepted only
-when session, workspace, turn count, order and exact prompt text match native
-history. A successful live turn must introduce exactly one native user-turn ID.
-Missing/ambiguous history is an error; generated UUIDs, array positions and text
-hashes are never used as native turn keys. The adapter keeps no shadow transcript.
+The snapshot body comes from a fresh native ACP `session/load`. Cursor does not
+expose a Claude-style jsonl transcript; Host mapping records store turn identity
+only. `session/load` is accepted only when session, workspace, turn count, order
+and exact prompt text match native history. A successful live turn must introduce
+exactly one native user-turn ID. Missing/ambiguous history is an error; generated
+UUIDs, array positions and text hashes are never used as native turn keys. The
+adapter keeps no shadow transcript.
 
 The real Windows restart smoke demonstrates that completed turn IDs remain equal
 after the adapter process is replaced, and a follow-up retains earlier context.
@@ -91,18 +93,22 @@ contract investigation before release acceptance.
 - Model inspection opens one empty native ACP session per cache refresh because
   the catalog is returned by `session/new`. It submits no model prompt. The model
   catalog is account-global: a working directory is only the ACP spawn path, not a
-  cache key. Ready catalogs are cached for seven days; missing install and
-  authentication failures are cached for five minutes. Both are reused across
-  directories. Empty directories, timeouts, and other protocol failures are not
-  retained. A cached ready catalog also expires early when a live Session open
-  reports a missing install, an authentication failure, or a requested model that
-  the live catalog no longer contains. Inspect and live Session
-  open share one empty-catalog retry in a new ACP process, including the older
-  `session/new` variant catalog with no model options. Opening a stored Thread first
-  resumes history-only (authenticate and `session/load`, no model catalog); the live
-  catalog is fetched when the next Turn starts, without a second history snapshot
-  against that same native Session. Same-session empty-directory refetch remains a
-  single read-only retry and never fabricates models.
+  cache key. Ready catalogs are cached in Adapter memory for seven days; missing
+  install and authentication failures are cached for five minutes. Both are reused
+  across directories until the Host process exits. Empty directories, timeouts,
+  and other protocol failures are not retained. A cached ready catalog also expires
+  early when a live Session open reports a missing install, an authentication
+  failure, or a requested model that the live catalog no longer contains. Inspect
+  and live Session open share one empty-catalog retry in a new ACP process,
+  including the older `session/new` variant catalog with no model options. Opening
+  a stored Thread first resumes history-only (authenticate and `session/load`, no
+  Host `cursor/list_available_models`); Cursor may still fetch remote metadata
+  inside native `session/load`. The live catalog is fetched when the next Turn
+  starts, without a second history snapshot against that same native Session.
+  Host cold restore and post-suspend history resume allow 60 seconds for that
+  native open; snapshot refresh of an already-open Session stays at 10 seconds.
+  Same-session empty-directory refetch remains a single read-only retry and never
+  fabricates models.
 - The native history format and operating-system authentication behavior require
   platform/version acceptance before formal product support is claimed.
 

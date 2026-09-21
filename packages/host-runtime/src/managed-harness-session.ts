@@ -185,6 +185,11 @@ export class ManagedHarnessSession {
       : undefined;
   }
 
+  /** Native process was released; the next Host read or execute must resume it. */
+  get nativeSuspended(): boolean {
+    return this.#suspended !== null;
+  }
+
   refreshUsage(): Promise<void> {
     return this.#read(async (session) => {
       await session.refreshUsage?.();
