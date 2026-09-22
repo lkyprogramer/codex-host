@@ -1,11 +1,12 @@
-export type GrokIdlePhase = "open" | "closing" | "closed" | "faulted";
+/** Lifecycle phase of a Grok Session, owned together with its admission rules. */
+export type GrokSessionPhase = "open" | "closing" | "closed" | "faulted";
 
 export type GrokIdleAdmission = { status: "busy" | "unknown"; reason: string } | null;
 
 /** Rejects idle suspension before any native process is touched. */
 export function grokIdleSuspendAdmission(input: {
   aborted: boolean;
-  phase: GrokIdlePhase;
+  phase: GrokSessionPhase;
   busy: boolean;
   verifiedTurns: number;
 }): GrokIdleAdmission {

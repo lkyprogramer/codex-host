@@ -3104,18 +3104,197 @@ describe("Grok idle suspension", () => {
     await adapter.close();
   });
 
+  it("ends its output stream once the owned process is released", async () => {
+    const { adapter, session } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const outputs = session.outputs[Symbol.asyncIterator]();
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    // The Host waits for this generation to end before it wakes the Session.
+    await expect(outputs.next()).resolves.toEqual({ done: true, value: undefined });
+    // A repeated request reports the same released resources, never a denial.
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
+  it("forgets a background Subagent that reports its end inside a later Turn", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const outputs = session.outputs[Symbol.asyncIterator]();
+
+    const first = hostTurnIdSchema.parse("turn-spawn");
+    await session.execute({
+      type: "turn.start",
+      turnId: first,
+      input: [{ type: "text", text: "delegate" }],
+    });
+    expect((await nextEvent(outputs)).type).toBe("turn.started");
+    transport.event({
+      type: "tool.call",
+      callId: "spawn-background",
+      title: "spawn_subagent",
+      name: "spawn_subagent",
+      rawInput: { subagent_id: "background-child", description: "Inspect", background: true },
+      status: "completed",
+    });
+    transport.histories.set(transport.sessionId, [
+      ...transport.replay,
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-2", stopReason: "end_turn" },
+    ]);
+    transport.finish();
+    while ((await nextEvent(outputs)).type !== "turn.completed") {
+      // Drain the spawn projection until the parent Turn settles.
+    }
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+
+    const second = hostTurnIdSchema.parse("turn-followup");
+    await session.execute({
+      type: "turn.start",
+      turnId: second,
+      input: [{ type: "text", text: "follow up" }],
+    });
+    expect((await nextEvent(outputs)).type).toBe("turn.started");
+    // An active Prompt receives every native update, including the end of a
+    // background Subagent that an earlier Turn started.
+    transport.event({
+      type: "subagent.finished",
+      nativeSubagentId: "background-child",
+      status: "completed",
+    });
+    transport.histories.set(transport.sessionId, [
+      ...transport.replay,
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-2", stopReason: "end_turn" },
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-3", stopReason: "end_turn" },
+    ]);
+    transport.finish();
+    while ((await nextEvent(outputs)).type !== "turn.completed") {
+      // Drain until the follow-up Turn settles.
+    }
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
+  it("keeps a background Subagent of a cancelled Turn as native work", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const outputs = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-cancelled-spawn");
+    await session.execute({
+      type: "turn.start",
+      turnId,
+      input: [{ type: "text", text: "delegate" }],
+    });
+    expect((await nextEvent(outputs)).type).toBe("turn.started");
+    transport.event({
+      type: "tool.call",
+      callId: "spawn-background",
+      title: "spawn_subagent",
+      name: "spawn_subagent",
+      rawInput: { subagent_id: "background-child", description: "Inspect", background: true },
+      status: "completed",
+    });
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toEqual({
+      ok: true,
+      value: { cancellationRequested: true },
+    });
+    transport.histories.set(transport.sessionId, [
+      ...transport.replay,
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-2", stopReason: "cancelled" },
+    ]);
+    transport.finish({ stopReason: "cancelled" });
+    while ((await nextEvent(outputs)).type !== "turn.completed") {
+      // Drain until the cancelled Turn settles.
+    }
+    // A cancelled parent Turn does not prove its native background Subagent stopped.
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
+    transport.sessionEvent({
+      type: "subagent.finished",
+      nativeSubagentId: "background-child",
+      status: "interrupted",
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
+  it("refuses native work between admission and the released process", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    let release: () => void = () => undefined;
+    transport.releaseOwnedProcess.mockImplementation(
+      () =>
+        new Promise<void>((resolve) => {
+          release = resolve;
+        }),
+    );
+    const suspending = lifecycle.suspend(new AbortController().signal);
+    await vi.waitFor(() => expect(transport.releaseOwnedProcess).toHaveBeenCalled());
+    // Admission marks the Session closing synchronously, so a wake cannot
+    // start native work against a process that is already being released.
+    await expect(
+      session.execute({
+        type: "turn.start",
+        turnId: hostTurnIdSchema.parse("turn-during-suspend"),
+        input: [{ type: "text", text: "race" }],
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    release();
+    await expect(suspending).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
   it("does not report suspension when the owned process group remains", async () => {
     const { adapter, session, transport } = await persistedSession();
     const lifecycle = session.resourceLifecycle;
     if (!lifecycle) throw new Error("Missing idle lifecycle");
-    transport.releaseError = new Error("owned group remains");
+    transport.releaseError = new Error("Owned process group did not exit within cleanup bounds");
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "unknown",
-      reason: "Grok managed process group did not exit",
+      reason: "Owned process group did not exit within cleanup bounds",
     });
     expect(transport.close).not.toHaveBeenCalled();
     expect(transport.deleteSession).not.toHaveBeenCalled();
     transport.releaseError = null;
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
+  it("retries after a release that fails before it reaches the process", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    transport.releaseOwnedProcess.mockImplementationOnce(() => {
+      throw new Error("Grok ACP ownership handle is unavailable");
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Grok ACP ownership handle is unavailable",
+    });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "suspended",
       scope: "grok-acp-session",

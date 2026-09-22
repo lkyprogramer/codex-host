@@ -20,6 +20,8 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 
 `thread release` 的 `resourcesReleased=true` 只证明返回 `proof.scope` 范围内的原生资源已释放。它可以与 `released=false`、`quiescence=unknown` 同时出现：Thread 保留可恢复状态，但不能据此删除工作树或业务资源。
 
+挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown` 或 `unsupported` 时，具备显式 owned-job 接口的 Harness 仍走原有的停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
+
 `quiescence=confirmed` 与资源挂起是不同的证明。受管进程组退出不覆盖工具自行创建的独立进程组、远端任务、容器任务或外部业务处理。取消请求成功、父 Turn 结束和进程内存下降，都不能替代这些任务的静默证明。
 
 ## 进程所有权

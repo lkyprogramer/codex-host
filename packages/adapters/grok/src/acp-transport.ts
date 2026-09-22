@@ -347,6 +347,9 @@ async function reapOwnedGroup(
 ): Promise<boolean> {
   const groupAlive = () => processGroupIsAlive(owned.pgid) || processIsSame(owned.pid, startToken);
   if (!groupAlive()) return false;
+  // Windows has no owned process group: the tracked tree close already ran
+  // taskkill /T /F, and a surviving pid cannot be re-identified as ours.
+  if (process.platform === "win32") return true;
   signalProcessGroup(owned.pgid, "SIGTERM");
   const deadline = Date.now() + Math.max(1, timeoutMs);
   while (Date.now() < deadline && groupAlive()) {
@@ -358,22 +361,6 @@ async function reapOwnedGroup(
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   return groupAlive();
-}
-
-function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
-  if (!child.pid) return;
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/pid", String(child.pid), "/t", "/f"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return;
-  }
-  try {
-    process.kill(-child.pid, signal);
-  } catch (error) {
-    if (!isRecord(error) || error.code !== "ESRCH") throw error;
-  }
 }
 
 function transportEvent(
@@ -619,6 +606,8 @@ function parseNativeHistory(contents: string, sessionId: string): GrokTransportE
   }
   return events;
 }
+
+type ShutdownMode = "close" | "release";
 
 export class GrokAcpTransport {
   readonly #options: Required<
@@ -1131,19 +1120,11 @@ export class GrokAcpTransport {
   /**
    * Drops the owned ACP process without ACP session/close or session delete.
    * Idle suspension uses this so the on-disk Native Session remains loadable.
+   * An owned group that survives the bounded cleanup rejects without marking
+   * the Transport closed, so the Host can retry the same Session later.
    */
   async releaseOwnedProcess(): Promise<void> {
-    await this.#beginShutdown(false);
-    const owned = this.ownedProcess();
-    if (!owned) return;
-    const remains = await reapOwnedGroup(
-      owned,
-      this.#owned?.startToken ?? "",
-      this.#options.closeTimeoutMs,
-    );
-    if (remains) {
-      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
-    }
+    await this.#beginShutdown("release");
   }
 
   cancel(): Promise<void> {
@@ -1156,14 +1137,19 @@ export class GrokAcpTransport {
   }
 
   close(): Promise<void> {
-    return this.#beginShutdown(true);
+    return this.#beginShutdown("close");
   }
 
-  #beginShutdown(closeSession: boolean): Promise<void> {
+  /**
+   * A shutdown already in flight is shared: both modes tear down the same
+   * owned process, and an idle release that has begun cannot be upgraded to
+   * an ACP session/close afterwards.
+   */
+  #beginShutdown(mode: ShutdownMode): Promise<void> {
     if (this.#closed) return Promise.resolve();
     if (!this.#shutdownPromise) {
       this.#closing = true;
-      this.#shutdownPromise = this.#performShutdown(closeSession).then(
+      this.#shutdownPromise = this.#performShutdown(mode).then(
         () => {
           this.#closed = true;
           this.#closing = false;
@@ -1180,34 +1166,44 @@ export class GrokAcpTransport {
     return this.#shutdownPromise;
   }
 
-  async #performShutdown(closeSession: boolean): Promise<void> {
+  async #performShutdown(mode: ShutdownMode): Promise<void> {
     const child = this.#child;
     const connection = this.#connection;
     if (
-      closeSession &&
+      mode === "close" &&
       connection &&
       this.#sessionId &&
       this.#initialize?.agentCapabilities?.sessionCapabilities?.close
     ) {
       await connection.closeSession({ sessionId: this.#sessionId }).catch(() => undefined);
     }
-    if (child?.stdin.writable) child.stdin.end();
-    if (this.#ownedTree) {
-      await this.#ownedTree.close().catch(() => undefined);
+    if (!child) return;
+    const owned = this.#ownedTree;
+    if (!owned) {
+      if (mode === "release") {
+        throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
+      }
       return;
     }
-    if (!child) return;
-    const leaderExited = await waitForExit(child, this.#options.closeTimeoutMs);
-    if (!leaderExited) {
-      signalProcessTree(child, "SIGTERM");
-      if (!(await waitForExit(child, this.#options.closeTimeoutMs))) {
-        signalProcessTree(child, "SIGKILL");
-        await waitForExit(child, this.#options.closeTimeoutMs);
-      }
-    } else if (child.pid) {
-      signalProcessGroup(process.platform === "win32" ? child.pid : -child.pid, "SIGTERM");
-      signalProcessGroup(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
+    if (process.platform === "win32") {
+      // taskkill cannot confirm a tree whose root already exited, so the
+      // leader is never asked to finish on stdin EOF first.
+      await this.#closeOwnedTree(owned, mode);
+      return;
     }
+    if (child.stdin.writable) child.stdin.end();
+    // Give the leader its bounded window to flush the Native Session files it
+    // is resumed from. A graceful leader exit still proves nothing about its
+    // detached group, so the tracker verifies the whole group afterwards.
+    await waitForExit(child, this.#options.closeTimeoutMs);
+    await this.#closeOwnedTree(owned, mode);
+  }
+
+  async #closeOwnedTree(owned: OwnedProcessTree, mode: ShutdownMode): Promise<void> {
+    // Idle release must never report success over an unconfirmed process
+    // tree; an explicit close stays tolerant and reports through close paths.
+    if (mode === "release") await owned.close();
+    else await owned.close().catch(() => undefined);
   }
 
   #handleUpdate(notification: SessionNotification): void {

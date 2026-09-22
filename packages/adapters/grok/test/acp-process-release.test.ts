@@ -72,7 +72,14 @@ process.stdin.on("data", (chunk) => {
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, result }) + "\\n");
   }
 });
-process.on("SIGTERM", () => process.exit(0));
+process.on("SIGTERM", () => {
+  fs.appendFileSync(log, "sigterm\\n");
+  process.exit(0);
+});
+process.stdin.on("end", () => {
+  fs.appendFileSync(log, "stdin-end\\n");
+  process.exit(0);
+});
 setInterval(() => {}, 1000);
 `;
 
@@ -101,16 +108,23 @@ async function startFixture(): Promise<{
   return { directory, logPath, transport };
 }
 
-function recorded(log: string): { methods: string[]; leader: number; child: number } {
+function recorded(log: string): {
+  methods: string[];
+  leader: number;
+  child: number;
+  signals: string[];
+} {
   const methods: string[] = [];
+  const signals: string[] = [];
   let leader = 0;
   let child = 0;
   for (const line of log.split("\n")) {
     if (line.startsWith("method ")) methods.push(line.slice("method ".length));
     if (line.startsWith("leader ")) leader = Number(line.slice("leader ".length));
     if (line.startsWith("child ")) child = Number(line.slice("child ".length));
+    if (line === "sigterm" || line === "stdin-end") signals.push(line);
   }
-  return { methods, leader, child };
+  return { methods, leader, child, signals };
 }
 
 describe("Grok owned process release", () => {
@@ -142,6 +156,10 @@ describe("Grok owned process release", () => {
         expect(after.methods).toContain("initialize");
         expect(after.methods).toContain("session/new");
         expect(after.methods).not.toContain("session/close");
+        expect(after.methods.filter((method) => method.includes("delete"))).toEqual([]);
+        // The leader finishes on stdin EOF inside its bounded window, so its
+        // Native Session files are never interrupted by a signal.
+        expect(after.signals).toEqual(["stdin-end"]);
       } finally {
         await transport.close().catch(() => undefined);
         await rm(directory, { recursive: true, force: true });

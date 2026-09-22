@@ -104,7 +104,7 @@ import {
 import type { GrokCompactResult } from "./grok-manual-compaction.js";
 import { projectGrokFileChanges } from "./grok-file-change.js";
 import { forkGrokSession } from "./grok-fork.js";
-import { grokIdleSuspendAdmission } from "./grok-idle-suspend.js";
+import { grokIdleSuspendAdmission, type GrokSessionPhase } from "./grok-idle-suspend.js";
 import { mapGrokReplay } from "./grok-history.js";
 import { rewindGrokLastTurn } from "./grok-rewind.js";
 import { GROK_INTERJECT_METHOD } from "./grok-interject.js";
@@ -227,8 +227,6 @@ interface ActiveTurn {
   completion: Promise<void>;
   resolveCompletion(): void;
 }
-
-type SessionPhase = "open" | "closing" | "closed" | "faulted";
 
 const grokHarnessId = harnessIdSchema.parse("grok");
 const grokCommandCatalog = harnessCommandCatalogSchema.parse({
@@ -362,7 +360,7 @@ class GrokHarnessSession implements HarnessSession {
   #closePromise: Promise<void> | null = null;
   #idleSuspend: Promise<HarnessIdleSuspendResult> | null = null;
   #configuring = false;
-  #phase: SessionPhase = "open";
+  #phase: GrokSessionPhase = "open";
   #state: HarnessSessionState;
   #usage: HostUsage | null = null;
   #modes: GrokSessionModes;
@@ -1455,6 +1453,10 @@ class GrokHarnessSession implements HarnessSession {
     active: ActiveTurn,
     event: Extract<GrokTransportEvent, { type: "subagent.finished" }>,
   ): void {
+    // A background Subagent started by an earlier Turn reports its end through
+    // whichever Prompt is in flight. Forget it here too, or idle suspension
+    // would keep waiting for a native Subagent that already stopped.
+    this.#backgroundSubagents.delete(event.nativeSubagentId);
     active.subagents.completeByNativeId(active.command.turnId, event.nativeSubagentId, {
       failed: event.status === "failed",
       cancellationRequested: active.cancellationRequested || event.status === "interrupted",
@@ -1548,11 +1550,12 @@ class GrokHarnessSession implements HarnessSession {
     const itemOutcome: HostItemOutcome = outcome;
     this.#completeReasoning(active, itemOutcome);
     this.#completeAgent(active, itemOutcome);
-    if (outcome.status === "succeeded") {
-      for (const subagent of active.subagents.runningBackgroundSubagents()) {
-        if (subagent.nativeSubagentId) {
-          this.#backgroundSubagents.set(subagent.nativeSubagentId, subagent);
-        }
+    // A Turn outcome says nothing about native background Subagents: only a
+    // native subagent.finished proves they stopped. Track them for every
+    // outcome so idle suspension never reclaims the process underneath them.
+    for (const subagent of active.subagents.runningBackgroundSubagents()) {
+      if (subagent.nativeSubagentId) {
+        this.#backgroundSubagents.set(subagent.nativeSubagentId, subagent);
       }
     }
     active.subagents.finalize(active.command.turnId, itemOutcome);
@@ -1595,7 +1598,9 @@ class GrokHarnessSession implements HarnessSession {
   }
 
   #suspendIdle(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
-    if (this.#idleSuspend && this.#phase === "closing") return this.#idleSuspend;
+    // Holds an accepted attempt: in flight, or the settled suspension whose
+    // released resources stay released. A rejected attempt clears it again.
+    if (this.#idleSuspend) return this.#idleSuspend;
     const denied = grokIdleSuspendAdmission({
       aborted: signal.aborted,
       phase: this.#phase,
@@ -1606,7 +1611,13 @@ class GrokHarnessSession implements HarnessSession {
     // Admission and the closing mark stay synchronous so a late event cannot
     // publish after the Host has accepted this suspension attempt.
     this.#phase = "closing";
-    const attempt = this.#finishIdleSuspend();
+    // The attempt is recorded before it can settle, so a rejected release
+    // never leaves a stale result that would deny every later attempt.
+    const attempt = (async () => {
+      const result = await this.#finishIdleSuspend();
+      if (result.status !== "suspended") this.#idleSuspend = null;
+      return result;
+    })();
     this.#idleSuspend = attempt;
     return attempt;
   }
@@ -1614,10 +1625,14 @@ class GrokHarnessSession implements HarnessSession {
   async #finishIdleSuspend(): Promise<HarnessIdleSuspendResult> {
     try {
       await this.#transport.releaseOwnedProcess();
-    } catch {
+    } catch (error) {
+      // The release keeps the Transport usable for a later attempt, so the
+      // Session returns to open and the Host retries on its own backoff.
       this.#phase = "open";
-      this.#idleSuspend = null;
-      return { status: "unknown", reason: "Grok managed process group did not exit" };
+      return {
+        status: "unknown",
+        reason: error instanceof Error ? error.message : "Grok idle release failed",
+      };
     }
     this.#phase = "closed";
     this.#channel.end();

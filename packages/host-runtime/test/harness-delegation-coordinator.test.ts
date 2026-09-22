@@ -139,6 +139,42 @@ class SuspendingFakeAdapter extends FakeHarnessAdapter {
   }
 }
 
+function withIdleSuspension(
+  session: FakeHarnessSession,
+  suspend: () => Promise<{ status: "busy" | "unknown"; reason: string }>,
+): void {
+  Object.defineProperty(session, "resourceLifecycle", {
+    configurable: true,
+    value: { suspend },
+  });
+}
+
+class IdleUnknownFakeAdapter extends FakeHarnessAdapter {
+  override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+    const opened = await super.open(input);
+    if (opened.ok) {
+      withIdleSuspension(opened.value as FakeHarnessSession, async () => ({
+        status: "unknown",
+        reason: "native Session is not persisted yet",
+      }));
+    }
+    return opened;
+  }
+}
+
+class IdleBusyFakeAdapter extends FakeHarnessAdapter {
+  override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+    const opened = await super.open(input);
+    if (opened.ok) {
+      withIdleSuspension(opened.value as FakeHarnessSession, async () => ({
+        status: "busy",
+        reason: "a native background job is still running",
+      }));
+    }
+    return opened;
+  }
+}
+
 describe("HarnessDelegationCoordinator", () => {
   it("builds follow-up commands from the Host-provided CLI path", async () => {
     const adapter = new RecordingAdapter(harnessIdSchema.parse("pi"));
@@ -1172,6 +1208,72 @@ describe("HarnessDelegationCoordinator", () => {
       ).toBe(true);
       expect(text.includes("OBSERVE04_BODY_")).toBe(false);
       expect(Buffer.byteLength(text)).toBeLessThanOrEqual(4096);
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("still runs the owned-job release when idle suspension cannot run", async () => {
+    const adapter = new IdleUnknownFakeAdapter(harnessIdSchema.parse("pi"));
+    const stopOwnedJobs = vi.fn(async () => ({
+      quiescence: "confirmed" as const,
+      proof: { pid: 4242, pgid: -4242, scope: "fake-child" },
+    }));
+    Object.assign(adapter, { stopOwnedJobs });
+    const value = await fixture(adapter);
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      const session = value.adapter.sessions[0];
+      if (!session) throw new Error("Missing session");
+      session.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      await expect(
+        value.coordinator.release({ threadId: started.threadId }),
+      ).resolves.toMatchObject({
+        released: true,
+        busy: false,
+        quiescence: "confirmed",
+        proof: { scope: "fake-child" },
+      });
+      expect(stopOwnedJobs).toHaveBeenCalledOnce();
+      expect(value.runtime.get(started.threadId)).toBeUndefined();
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("keeps a busy idle suspension from reaching the owned-job release", async () => {
+    const adapter = new IdleBusyFakeAdapter(harnessIdSchema.parse("pi"));
+    const stopOwnedJobs = vi.fn(async () => ({ quiescence: "confirmed" as const }));
+    Object.assign(adapter, { stopOwnedJobs });
+    const value = await fixture(adapter);
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      const session = value.adapter.sessions[0];
+      if (!session) throw new Error("Missing session");
+      session.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      await expect(
+        value.coordinator.release({ threadId: started.threadId }),
+      ).resolves.toMatchObject({ released: false, busy: true, quiescence: "unknown" });
+      expect(stopOwnedJobs).not.toHaveBeenCalled();
+      expect(value.runtime.get(started.threadId)).toBeDefined();
     } finally {
       await value.close();
     }
