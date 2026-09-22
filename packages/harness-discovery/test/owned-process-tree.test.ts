@@ -29,6 +29,26 @@ function killFixtureGroup(pid: number | undefined): void {
   }
 }
 
+function groupState(pid: number): "alive" | "exiting" | "gone" {
+  try {
+    process.kill(-pid, 0);
+    return "alive";
+  } catch (error) {
+    const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : null;
+    if (code === "ESRCH") return "gone";
+    if (code === "EPERM") return "exiting";
+    throw error;
+  }
+}
+
+function forceKillGroup(pid: number): void {
+  try {
+    process.kill(-pid, "SIGKILL");
+  } catch {
+    // ESRCH means it is already gone; EPERM means only a zombie remains.
+  }
+}
+
 describe("owned process tree", () => {
   const leaderCode = [
     "const {spawn}=require('node:child_process');",
@@ -96,6 +116,66 @@ describe("owned process tree", () => {
           throw Object.assign(new Error("gone"), { code: "ESRCH" });
         }
         throw new Error(`Unexpected signal ${pid} ${String(signal)}`);
+      });
+      try {
+        await expect(tracker.close()).resolves.toBeUndefined();
+      } finally {
+        kill.mockRestore();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "keeps a bounded cleanup failure instead of replaying it against a later pid",
+    async () => {
+      const leader = spawn(process.execPath, ["-e", leaderCode], {
+        detached: true,
+        stdio: "ignore",
+      });
+      const leaderPid = leader.pid;
+      if (!leaderPid) {
+        leader.kill("SIGKILL");
+        throw new Error("Detached fixture did not receive a process id");
+      }
+      // A zero budget cannot observe any exit, so the first cleanup fails even
+      // though it already signalled the group.
+      const tracker = trackOwnedProcessTree(leader, { detached: true, closeTimeoutMs: 0 });
+      if (!tracker) throw new Error("Expected detached fixture to be tracked");
+      try {
+        await new Promise<void>((resolve) => setTimeout(resolve, 50));
+        await expect(tracker.close()).rejects.toThrow(/did not exit within cleanup bounds/);
+        forceKillGroup(leaderPid);
+        await expect.poll(() => groupState(leaderPid), { timeout: 2_000 }).toBe("gone");
+        // The tracker holds a pid and nothing else, so it must not report a
+        // success it can no longer attribute to the group it spawned.
+        await expect(tracker.close()).rejects.toThrow(/did not exit within cleanup bounds/);
+      } finally {
+        forceKillGroup(leaderPid);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "waits out an EPERM signal instead of failing the cleanup",
+    async () => {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 91_338,
+        exitCode: null,
+        signalCode: null,
+      }) as unknown as ChildProcess;
+      const tracker = trackOwnedProcessTree(child, { detached: true, closeTimeoutMs: 200 });
+      if (!tracker) throw new Error("Expected synthetic detached child to be tracked");
+      let probes = 0;
+      // A group whose last member is an unreaped zombie answers every signal
+      // with EPERM until the kernel releases it.
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        if (pid !== -91_338) throw new Error(`Unexpected target ${pid}`);
+        if (signal === 0) {
+          probes += 1;
+          if (probes > 2) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+          throw Object.assign(new Error("zombie"), { code: "EPERM" });
+        }
+        throw Object.assign(new Error("zombie"), { code: "EPERM" });
       });
       try {
         await expect(tracker.close()).resolves.toBeUndefined();

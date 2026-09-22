@@ -7,7 +7,9 @@ export type GrokIdleAdmission = { status: "busy" | "unknown"; reason: string } |
 export function grokIdleSuspendAdmission(input: {
   aborted: boolean;
   phase: GrokSessionPhase;
-  busy: boolean;
+  activeTurn: boolean;
+  configuring: boolean;
+  backgroundSubagents: number;
   verifiedTurns: number;
 }): GrokIdleAdmission {
   if (input.aborted) {
@@ -16,10 +18,18 @@ export function grokIdleSuspendAdmission(input: {
   if (input.phase !== "open") {
     return { status: "unknown", reason: "Grok Session is closed or faulted" };
   }
-  if (input.busy) {
+  // Each gate names itself: the Host logs this reason, and a Thread that never
+  // suspends is only diagnosable if it says which native work held it open.
+  if (input.activeTurn) {
+    return { status: "busy", reason: "Grok Session still has an active Turn" };
+  }
+  if (input.configuring) {
+    return { status: "busy", reason: "Grok Session is writing native configuration" };
+  }
+  if (input.backgroundSubagents > 0) {
     return {
       status: "busy",
-      reason: "Grok Session still has native work or a background subagent",
+      reason: `Grok Session still has ${input.backgroundSubagents} native background Subagent(s)`,
     };
   }
   if (input.verifiedTurns < 1) {

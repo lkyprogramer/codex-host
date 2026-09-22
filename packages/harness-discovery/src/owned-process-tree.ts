@@ -19,22 +19,28 @@ function isErrno(error: unknown, code: string): boolean {
   return typeof error === "object" && error !== null && Reflect.get(error, "code") === code;
 }
 
-function signalGroup(pid: number, signal: NodeJS.Signals | 0): boolean {
+/**
+ * `gone` is proof the group is empty. `blocked` (EPERM) proves it still exists
+ * without saying the signal landed: a group whose last member is an unreaped
+ * zombie answers every signal that way, and so does one this process may not
+ * signal. Neither is decided here; the bounded wait is what settles it.
+ */
+type GroupSignal = "delivered" | "blocked" | "gone";
+
+function signalGroup(pid: number, signal: NodeJS.Signals | 0): GroupSignal {
   try {
     process.kill(-pid, signal);
-    return true;
+    return "delivered";
   } catch (error) {
-    if (isErrno(error, "ESRCH")) return false;
-    // EPERM from the existence probe still proves a group exists. Actual
-    // signal failures are observable cleanup failures, never success.
-    if (signal === 0 && isErrno(error, "EPERM")) return true;
+    if (isErrno(error, "ESRCH")) return "gone";
+    if (isErrno(error, "EPERM")) return "blocked";
     throw error;
   }
 }
 
 async function waitForGroupExit(pid: number, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
-  while (signalGroup(pid, 0)) {
+  while (signalGroup(pid, 0) !== "gone") {
     const remaining = deadline - Date.now();
     if (remaining <= 0) return false;
     await setTimeout(Math.min(10, remaining));
@@ -99,6 +105,9 @@ class TrackedOwnedProcessTree implements OwnedProcessTree {
     if (this.#closePromise) return this.#closePromise;
     const closing = this.#close();
     this.#closePromise = closing;
+    // A failed cleanup stays failed: this tracker only ever holds a pid, and
+    // replaying it later would signal whatever owns that pid by then. A caller
+    // that wants to retry must re-establish ownership evidence of its own.
     void closing.then(
       () => undefined,
       () => undefined,
@@ -114,11 +123,21 @@ class TrackedOwnedProcessTree implements OwnedProcessTree {
     // This tracker is only made for a detached POSIX spawn. Its pid is the
     // owned process-group id, so no parent pid, process name, or global scan
     // is ever signalled. A leader can exit before its descendants do.
-    if (!signalGroup(this.#pid, "SIGTERM")) return;
+    if (signalGroup(this.#pid, "SIGTERM") === "gone") return;
     if (await waitForGroupExit(this.#pid, this.#timeoutMs)) return;
-    if (!signalGroup(this.#pid, "SIGKILL")) return;
+    const forced = signalGroup(this.#pid, "SIGKILL");
+    if (forced === "gone") return;
     if (!(await waitForGroupExit(this.#pid, this.#timeoutMs))) {
-      throw new Error("Owned process group did not exit within cleanup bounds");
+      // A blocked signal is the most useful thing to say about a group that
+      // outlived its budget; keep it out of the control flow but in the text.
+      throw Object.assign(
+        new Error(
+          forced === "blocked"
+            ? "Owned process group did not exit within cleanup bounds (EPERM)"
+            : "Owned process group did not exit within cleanup bounds",
+        ),
+        forced === "blocked" ? { code: "EPERM" } : {},
+      );
     }
   }
 }

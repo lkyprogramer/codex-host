@@ -731,8 +731,15 @@ class GrokHarnessSession implements HarnessSession {
   }
 
   close(): Promise<void> {
-    if (!this.#closePromise) this.#closePromise = this.#close().finally(this.#onClosed);
-    return this.#closePromise;
+    if (this.#closePromise) return this.#closePromise;
+    const closing = this.#close().finally(this.#onClosed);
+    this.#closePromise = closing;
+    // A close that failed left the native process unproven, so the Host must
+    // be able to ask again rather than replay the same rejection forever.
+    void closing.catch(() => {
+      if (this.#closePromise === closing) this.#closePromise = null;
+    });
+    return closing;
   }
 
   handleTransportFault(error: GrokTransportError): void {
@@ -1424,6 +1431,9 @@ class GrokHarnessSession implements HarnessSession {
       content,
       rawOutput,
     })) {
+      // A wait or kill Tool output settles a background Subagent on its own,
+      // without a native subagent.finished. Release the idle gate here too.
+      this.#backgroundSubagents.delete(settlement.id);
       active.subagents.completeByNativeId(active.command.turnId, settlement.id, {
         failed: settlement.status === "failed",
         cancellationRequested: active.cancellationRequested || settlement.status === "interrupted",
@@ -1604,7 +1614,9 @@ class GrokHarnessSession implements HarnessSession {
     const denied = grokIdleSuspendAdmission({
       aborted: signal.aborted,
       phase: this.#phase,
-      busy: this.#active !== null || this.#configuring || this.#backgroundSubagents.size > 0,
+      activeTurn: this.#active !== null,
+      configuring: this.#configuring,
+      backgroundSubagents: this.#backgroundSubagents.size,
       verifiedTurns: this.#snapshot.turns.length,
     });
     if (denied) return Promise.resolve(denied);

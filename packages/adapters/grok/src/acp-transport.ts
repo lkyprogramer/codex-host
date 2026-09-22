@@ -336,7 +336,11 @@ function signalProcessGroup(pgid: number, signal: NodeJS.Signals): void {
   try {
     process.kill(pgid, signal);
   } catch (error) {
-    if (!isRecord(error) || error.code !== "ESRCH") throw error;
+    if (!isRecord(error)) throw error;
+    // ESRCH: the group is gone. EPERM: it exists but cannot be signalled,
+    // which is what a group down to an unreaped zombie answers. Neither is a
+    // failure here; the caller's bounded liveness check decides.
+    if (error.code !== "ESRCH" && error.code !== "EPERM") throw error;
   }
 }
 
@@ -347,9 +351,16 @@ async function reapOwnedGroup(
 ): Promise<boolean> {
   const groupAlive = () => processGroupIsAlive(owned.pgid) || processIsSame(owned.pid, startToken);
   if (!groupAlive()) return false;
-  // Windows has no owned process group: the tracked tree close already ran
-  // taskkill /T /F, and a surviving pid cannot be re-identified as ours.
-  if (process.platform === "win32") return true;
+  if (process.platform === "win32") {
+    // Windows has no owned process group: the tracked tree close already ran
+    // taskkill /T /F, and a surviving pid cannot be re-identified as ours, so
+    // it is never signalled again. Still spend the budget before calling it.
+    const taskkillDeadline = Date.now() + Math.max(1, timeoutMs);
+    while (Date.now() < taskkillDeadline && groupAlive()) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return groupAlive();
+  }
   signalProcessGroup(owned.pgid, "SIGTERM");
   const deadline = Date.now() + Math.max(1, timeoutMs);
   while (Date.now() < deadline && groupAlive()) {
@@ -633,6 +644,7 @@ export class GrokAcpTransport {
     startToken: string;
   } | null = null;
   #ownedTree: OwnedProcessTree | null = null;
+  #ownedTreeFailed = false;
   #shutdownPromise: Promise<void> | null = null;
 
   constructor(options: GrokAcpTransportOptions) {
@@ -1177,9 +1189,10 @@ export class GrokAcpTransport {
     ) {
       await connection.closeSession({ sessionId: this.#sessionId }).catch(() => undefined);
     }
-    if (!child) return;
     const owned = this.#ownedTree;
-    if (!owned) {
+    if (!child || !owned) {
+      // An idle release reports released resources, so it must never resolve
+      // over a process this Transport cannot account for.
       if (mode === "release") {
         throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
       }
@@ -1188,7 +1201,7 @@ export class GrokAcpTransport {
     if (process.platform === "win32") {
       // taskkill cannot confirm a tree whose root already exited, so the
       // leader is never asked to finish on stdin EOF first.
-      await this.#closeOwnedTree(owned, mode);
+      await this.#reclaimOwnedGroup(owned, mode);
       return;
     }
     if (child.stdin.writable) child.stdin.end();
@@ -1196,14 +1209,40 @@ export class GrokAcpTransport {
     // is resumed from. A graceful leader exit still proves nothing about its
     // detached group, so the tracker verifies the whole group afterwards.
     await waitForExit(child, this.#options.closeTimeoutMs);
-    await this.#closeOwnedTree(owned, mode);
+    await this.#reclaimOwnedGroup(owned, mode);
   }
 
-  async #closeOwnedTree(owned: OwnedProcessTree, mode: ShutdownMode): Promise<void> {
-    // Idle release must never report success over an unconfirmed process
-    // tree; an explicit close stays tolerant and reports through close paths.
-    if (mode === "release") await owned.close();
-    else await owned.close().catch(() => undefined);
+  /**
+   * Idle release must never report success over an unconfirmed process tree;
+   * an explicit close stays tolerant and reports through its own paths.
+   */
+  async #reclaimOwnedGroup(owned: OwnedProcessTree, mode: ShutdownMode): Promise<void> {
+    if (mode !== "release") {
+      await owned.close().catch(() => undefined);
+      return;
+    }
+    if (!this.#ownedTreeFailed) {
+      try {
+        await owned.close();
+        return;
+      } catch (error) {
+        // The tracker holds a pid alone, so it refuses to be replayed once a
+        // cleanup failed. Later attempts must carry their own ownership proof.
+        this.#ownedTreeFailed = true;
+        throw error;
+      }
+    }
+    const managed = this.ownedProcess();
+    if (!managed) {
+      throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
+    }
+    // The recorded start token identifies this exact spawn, so a recycled pid
+    // is never mistaken for the group this Transport created.
+    if (
+      await reapOwnedGroup(managed, this.#owned?.startToken ?? "", this.#options.closeTimeoutMs)
+    ) {
+      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
+    }
   }
 
   #handleUpdate(notification: SessionNotification): void {

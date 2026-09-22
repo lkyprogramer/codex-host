@@ -11,26 +11,26 @@ import { GrokAcpTransport } from "../src/acp-transport.js";
 
 const groups: number[] = [];
 
-function groupAlive(pid: number): boolean {
+function groupState(pid: number): "alive" | "exiting" | "gone" {
   try {
     process.kill(-pid, 0);
-    return true;
+    return "alive";
   } catch (error) {
-    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ESRCH") {
-      return false;
-    }
+    const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : null;
+    if (code === "ESRCH") return "gone";
+    // EPERM means the group is down to an unreaped zombie: not alive, not yet
+    // released by the kernel.
+    if (code === "EPERM") return "exiting";
     throw error;
   }
 }
 
 function killGroup(pid: number): void {
+  if (!pid) return;
   try {
     process.kill(-pid, "SIGKILL");
-  } catch (error) {
-    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ESRCH") {
-      return;
-    }
-    throw error;
+  } catch {
+    // ESRCH: already gone. EPERM: only a zombie remains.
   }
 }
 
@@ -83,7 +83,12 @@ process.stdin.on("end", () => {
 setInterval(() => {}, 1000);
 `;
 
-async function startFixture(): Promise<{
+async function trackFixtureGroup(logPath: string): Promise<void> {
+  const leader = recorded(await readFile(logPath, "utf8").catch(() => "")).leader;
+  if (leader) groups.push(leader);
+}
+
+async function startFixture(overrides: { closeTimeoutMs?: number } = {}): Promise<{
   directory: string;
   logPath: string;
   transport: GrokAcpTransport;
@@ -97,7 +102,7 @@ async function startFixture(): Promise<{
   const transport = new GrokAcpTransport({
     command,
     cwd: directory,
-    closeTimeoutMs: 300,
+    closeTimeoutMs: overrides.closeTimeoutMs ?? 1_000,
     commandTimeoutMs: 5_000,
     environment: {
       ...process.env,
@@ -143,10 +148,9 @@ describe("Grok owned process release", () => {
         });
         expect(opened.sessionId).toBe("fixture-session");
         const before = recorded(await readFile(logPath, "utf8"));
-        groups.push(before.leader);
-        expect(groupAlive(before.leader)).toBe(true);
+        expect(groupState(before.leader)).toBe("alive");
         await transport.releaseOwnedProcess();
-        await expect.poll(() => groupAlive(before.leader), { timeout: 1_000 }).toBe(false);
+        await expect.poll(() => groupState(before.leader), { timeout: 2_000 }).toBe("gone");
         await expect
           .poll(() => spawnSync("ps", ["-p", String(before.child), "-o", "pid="]).status, {
             timeout: 1_000,
@@ -161,11 +165,48 @@ describe("Grok owned process release", () => {
         // Native Session files are never interrupted by a signal.
         expect(after.signals).toEqual(["stdin-end"]);
       } finally {
+        await trackFixtureGroup(logPath);
         await transport.close().catch(() => undefined);
         await rm(directory, { recursive: true, force: true });
       }
     },
   );
+
+  it.skipIf(process.platform === "win32")(
+    "retries a failed idle release and confirms the same spawn group",
+    async () => {
+      const { directory, logPath, transport } = await startFixture({ closeTimeoutMs: 0 });
+      try {
+        await transport.open({
+          kind: "create",
+          permissionModeId: harnessPermissionModeIdSchema.parse("ask"),
+        });
+        const before = recorded(await readFile(logPath, "utf8"));
+        groups.push(before.leader);
+        // A zero budget observes no exit, so the first release fails even
+        // though it already escalated to SIGKILL.
+        await expect(transport.releaseOwnedProcess()).rejects.toThrow();
+        await expect.poll(() => groupState(before.leader), { timeout: 2_000 }).toBe("gone");
+        // The tracker refuses to be replayed, so the retry has to prove the
+        // same spawn is gone by identity instead of reporting unknown forever.
+        await expect(transport.releaseOwnedProcess()).resolves.toBeUndefined();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it("refuses to report an idle release without an owned process", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "grok-idle-unowned-"));
+    const transport = new GrokAcpTransport({ cwd: directory, closeTimeoutMs: 100 });
+    try {
+      // Nothing was spawned, so there is no owned process to account for.
+      await expect(transport.releaseOwnedProcess()).rejects.toThrow(/ownership handle/);
+      await expect(transport.close()).resolves.toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 
   it.skipIf(process.platform === "win32")(
     "explicit close still sends session/close and reaps the group",
@@ -177,11 +218,11 @@ describe("Grok owned process release", () => {
           permissionModeId: harnessPermissionModeIdSchema.parse("ask"),
         });
         const before = recorded(await readFile(logPath, "utf8"));
-        groups.push(before.leader);
         await transport.close();
-        expect(groupAlive(before.leader)).toBe(false);
+        await expect.poll(() => groupState(before.leader), { timeout: 2_000 }).toBe("gone");
         expect(recorded(await readFile(logPath, "utf8")).methods).toContain("session/close");
       } finally {
+        await trackFixtureGroup(logPath);
         await rm(directory, { recursive: true, force: true });
       }
     },

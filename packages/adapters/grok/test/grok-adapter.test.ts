@@ -3056,8 +3056,9 @@ describe("Grok idle suspension", () => {
     await nextEvent(outputs);
     const approval = transport.permission();
     expect((await nextOutput(outputs)).kind).toBe("interaction");
-    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "busy",
+      reason: "Grok Session still has an active Turn",
     });
     expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
     void approval.catch(() => undefined);
@@ -3078,8 +3079,9 @@ describe("Grok idle suspension", () => {
     );
     const configuring = session.workMode?.set("default");
     await vi.waitFor(() => expect(transport.setSessionMode).toHaveBeenCalled());
-    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "busy",
+      reason: "Grok Session is writing native configuration",
     });
     releaseMode();
     await configuring;
@@ -3089,8 +3091,9 @@ describe("Grok idle suspension", () => {
       nativeSubagentId: "child-1",
       description: "background",
     });
-    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "busy",
+      reason: "Grok Session still has 1 native background Subagent(s)",
     });
     transport.sessionEvent({
       type: "subagent.finished",
@@ -3152,8 +3155,9 @@ describe("Grok idle suspension", () => {
     while ((await nextEvent(outputs)).type !== "turn.completed") {
       // Drain the spawn projection until the parent Turn settles.
     }
-    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "busy",
+      reason: "Grok Session still has 1 native background Subagent(s)",
     });
 
     const second = hostTurnIdSchema.parse("turn-followup");
@@ -3219,8 +3223,9 @@ describe("Grok idle suspension", () => {
       // Drain until the cancelled Turn settles.
     }
     // A cancelled parent Turn does not prove its native background Subagent stopped.
-    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "busy",
+      reason: "Grok Session still has 1 native background Subagent(s)",
     });
     expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
     transport.sessionEvent({
@@ -3262,6 +3267,82 @@ describe("Grok idle suspension", () => {
       status: "suspended",
       scope: "grok-acp-session",
     });
+    await adapter.close();
+  });
+
+  it("forgets a background Subagent settled by a wait or kill Tool", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const outputs = session.outputs[Symbol.asyncIterator]();
+
+    await session.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("turn-spawn-watched"),
+      input: [{ type: "text", text: "delegate" }],
+    });
+    expect((await nextEvent(outputs)).type).toBe("turn.started");
+    transport.event({
+      type: "tool.call",
+      callId: "spawn-watched",
+      title: "spawn_subagent",
+      name: "spawn_subagent",
+      rawInput: { subagent_id: "watched-child", description: "Inspect", background: true },
+      status: "completed",
+    });
+    transport.histories.set(transport.sessionId, [
+      ...transport.replay,
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-2", stopReason: "end_turn" },
+    ]);
+    transport.finish();
+    while ((await nextEvent(outputs)).type !== "turn.completed") {
+      // Drain the spawn projection.
+    }
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "busy",
+      reason: "Grok Session still has 1 native background Subagent(s)",
+    });
+
+    await session.execute({
+      type: "turn.start",
+      turnId: hostTurnIdSchema.parse("turn-kill-watched"),
+      input: [{ type: "text", text: "kill it" }],
+    });
+    expect((await nextEvent(outputs)).type).toBe("turn.started");
+    // A kill Tool settles the Subagent through its own output; Grok sends no
+    // separate subagent.finished for it.
+    transport.event({
+      type: "tool.call",
+      callId: "kill-watched",
+      title: "kill_task",
+      name: "kill_task",
+      rawInput: { task_id: "watched-child" },
+      status: "completed",
+    });
+    transport.histories.set(transport.sessionId, [
+      ...transport.replay,
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-2", stopReason: "end_turn" },
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-3", stopReason: "end_turn" },
+    ]);
+    transport.finish();
+    while ((await nextEvent(outputs)).type !== "turn.completed") {
+      // Drain until the follow-up Turn settles.
+    }
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
+  it("stays closable after a close that failed", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    transport.close.mockRejectedValueOnce(new Error("Grok ACP shutdown failed"));
+    await expect(session.close()).rejects.toThrow("Grok ACP shutdown failed");
+    // A memoised rejection would leave the Session permanently unclosable.
+    await expect(session.close()).resolves.toBeUndefined();
+    expect(transport.close).toHaveBeenCalledTimes(2);
     await adapter.close();
   });
 

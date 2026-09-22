@@ -162,6 +162,21 @@ class IdleUnknownFakeAdapter extends FakeHarnessAdapter {
   }
 }
 
+class IdleFaultingFakeAdapter extends FakeHarnessAdapter {
+  override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+    const opened = await super.open(input);
+    if (opened.ok) {
+      Object.defineProperty(opened.value as FakeHarnessSession, "resourceLifecycle", {
+        configurable: true,
+        value: {
+          suspend: () => Promise.reject(new Error("native idle suspension blew up")),
+        },
+      });
+    }
+    return opened;
+  }
+}
+
 class IdleBusyFakeAdapter extends FakeHarnessAdapter {
   override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
     const opened = await super.open(input);
@@ -1245,6 +1260,36 @@ describe("HarnessDelegationCoordinator", () => {
       });
       expect(stopOwnedJobs).toHaveBeenCalledOnce();
       expect(value.runtime.get(started.threadId)).toBeUndefined();
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("answers with a quiescence when the owned-job lease is refused", async () => {
+    const adapter = new IdleFaultingFakeAdapter(harnessIdSchema.parse("pi"));
+    const stopOwnedJobs = vi.fn(async () => ({ quiescence: "confirmed" as const }));
+    Object.assign(adapter, { stopOwnedJobs });
+    const value = await fixture(adapter);
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      const session = value.adapter.sessions[0];
+      if (!session) throw new Error("Missing session");
+      session.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      // The failed suspension faults the managed Session, which then refuses
+      // the destructive lease. Release must still answer, never throw.
+      await expect(
+        value.coordinator.release({ threadId: started.threadId }),
+      ).resolves.toMatchObject({ released: false, busy: false, quiescence: "unknown" });
+      expect(value.runtime.get(started.threadId)).toBeDefined();
     } finally {
       await value.close();
     }
