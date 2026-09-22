@@ -1,4 +1,4 @@
-import { spawn, spawnSync, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +6,7 @@ import { Readable, Writable } from "node:stream";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
 import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import { processStartToken, reclaimOwnedGroup, type OwnedGroupRef } from "./owned-group.js";
 import type { HarnessPermissionModeId } from "@codexhost/shared-contracts";
 import {
   ClientSideConnection,
@@ -287,93 +288,6 @@ function waitForExit(child: ChildProcessWithoutNullStreams, timeoutMs: number): 
   ]);
 }
 
-function processIsAlive(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return isRecord(error) && error.code === "EPERM" ? true : false;
-  }
-}
-
-function processStartToken(pid: number): string {
-  try {
-    const result = spawnSync("ps", ["-p", String(pid), "-o", "lstart="], {
-      encoding: "utf8",
-      timeout: 1_000,
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    return result.stdout.trim();
-  } catch {
-    return "";
-  }
-}
-
-function processIsSame(pid: number, startToken: string): boolean {
-  if (!processIsAlive(pid)) return false;
-  if (!startToken) return true;
-  return processStartToken(pid) === startToken;
-}
-
-function processGroupIsAlive(pgid: number): boolean {
-  if (process.platform === "win32") return processIsAlive(Math.abs(pgid));
-  try {
-    process.kill(pgid, 0);
-    return true;
-  } catch (error) {
-    return isRecord(error) && error.code === "EPERM" ? true : false;
-  }
-}
-
-function signalProcessGroup(pgid: number, signal: NodeJS.Signals): void {
-  if (process.platform === "win32") {
-    spawnSync("taskkill.exe", ["/pid", String(Math.abs(pgid)), "/t", "/f"], {
-      stdio: "ignore",
-      windowsHide: true,
-    });
-    return;
-  }
-  try {
-    process.kill(pgid, signal);
-  } catch (error) {
-    if (!isRecord(error)) throw error;
-    // ESRCH: the group is gone. EPERM: it exists but cannot be signalled,
-    // which is what a group down to an unreaped zombie answers. Neither is a
-    // failure here; the caller's bounded liveness check decides.
-    if (error.code !== "ESRCH" && error.code !== "EPERM") throw error;
-  }
-}
-
-async function reapOwnedGroup(
-  owned: { pid: number; pgid: number },
-  startToken: string,
-  timeoutMs: number,
-): Promise<boolean> {
-  const groupAlive = () => processGroupIsAlive(owned.pgid) || processIsSame(owned.pid, startToken);
-  if (!groupAlive()) return false;
-  if (process.platform === "win32") {
-    // Windows has no owned process group: the tracked tree close already ran
-    // taskkill /T /F, and a surviving pid cannot be re-identified as ours, so
-    // it is never signalled again. Still spend the budget before calling it.
-    const taskkillDeadline = Date.now() + Math.max(1, timeoutMs);
-    while (Date.now() < taskkillDeadline && groupAlive()) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    return groupAlive();
-  }
-  signalProcessGroup(owned.pgid, "SIGTERM");
-  const deadline = Date.now() + Math.max(1, timeoutMs);
-  while (Date.now() < deadline && groupAlive()) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  if (groupAlive()) signalProcessGroup(owned.pgid, "SIGKILL");
-  const killDeadline = Date.now() + Math.max(1, timeoutMs);
-  while (Date.now() < killDeadline && groupAlive()) {
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return groupAlive();
-}
-
 function transportEvent(
   update: SessionUpdate,
   metadata?: Record<string, unknown>,
@@ -646,6 +560,7 @@ export class GrokAcpTransport {
   #ownedTree: OwnedProcessTree | null = null;
   #ownedTreeFailed = false;
   #shutdownPromise: Promise<void> | null = null;
+  #shutdownMode: ShutdownMode | null = null;
 
   constructor(options: GrokAcpTransportOptions) {
     this.#options = {
@@ -1104,6 +1019,19 @@ export class GrokAcpTransport {
     }
   }
 
+  /** Identity of the group this Transport spawned, for a bounded reclaim. */
+  #ownedGroup(): OwnedGroupRef | null {
+    const owned = this.#owned;
+    const child = this.#child;
+    if (!owned || !child?.pid) return null;
+    return {
+      pid: owned.pid,
+      pgid: process.platform === "win32" ? owned.pid : -owned.pid,
+      startToken: owned.startToken,
+      leaderExited: child.exitCode !== null || child.signalCode !== null,
+    };
+  }
+
   ownedProcess(): { pid: number; pgid: number; startedAtMs: number } | null {
     const owned = this.#owned;
     const child = this.#child;
@@ -1123,7 +1051,8 @@ export class GrokAcpTransport {
     await this.close();
     if (!owned) return { quiescence: "unknown" };
     const proof = { pid: owned.pid, pgid: owned.pgid, scope: "grok-acp-child" };
-    if (await reapOwnedGroup(owned, this.#owned?.startToken ?? "", timeoutMs)) {
+    const group = this.#ownedGroup();
+    if (!group || (await reclaimOwnedGroup(group, timeoutMs))) {
       return { quiescence: "unknown", proof };
     }
     return { quiescence: "confirmed", proof };
@@ -1136,7 +1065,22 @@ export class GrokAcpTransport {
    * the Transport closed, so the Host can retry the same Session later.
    */
   async releaseOwnedProcess(): Promise<void> {
+    const shared = this.#shutdownMode;
     await this.#beginShutdown("release");
+    // A shutdown already in flight, or one that finished earlier, ran under
+    // close semantics that tolerate an unconfirmed tree. An idle release
+    // cannot inherit that: it confirms the owned group on its own.
+    if (shared !== null && shared !== "release") await this.#confirmOwnedGroupGone();
+  }
+
+  async #confirmOwnedGroupGone(): Promise<void> {
+    const group = this.#ownedGroup();
+    if (!group) {
+      throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
+    }
+    if (await reclaimOwnedGroup(group, this.#options.closeTimeoutMs)) {
+      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
+    }
   }
 
   cancel(): Promise<void> {
@@ -1161,6 +1105,7 @@ export class GrokAcpTransport {
     if (this.#closed) return Promise.resolve();
     if (!this.#shutdownPromise) {
       this.#closing = true;
+      this.#shutdownMode = mode;
       this.#shutdownPromise = this.#performShutdown(mode).then(
         () => {
           this.#closed = true;
@@ -1232,17 +1177,10 @@ export class GrokAcpTransport {
         throw error;
       }
     }
-    const managed = this.ownedProcess();
-    if (!managed) {
-      throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
-    }
-    // The recorded start token identifies this exact spawn, so a recycled pid
-    // is never mistaken for the group this Transport created.
-    if (
-      await reapOwnedGroup(managed, this.#owned?.startToken ?? "", this.#options.closeTimeoutMs)
-    ) {
-      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
-    }
+    // The tracker will not be replayed, so the retry carries its own evidence:
+    // the recorded spawn identity decides whether this group may be signalled
+    // again, and only an observed exit counts as released.
+    await this.#confirmOwnedGroupGone();
   }
 
   #handleUpdate(notification: SessionNotification): void {

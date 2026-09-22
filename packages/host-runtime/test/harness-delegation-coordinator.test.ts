@@ -1288,7 +1288,14 @@ describe("HarnessDelegationCoordinator", () => {
       // the destructive lease. Release must still answer, never throw.
       await expect(
         value.coordinator.release({ threadId: started.threadId }),
-      ).resolves.toMatchObject({ released: false, busy: false, quiescence: "unknown" });
+      ).resolves.toMatchObject({
+        released: false,
+        busy: false,
+        quiescence: "unknown",
+        // The refusal is reported, not swallowed: a caller that cannot act on
+        // a bare "unknown" still learns why the lease was denied.
+        reason: "Managed Harness Session is closed",
+      });
       expect(value.runtime.get(started.threadId)).toBeDefined();
     } finally {
       await value.close();

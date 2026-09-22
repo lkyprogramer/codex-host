@@ -1179,16 +1179,18 @@ export class HarnessDelegationCoordinator {
     const releasable = adapter ? ownedJobAdapter(adapter) : undefined;
     let quiescence: JobQuiescence = releasable ? "unknown" : (lifecycleQuiescence ?? "unsupported");
     let proof: ThreadReleaseResult["proof"];
+    let reason: string | undefined;
     if (releasable) {
       try {
         const stopped = await this.#stopLegacyOwnedJobs(releasable, thread.session);
         quiescence = stopped.quiescence;
         proof = stopped.proof;
-      } catch {
+      } catch (error) {
         // A Session that is closed, faulted or suspended refuses this lease.
         // Release stays fail-closed and still answers with a quiescence the
         // caller can act on, instead of failing the whole control request.
         quiescence = "unknown";
+        reason = error instanceof Error ? error.message : String(error);
       }
     }
     if (quiescence !== "confirmed") {
@@ -1198,6 +1200,7 @@ export class HarnessDelegationCoordinator {
         busy: false,
         quiescence,
         ...(proof ? { proof } : {}),
+        ...(reason ? { reason } : {}),
       };
     }
     try {

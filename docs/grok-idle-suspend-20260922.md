@@ -10,7 +10,14 @@
 
 1. `GrokHarnessSession.resourceLifecycle.suspend`：信号已中止，或 Session 已关闭 / 故障，返回 `unknown`；活动 Turn、压缩、配置、待回答审批，或 `#backgroundSubagents` 仍有原生后台子代理，返回 `busy`；还没有核对过的 Native Turn，返回 `unknown`。准入通过后同步进入 closing，再释放受管进程组。成功时 scope 为 `grok-acp-session`，并结束输出通道。
 2. 空闲释放调用 `releaseOwnedProcess`。Unix 下先结束 stdin，再给 leader 一段有界时间按 EOF 自行退出（`updates.jsonl` 由它写完），随后用 `trackOwnedProcessTree` 确认整个受管进程组退出；Windows 不先送 EOF，直接走 taskkill 进程树关闭，因为 root 先退出后无法再确认整棵树——这相对改动前是 Grok 破坏性 `close` 的行为变化（Windows 上 CLI 不再有 EOF 刷盘窗口），与 Kiro 的同类实现一致。不调用 ACP `session/close`，也不调用 `_x.ai/session/delete`。本地 `updates.jsonl` 仍是 `session/load` 的恢复来源。显式 `close` / `stopOwnedJobs` 仍会发送 `session/close`（能力声明存在时）。
-3. 进程组没有退出时释放失败，Transport 不标记为已关闭，Session 回到 open，返回 `unknown` 并带上原始失败原因，Host 按既有退避重试。`trackOwnedProcessTree` 只持有 pid，一次清理失败后不再重放（否则会对可能被复用的 pid 发信号），因此重试改用本包的 `reapOwnedGroup`：按 spawn 时记录的 `startToken`（`ps -o lstart`）核对身份，再对同一进程组重新升级 TERM → KILL。进程组只剩未回收僵尸时信号返回 EPERM，按「仍在退出」处理并等待预算用完；确实超时则失败信息里保留 EPERM。不新增数量上限。打开已挂起 Thread 的完整历史读取仍会拉起一个新的 `grok agent`，空闲 60 秒后再退出。
+3. 进程组没有退出时释放失败，Transport 不标记为已关闭，Session 回到 open，返回 `unknown` 并带上原始失败原因，Host 按既有退避重试。`trackOwnedProcessTree` 只持有 pid，一次清理失败后不再重放（否则会对可能被复用的 pid 发信号），因此重试改用 `owned-group.ts` 的 `reclaimOwnedGroup`。它在发信号前先判定所有权：
+
+- leader 已不在：组 id 在成员未清空前不会被内核回收，所以剩下的必是本次 spawn 的子孙，可以发信号；
+- leader 还在且 `startToken`（spawn 时 `ps -o lstart`）匹配：是本次 spawn，可以发信号；
+- leader 还在但 token 不匹配：pid 已被复用，原组必然已经消失——判为已释放，且绝不对现在的占用者发信号；
+- token 为空（`ps` 不可用，Windows 恒为空）：无法证明所有权，不发信号并按未确认失败。
+
+确认所有权后再对同一进程组重新升级 TERM → KILL，只有观察到组消失才算释放。Windows 没有受管进程组，只能借活着的 root 用 taskkill `/T /F` 定位整棵树；root 已退出时这棵树不可达也不可知，返回未确认而不是成功。进程组只剩未回收僵尸时信号返回 EPERM，按「仍在退出」处理并等待预算用完；代价是真正无权限的清理会用满两轮预算才失败，失败信息里保留 EPERM。不新增数量上限。打开已挂起 Thread 的完整历史读取仍会拉起一个新的 `grok agent`，空闲 60 秒后再退出。
 4. 后台子代理以原生结束信号为准，不以父 Turn 的结果为准：父 Turn 无论成功、取消还是失败，仍在跑的后台子代理都记入 `#backgroundSubagents`。清除门闩有三条路径，缺一条就会让这条 Thread 永远 `busy`：无 Prompt 在飞时的会话级 `subagent.finished`；后续 Turn 进行中经 Prompt 通道投递的同一事件；以及 wait / kill 工具输出驱动的结算（`#completeWatchedSubagents`，Grok 不会为它另发 `subagent.finished`）。反过来，任何一条在子代理仍在跑时误删，都会让空闲挂起提前杀掉它。
 5. `thread release` 语义：Host 对声明了合同的 Harness 先试挂起。`busy` 保持 busy；`unknown`（例如尚无已落盘 Turn）继续走 Grok 原有的 `stopOwnedJobs` 停止并确认，`released=true`。挂起成功时按公共合同返回 `released=false, resourcesReleased=true, quiescence=unknown`。Session 已关闭或故障时会拒绝这条破坏性租约，此时 release 仍返回结构化的 `quiescence=unknown`，不把控制请求整体失败掉。
 

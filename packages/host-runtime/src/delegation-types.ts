@@ -322,6 +322,8 @@ export interface ThreadReleaseResult {
   busy: boolean;
   quiescence: JobQuiescence;
   proof?: { pid?: number; pgid?: number; scope: string };
+  /** Why a release could not be confirmed. Present only for a non-confirmed result. */
+  reason?: string;
 }
 
 export interface DelegationReconcileInput {

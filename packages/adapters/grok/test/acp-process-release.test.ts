@@ -3,7 +3,7 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { harnessPermissionModeIdSchema } from "@codexhost/shared-contracts";
 
@@ -190,6 +190,35 @@ describe("Grok owned process release", () => {
         // The tracker refuses to be replayed, so the retry has to prove the
         // same spawn is gone by identity instead of reporting unknown forever.
         await expect(transport.releaseOwnedProcess()).resolves.toBeUndefined();
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "confirms the owned group itself when a close already ran",
+    async () => {
+      const { directory, logPath, transport } = await startFixture();
+      try {
+        await transport.open({
+          kind: "create",
+          permissionModeId: harnessPermissionModeIdSchema.parse("ask"),
+        });
+        const before = recorded(await readFile(logPath, "utf8"));
+        groups.push(before.leader);
+        // A close tolerates an unconfirmed tree. A release that rides on it
+        // must still probe the owned group instead of inheriting that result.
+        await transport.close();
+        const kill = vi.spyOn(process, "kill");
+        let probes: unknown[][] = [];
+        try {
+          await expect(transport.releaseOwnedProcess()).resolves.toBeUndefined();
+          probes = kill.mock.calls.filter(([target]) => target === -before.leader);
+        } finally {
+          kill.mockRestore();
+        }
+        expect(probes.length).toBeGreaterThan(0);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
