@@ -71,6 +71,10 @@ class FakeGrokTransport implements GrokAcpTransportLike {
     if (this.autoSettleCancellation) this.finish({ stopReason: "cancelled" });
   });
   readonly close = vi.fn(async () => undefined);
+  releaseError: Error | null = null;
+  readonly releaseOwnedProcess = vi.fn(async () => {
+    if (this.releaseError) throw this.releaseError;
+  });
   readonly setModel = vi.fn(async () => undefined);
   readonly setSessionMode = vi.fn(async (modeId: string) => {
     this.currentModeId = modeId;
@@ -2964,6 +2968,158 @@ describe("Grok Adapter ACP projection", () => {
     ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
     transport.finish();
     await started;
+    await adapter.close();
+  });
+});
+
+describe("Grok idle suspension", () => {
+  async function persistedSession(transport = new FakeGrokTransport()) {
+    transport.replay = [
+      { type: "user.text", text: "first", metadata: { eventId: "user-1" } },
+      { type: "turn.completed", nativeTurnKey: "grok-prompt-1", stopReason: "end_turn" },
+      { type: "mode.update", modeId: "plan" },
+    ];
+    transport.histories.set(transport.sessionId, [...transport.replay]);
+    const opened = await openedSession(transport, "resume");
+    return { ...opened, transport };
+  }
+
+  it("releases an idle persisted Session without closing or deleting it", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    expect(session.workMode?.current).toBe("plan");
+    expect(session.initialState.effectivePermissionModeId).toBe("ask");
+
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    expect(transport.releaseOwnedProcess).toHaveBeenCalledOnce();
+    expect(transport.close).not.toHaveBeenCalled();
+    expect(transport.deleteSession).not.toHaveBeenCalled();
+
+    const resumed = await adapter.open({
+      kind: "resume",
+      cwd: "/synthetic",
+      permissionModeId: harnessPermissionModeIdSchema.parse("always-approve"),
+      nativeRef: {
+        harnessId: adapter.harnessId,
+        nativeSessionId: transport.sessionId,
+        formatVersion: 1,
+      },
+    });
+    if (!resumed.ok) throw new Error(resumed.error.message);
+    expect(resumed.value.initialState.nativeRef).toEqual(session.initialState.nativeRef);
+    expect(resumed.value.initialState.effectivePermissionModeId).toBe("always-approve");
+    expect(resumed.value.workMode?.current).toBe("plan");
+    await resumed.value.close();
+    await adapter.close();
+  });
+
+  it("keeps an unpersisted, aborted, or closed Session", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Grok has not persisted this Native Session yet",
+    });
+    const aborted = new AbortController();
+    aborted.abort();
+    await expect(lifecycle.suspend(aborted.signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Grok idle suspension was aborted",
+    });
+    expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
+    await session.close();
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Grok Session is closed or faulted",
+    });
+    expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
+    await adapter.close();
+  });
+
+  it("refuses suspension while a Turn, approval, configuration, or background subagent is open", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    const outputs = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-idle");
+    const running = session.execute({
+      type: "turn.start",
+      turnId,
+      input: [{ type: "text", text: "hold" }],
+    });
+    await nextEvent(outputs);
+    const approval = transport.permission();
+    expect((await nextOutput(outputs)).kind).toBe("interaction");
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
+    void approval.catch(() => undefined);
+    transport.finish();
+    await running;
+    let completed = false;
+    while (!completed) {
+      const output = await nextOutput(outputs);
+      completed = output.kind === "event" && output.event.type === "turn.completed";
+    }
+
+    let releaseMode: () => void = () => undefined;
+    transport.setSessionMode.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          releaseMode = () => resolve();
+        }),
+    );
+    const configuring = session.workMode?.set("default");
+    await vi.waitFor(() => expect(transport.setSessionMode).toHaveBeenCalled());
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    releaseMode();
+    await configuring;
+
+    transport.sessionEvent({
+      type: "subagent.spawned",
+      nativeSubagentId: "child-1",
+      description: "background",
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "busy",
+    });
+    transport.sessionEvent({
+      type: "subagent.finished",
+      nativeSubagentId: "child-1",
+      status: "completed",
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
+    await adapter.close();
+  });
+
+  it("does not report suspension when the owned process group remains", async () => {
+    const { adapter, session, transport } = await persistedSession();
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    transport.releaseError = new Error("owned group remains");
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Grok managed process group did not exit",
+    });
+    expect(transport.close).not.toHaveBeenCalled();
+    expect(transport.deleteSession).not.toHaveBeenCalled();
+    transport.releaseError = null;
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "grok-acp-session",
+    });
     await adapter.close();
   });
 });

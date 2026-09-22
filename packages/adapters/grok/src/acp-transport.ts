@@ -5,6 +5,7 @@ import path from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
+import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import type { HarnessPermissionModeId } from "@codexhost/shared-contracts";
 import {
   ClientSideConnection,
@@ -339,6 +340,26 @@ function signalProcessGroup(pgid: number, signal: NodeJS.Signals): void {
   }
 }
 
+async function reapOwnedGroup(
+  owned: { pid: number; pgid: number },
+  startToken: string,
+  timeoutMs: number,
+): Promise<boolean> {
+  const groupAlive = () => processGroupIsAlive(owned.pgid) || processIsSame(owned.pid, startToken);
+  if (!groupAlive()) return false;
+  signalProcessGroup(owned.pgid, "SIGTERM");
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  while (Date.now() < deadline && groupAlive()) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  if (groupAlive()) signalProcessGroup(owned.pgid, "SIGKILL");
+  const killDeadline = Date.now() + Math.max(1, timeoutMs);
+  while (Date.now() < killDeadline && groupAlive()) {
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  return groupAlive();
+}
+
 function signalProcessTree(child: ChildProcessWithoutNullStreams, signal: NodeJS.Signals): void {
   if (!child.pid) return;
   if (process.platform === "win32") {
@@ -622,6 +643,8 @@ export class GrokAcpTransport {
     startedAtMs: number;
     startToken: string;
   } | null = null;
+  #ownedTree: OwnedProcessTree | null = null;
+  #shutdownPromise: Promise<void> | null = null;
 
   constructor(options: GrokAcpTransportOptions) {
     this.#options = {
@@ -879,6 +902,17 @@ export class GrokAcpTransport {
         startToken: processStartToken(child.pid),
       };
     }
+    this.#ownedTree = trackOwnedProcessTree(child, {
+      detached: process.platform !== "win32",
+      closeTimeoutMs: this.#options.closeTimeoutMs,
+      onExitCleanupFailure: (error) =>
+        this.#fault(
+          new GrokTransportError(
+            "processExited",
+            `Grok ACP owned process cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+        ),
+    });
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
     });
@@ -1088,22 +1122,28 @@ export class GrokAcpTransport {
     await this.close();
     if (!owned) return { quiescence: "unknown" };
     const proof = { pid: owned.pid, pgid: owned.pgid, scope: "grok-acp-child" };
-    const groupAlive = () =>
-      processGroupIsAlive(owned.pgid) || processIsSame(owned.pid, this.#owned?.startToken ?? "");
-    if (groupAlive()) {
-      signalProcessGroup(owned.pgid, "SIGTERM");
-      const deadline = Date.now() + Math.max(1, timeoutMs);
-      while (Date.now() < deadline && groupAlive()) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
-      if (groupAlive()) signalProcessGroup(owned.pgid, "SIGKILL");
-      const killDeadline = Date.now() + Math.max(1, timeoutMs);
-      while (Date.now() < killDeadline && groupAlive()) {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+    if (await reapOwnedGroup(owned, this.#owned?.startToken ?? "", timeoutMs)) {
+      return { quiescence: "unknown", proof };
     }
-    if (groupAlive()) return { quiescence: "unknown", proof };
     return { quiescence: "confirmed", proof };
+  }
+
+  /**
+   * Drops the owned ACP process without ACP session/close or session delete.
+   * Idle suspension uses this so the on-disk Native Session remains loadable.
+   */
+  async releaseOwnedProcess(): Promise<void> {
+    await this.#beginShutdown(false);
+    const owned = this.ownedProcess();
+    if (!owned) return;
+    const remains = await reapOwnedGroup(
+      owned,
+      this.#owned?.startToken ?? "",
+      this.#options.closeTimeoutMs,
+    );
+    if (remains) {
+      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
+    }
   }
 
   cancel(): Promise<void> {
@@ -1115,12 +1155,36 @@ export class GrokAcpTransport {
     return connection.cancel({ sessionId: this.#sessionId });
   }
 
-  async close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closing = true;
+  close(): Promise<void> {
+    return this.#beginShutdown(true);
+  }
+
+  #beginShutdown(closeSession: boolean): Promise<void> {
+    if (this.#closed) return Promise.resolve();
+    if (!this.#shutdownPromise) {
+      this.#closing = true;
+      this.#shutdownPromise = this.#performShutdown(closeSession).then(
+        () => {
+          this.#closed = true;
+          this.#closing = false;
+          this.#activePrompt = null;
+          this.#activeCompact = null;
+        },
+        (error: unknown) => {
+          this.#shutdownPromise = null;
+          this.#closing = false;
+          throw error;
+        },
+      );
+    }
+    return this.#shutdownPromise;
+  }
+
+  async #performShutdown(closeSession: boolean): Promise<void> {
     const child = this.#child;
     const connection = this.#connection;
     if (
+      closeSession &&
       connection &&
       this.#sessionId &&
       this.#initialize?.agentCapabilities?.sessionCapabilities?.close
@@ -1128,23 +1192,22 @@ export class GrokAcpTransport {
       await connection.closeSession({ sessionId: this.#sessionId }).catch(() => undefined);
     }
     if (child?.stdin.writable) child.stdin.end();
-    if (child) {
-      const leaderExited = await waitForExit(child, this.#options.closeTimeoutMs);
-      if (!leaderExited) {
-        signalProcessTree(child, "SIGTERM");
-        if (!(await waitForExit(child, this.#options.closeTimeoutMs))) {
-          signalProcessTree(child, "SIGKILL");
-          await waitForExit(child, this.#options.closeTimeoutMs);
-        }
-      } else if (child.pid) {
-        signalProcessGroup(process.platform === "win32" ? child.pid : -child.pid, "SIGTERM");
-        signalProcessGroup(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
-      }
+    if (this.#ownedTree) {
+      await this.#ownedTree.close().catch(() => undefined);
+      return;
     }
-    this.#closed = true;
-    this.#closing = false;
-    this.#activePrompt = null;
-    this.#activeCompact = null;
+    if (!child) return;
+    const leaderExited = await waitForExit(child, this.#options.closeTimeoutMs);
+    if (!leaderExited) {
+      signalProcessTree(child, "SIGTERM");
+      if (!(await waitForExit(child, this.#options.closeTimeoutMs))) {
+        signalProcessTree(child, "SIGKILL");
+        await waitForExit(child, this.#options.closeTimeoutMs);
+      }
+    } else if (child.pid) {
+      signalProcessGroup(process.platform === "win32" ? child.pid : -child.pid, "SIGTERM");
+      signalProcessGroup(process.platform === "win32" ? child.pid : -child.pid, "SIGKILL");
+    }
   }
 
   #handleUpdate(notification: SessionNotification): void {

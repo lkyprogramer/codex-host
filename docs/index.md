@@ -59,6 +59,7 @@ README 提供使用概览；架构与运行时文档随当前源码维护；评�
 
 | 记录 | 证据范围 |
 | --- | --- |
+| [2026-09-22 Grok 空闲挂起](grok-idle-suspend-20260922.md) | Grok ACP 进程组在空闲 60 秒后释放，保留本地 Native Session。 |
 | [2026-09-19 Cursor 空闲挂起](cursor-idle-suspend-20260919.md) | Cursor 接入统一资源合同、history-only 读取恢复、163 项定向测试与未执行的真实 CLI 验收。 |
 | [2026-09-13 Cursor 委派策略与 xhigh](cursor-delegation-policy-20260913/README.md) | 公共策略修复、参数化目录、315 项定向测试及未通过的原生验收。 |
 | [2026-09-12 全面评审](full-project-review-2026-09-12/README.md) | 改造前 29 项 finding 与 7 项架构建议的历史快照。 |

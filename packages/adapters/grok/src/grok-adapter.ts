@@ -50,6 +50,9 @@ import {
   type ThinkingSelectCompleted,
   type TurnCancelAccepted,
   type TurnCancelCommand,
+  type HarnessIdleSuspendResult,
+  type HarnessIdleSuspendSignal,
+  type HarnessResourceLifecycle,
   type TurnOutcome,
   type TurnStartAccepted,
   type TurnStartCommand,
@@ -101,6 +104,7 @@ import {
 import type { GrokCompactResult } from "./grok-manual-compaction.js";
 import { projectGrokFileChanges } from "./grok-file-change.js";
 import { forkGrokSession } from "./grok-fork.js";
+import { grokIdleSuspendAdmission } from "./grok-idle-suspend.js";
 import { mapGrokReplay } from "./grok-history.js";
 import { rewindGrokLastTurn } from "./grok-rewind.js";
 import { GROK_INTERJECT_METHOD } from "./grok-interject.js";
@@ -184,6 +188,7 @@ export interface GrokAcpTransportLike {
   onSessionEvent?(listener: ((event: GrokTransportEvent) => void) | null): void;
   cancel(): Promise<void>;
   close(): Promise<void>;
+  releaseOwnedProcess(): Promise<void>;
   ownedProcess?(): { pid: number; pgid: number; startedAtMs: number } | null;
   stopOwnedJobs?(timeoutMs?: number): Promise<{
     quiescence: "confirmed" | "unknown";
@@ -337,6 +342,9 @@ class GrokHarnessSession implements HarnessSession {
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly workMode: HarnessWorkModeControl;
   readonly steering: HarnessSteeringControl;
+  readonly resourceLifecycle: HarnessResourceLifecycle = {
+    suspend: (signal) => this.#suspendIdle(signal),
+  };
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly #closeTimeoutMs: number;
   readonly #cwd: string;
@@ -352,6 +360,7 @@ class GrokHarnessSession implements HarnessSession {
   readonly #backgroundSubagents = new Map<string, HostSubagentState>();
   #active: ActiveTurn | null = null;
   #closePromise: Promise<void> | null = null;
+  #idleSuspend: Promise<HarnessIdleSuspendResult> | null = null;
   #configuring = false;
   #phase: SessionPhase = "open";
   #state: HarnessSessionState;
@@ -1583,6 +1592,37 @@ class GrokHarnessSession implements HarnessSession {
       usage: merged,
       ...(observedForTurnId ? { observedForTurnId } : {}),
     });
+  }
+
+  #suspendIdle(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
+    if (this.#idleSuspend && this.#phase === "closing") return this.#idleSuspend;
+    const denied = grokIdleSuspendAdmission({
+      aborted: signal.aborted,
+      phase: this.#phase,
+      busy: this.#active !== null || this.#configuring || this.#backgroundSubagents.size > 0,
+      verifiedTurns: this.#snapshot.turns.length,
+    });
+    if (denied) return Promise.resolve(denied);
+    // Admission and the closing mark stay synchronous so a late event cannot
+    // publish after the Host has accepted this suspension attempt.
+    this.#phase = "closing";
+    const attempt = this.#finishIdleSuspend();
+    this.#idleSuspend = attempt;
+    return attempt;
+  }
+
+  async #finishIdleSuspend(): Promise<HarnessIdleSuspendResult> {
+    try {
+      await this.#transport.releaseOwnedProcess();
+    } catch {
+      this.#phase = "open";
+      this.#idleSuspend = null;
+      return { status: "unknown", reason: "Grok managed process group did not exit" };
+    }
+    this.#phase = "closed";
+    this.#channel.end();
+    this.#onClosed();
+    return { status: "suspended", scope: "grok-acp-session" };
   }
 
   async #close(): Promise<void> {

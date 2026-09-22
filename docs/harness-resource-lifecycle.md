@@ -36,4 +36,4 @@ Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关�
 
 新增或启用一个 Adapter 的自动挂起，需要定向覆盖：空闲回收、活动与交互拒绝、后台子任务、取消信号、关闭失败、并发唤醒、同一身份与配置恢复，以及真实受管进程退出。模型聊天成功、stub 的 `close` 被调用和主进程退出都不能单独替代这组证据。
 
-本次排查与各 Harness 的当前接入状态、验证结果见 [2026-09-13 排查记录](harness-resource-review-20260913.md)。Cursor 于 2026-09-19 接入统一合同，见 [Cursor 空闲挂起记录](cursor-idle-suspend-20260919.md)。
+本次排查与各 Harness 的当前接入状态、验证结果见 [2026-09-13 排查记录](harness-resource-review-20260913.md)。Cursor 于 2026-09-19 接入统一合同，见 [Cursor 空闲挂起记录](cursor-idle-suspend-20260919.md)。Grok 于 2026-09-22 接入同一合同：空闲时释放受管 ACP 进程组，不调用 `session/close` 或 `_x.ai/session/delete`，后台子代理未结束时拒绝挂起。见 [Grok 空闲挂起记录](grok-idle-suspend-20260922.md)。
