@@ -13,9 +13,10 @@
 3. 进程组没有退出时释放失败，Transport 不标记为已关闭，Session 回到 open，返回 `unknown` 并带上原始失败原因，Host 按既有退避重试。`trackOwnedProcessTree` 只持有 pid，一次清理失败后不再重放（否则会对可能被复用的 pid 发信号），因此重试改用 `owned-group.ts` 的 `reclaimOwnedGroup`。它在发信号前先判定所有权：
 
 - leader 已不在：组 id 在成员未清空前不会被内核回收，所以剩下的必是本次 spawn 的子孙，可以发信号；
-- leader 还在且 `startToken`（spawn 时 `ps -o lstart`）匹配：是本次 spawn，可以发信号；
-- leader 还在但 token 不匹配：pid 已被复用，原组必然已经消失——判为已释放，且绝不对现在的占用者发信号；
-- token 为空（`ps` 不可用，Windows 恒为空）：无法证明所有权，不发信号并按未确认失败。
+- 受管 ChildProcess 句柄还没看到退出（`exitCode`/`signalCode` 均为 null）：Node 尚未回收该子进程，即使它已是僵尸也仍占着这个 pid，内核不可能把 pid 交给别人，可以发信号；
+- 句柄已看到退出、leader pid 却还活着，且 `startToken`（spawn 时 `ps -o lstart`）与当前读数一致：仍是本次 spawn，可以发信号；
+- 同上但两者不一致：pid 已被复用，原组必然已经消失——判为已释放，且绝不对现在的占用者发信号；
+- token 缺失或当前读不出来（`ps` 不可用、超时、被沙箱挡住，Windows 恒为空）：无法证明所有权，不发信号并按未确认失败。读不出来绝不能等同于「pid 已被复用」，否则会把仍在跑的进程组当成已释放。
 
 确认所有权后再对同一进程组重新升级 TERM → KILL，只有观察到组消失才算释放。Windows 没有受管进程组，只能借活着的 root 用 taskkill `/T /F` 定位整棵树；root 已退出时这棵树不可达也不可知，返回未确认而不是成功。进程组只剩未回收僵尸时信号返回 EPERM，按「仍在退出」处理并等待预算用完；代价是真正无权限的清理会用满两轮预算才失败，失败信息里保留 EPERM。不新增数量上限。打开已挂起 Thread 的完整历史读取仍会拉起一个新的 `grok agent`，空闲 60 秒后再退出。
 4. 后台子代理以原生结束信号为准，不以父 Turn 的结果为准：父 Turn 无论成功、取消还是失败，仍在跑的后台子代理都记入 `#backgroundSubagents`。清除门闩有三条路径，缺一条就会让这条 Thread 永远 `busy`：无 Prompt 在飞时的会话级 `subagent.finished`；后续 Turn 进行中经 Prompt 通道投递的同一事件；以及 wait / kill 工具输出驱动的结算（`#completeWatchedSubagents`，Grok 不会为它另发 `subagent.finished`）。反过来，任何一条在子代理仍在跑时误删，都会让空闲挂起提前杀掉它。

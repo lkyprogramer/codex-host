@@ -1114,7 +1114,10 @@ export class GrokAcpTransport {
           this.#activeCompact = null;
         },
         (error: unknown) => {
+          // Nothing ran to completion, so the next caller starts its own
+          // shutdown and must not be told it rode on this mode.
           this.#shutdownPromise = null;
+          this.#shutdownMode = null;
           this.#closing = false;
           throw error;
         },

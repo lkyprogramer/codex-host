@@ -144,7 +144,8 @@ SIGINT/SIGTERM stops observation only; it does not cancel or release child work.
 Cancel only acknowledges the cancel request and Turn terminal. It is not job
 quiescence. Do not release a worktree, process, or business resource until
 \`thread release\` reports owned-job quiescence \`confirmed\`. \`unknown\` and
-\`unsupported\` stay fail-closed. \`resourcesReleased=true\` only reports scoped
+\`unsupported\` stay fail-closed, and \`reason\` carries why a release could not
+be confirmed. \`resourcesReleased=true\` only reports scoped
 native resource suspension, not owned-job quiescence; it does not authorize
 worktree or business-resource cleanup. Lifecycle-capable Harnesses can suspend
 after 60 idle seconds and resume for the next action or full history read.

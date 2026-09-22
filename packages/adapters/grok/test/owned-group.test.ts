@@ -1,6 +1,25 @@
 import { spawn } from "node:child_process";
+import type * as NodeChildProcess from "node:child_process";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+/** Flipped to model a `ps` read that fails or returns nothing. */
+let readsStartToken = true;
+
+vi.mock("node:child_process", async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeChildProcess>();
+  return {
+    ...actual,
+    spawnSync: ((command: string, args: readonly string[], options: unknown) =>
+      command === "ps" && !readsStartToken
+        ? { stdout: "", stderr: "", status: 1, signal: null, pid: 0, output: [] }
+        : (actual.spawnSync as (...input: unknown[]) => unknown)(
+            command,
+            args,
+            options,
+          )) as typeof actual.spawnSync,
+  };
+});
 
 import { processStartToken, reclaimOwnedGroup, type OwnedGroupRef } from "../src/owned-group.js";
 
@@ -120,10 +139,14 @@ describe("owned group reclaim", () => {
       const kill = vi.spyOn(process, "kill");
       let signalled: unknown[][] = [];
       try {
-        // The live pid belongs to someone else now: this spawn's group must
-        // already be gone, and the current owner must not be signalled.
+        // The handle saw this child exit and the live pid no longer matches
+        // the recorded spawn: it belongs to someone else, who must not be
+        // signalled, and this spawn's own group must already be gone.
         await expect(
-          reclaimOwnedGroup(ref(pid, { startToken: "Thu Jan  1 00:00:00 1970" }), 300),
+          reclaimOwnedGroup(
+            ref(pid, { startToken: "Thu Jan  1 00:00:00 1970", leaderExited: true }),
+            300,
+          ),
         ).resolves.toBe(false);
         signalled = kill.mock.calls.filter(([target, signal]) => target === -pid && signal !== 0);
       } finally {
@@ -141,10 +164,48 @@ describe("owned group reclaim", () => {
       const kill = vi.spyOn(process, "kill");
       let signalled: unknown[][] = [];
       try {
-        await expect(reclaimOwnedGroup(ref(pid, { startToken: "" }), 300)).resolves.toBe(true);
+        await expect(
+          reclaimOwnedGroup(ref(pid, { startToken: "", leaderExited: true }), 300),
+        ).resolves.toBe(true);
         signalled = kill.mock.calls.filter(([target, signal]) => target === -pid && signal !== 0);
       } finally {
         kill.mockRestore();
+      }
+      expect(signalled).toEqual([]);
+      expect(groupState(pid)).toBe("alive");
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "reclaims a live leader the tracked handle has not seen exit",
+    async () => {
+      const { pid } = await startGroup();
+      // Node has not reaped this child, so its pid cannot belong to anyone
+      // else - no token comparison can override that.
+      await expect(
+        reclaimOwnedGroup(ref(pid, { startToken: "Thu Jan  1 00:00:00 1970" }), 300),
+      ).resolves.toBe(false);
+      expect(groupState(pid)).not.toBe("alive");
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
+    "never abandons a live group because the start token could not be read",
+    async () => {
+      const { pid } = await startGroup();
+      readsStartToken = false;
+      const kill = vi.spyOn(process, "kill");
+      let signalled: unknown[][] = [];
+      try {
+        // An unreadable token is not evidence that the pid was recycled: the
+        // group must stay owned and unconfirmed, never reported as released.
+        await expect(
+          reclaimOwnedGroup(ref(pid, { startToken: "recorded-at-spawn", leaderExited: true }), 300),
+        ).resolves.toBe(true);
+        signalled = kill.mock.calls.filter(([target, signal]) => target === -pid && signal !== 0);
+      } finally {
+        kill.mockRestore();
+        readsStartToken = true;
       }
       expect(signalled).toEqual([]);
       expect(groupState(pid)).toBe("alive");

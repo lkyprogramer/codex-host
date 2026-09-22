@@ -54,7 +54,7 @@ User-visible command, tool, and file-change items. Default metadata omits output
 Requested vs effective vs unknown configuration without filling unknowns.`,
   "thread release": `codexhost thread release <thread> [--expected-turn <turn>] [--format json|compact]
 Release idle/terminal Threads. Busy Threads must cancel then wait. Fail-closed for unknown/unsupported job quiescence.
-Lifecycle-capable Harnesses can suspend native resources without discarding the Thread. resourcesReleased=true only confirms that scoped resource release; released=false and quiescence=unknown still prohibit assuming background jobs or worktrees are safe to remove.
+Lifecycle-capable Harnesses can suspend native resources without discarding the Thread. resourcesReleased=true only confirms that scoped resource release; released=false and quiescence=unknown still prohibit assuming background jobs or worktrees are safe to remove. reason, when present, says why a release could not be confirmed.
 The Host also attempts idle suspension after 60 seconds for opt-in Harnesses. status/wait-many do not wake a suspended Session; send, configuration and full history reads may resume it.`,
 } as const;
 

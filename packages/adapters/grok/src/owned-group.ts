@@ -77,14 +77,21 @@ export function signalProcessGroup(pgid: number, signal: NodeJS.Signals): void {
 /**
  * A live leader pid is the only way this group id could have been recycled:
  * while any member survives, the kernel keeps the group id reserved, so a
- * leaderless group still belongs to this spawn. A live pid that no longer
- * matches the recorded start token therefore proves the opposite - the spawn
- * is gone and its id was handed to someone else, who must never be signalled.
+ * leaderless group still belongs to this spawn. Only a pid that is both
+ * reusable and demonstrably someone else's may be declared `gone`; anything
+ * this cannot read stays `unprovable`, which never claims a release.
  */
 function ownership(owned: OwnedGroupRef): Ownership {
   if (!processIsAlive(owned.pid)) return "ours";
+  // The ChildProcess handle has not seen this pid exit, so the kernel cannot
+  // have handed it to anyone else - even a zombie leader still holds it.
+  if (!owned.leaderExited) return "ours";
   if (!owned.startToken) return "unprovable";
-  return processStartToken(owned.pid) === owned.startToken ? "ours" : "gone";
+  const current = processStartToken(owned.pid);
+  // An unreadable token says nothing about identity. Reading it as proof that
+  // the pid now belongs to someone else would abandon a live owned group.
+  if (!current) return "unprovable";
+  return current === owned.startToken ? "ours" : "gone";
 }
 
 async function waitWhile(alive: () => boolean, timeoutMs: number): Promise<void> {
