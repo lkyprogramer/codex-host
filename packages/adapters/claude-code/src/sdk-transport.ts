@@ -391,6 +391,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   #idleLive = false;
   #idleAccumulator: ClaudeNativeTurnAccumulator | null = null;
   #closePromise: Promise<void> | null = null;
+  #closeFailed = false;
   #consumeTask: Promise<void> | null = null;
   #stderrTail = "";
   #interactionOrdinal = 0;
@@ -398,6 +399,14 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   #query: Query | null = null;
   #started = false;
   #backgroundTasks = new Set<string>();
+  /**
+   * Claude's live background-task level. Only the level decides whether the
+   * process still runs work: the task edges are unordered relative to it, fire
+   * for foreground Tasks too, and a missed edge would pin a stale entry.
+   */
+  #liveBackgroundTasks = new Set<string>();
+  /** Set once shutdown has torn this Transport down; late output is only drained. */
+  #tornDown = false;
 
   constructor(options: ClaudeSdkTransportOptions) {
     this.sessionId = options.sessionId;
@@ -431,6 +440,10 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   setIdleLive(live: boolean): void {
     this.#idleLive = live;
     if (!live) this.#idleAccumulator = null;
+  }
+
+  get hasBackgroundTasks(): boolean {
+    return this.#liveBackgroundTasks.size > 0;
   }
 
   async start(): Promise<void> {
@@ -684,7 +697,12 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   }
 
   close(): Promise<void> {
-    if (!this.#closePromise) this.#closePromise = this.#close();
+    // A failed shutdown is retried rather than replayed: the owned groups are
+    // re-checked against the reaped leaders, so no stale pid is ever signalled.
+    if (!this.#closePromise || this.#closeFailed) {
+      this.#closeFailed = false;
+      this.#closePromise = this.#close();
+    }
     return this.#closePromise;
   }
 
@@ -865,9 +883,18 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     this.#autonomous = null;
     this.#idleAccumulator = null;
     this.#idleLive = false;
+    // Background tasks live in the owned groups signalled above; a retry only
+    // has to confirm those groups, not stop tasks through a closed Query.
+    this.#backgroundTasks.clear();
+    this.#liveBackgroundTasks.clear();
+    // A Query that did not drain may still yield. It belongs to a Transport the
+    // Session no longer owns, so it must neither reach handlers nor refill state.
+    this.#tornDown = true;
     active?.reject(new Error("Claude SDK transport closed"));
-    if (failures.length > 0)
+    if (failures.length > 0) {
+      this.#closeFailed = true;
       throw new AggregateError(failures, "Claude SDK shutdown could not be confirmed");
+    }
   }
 
   async #stopBackgroundTasks(): Promise<void> {
@@ -894,6 +921,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
           isRecord(task) && typeof task.task_id === "string" ? [task.task_id] : [],
         ),
       );
+      this.#liveBackgroundTasks = new Set(this.#backgroundTasks);
     } else if (message.subtype === "task_started" && typeof message.task_id === "string") {
       this.#backgroundTasks.add(message.task_id);
     } else if (
@@ -908,6 +936,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   async #consume(activeQuery: Query): Promise<void> {
     try {
       for await (const message of activeQuery) {
+        if (this.#tornDown) continue;
         this.#observeBackgroundTasks(message);
         const permissionMode = permissionModeFromMessage(message);
         if (permissionMode && permissionMode !== this.#permissionMode) {
@@ -1136,6 +1165,23 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
     this.#input.end();
     await awaitNaturalExit(this.#children, this.#closeTimeoutMs);
     this.#query?.close();
+    if (process.platform !== "win32") {
+      // Reclaim the whole owned group: MCP servers from user settings outlive a
+      // CLI that had to be killed. Inspection stays best effort, so a group that
+      // cannot be confirmed must not replace the inspection result.
+      const stopped = await Promise.allSettled(
+        this.#children.map((child) => closeClaudeProcessGroup(child, this.#closeTimeoutMs)),
+      );
+      for (const result of stopped) {
+        if (result.status === "rejected") {
+          process.emitWarning(
+            `Claude SDK Model inspector process group cleanup failed: ${String(result.reason)}`,
+          );
+        }
+      }
+      this.#query = null;
+      return;
+    }
     for (const child of this.#children) {
       if (!processExited(child)) child.kill("SIGTERM");
     }
@@ -1156,6 +1202,7 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
       signal: options.signal,
       stdio: ["pipe", "pipe", "pipe"],
       windowsHide: true,
+      detached: process.platform !== "win32",
     });
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);

@@ -37,6 +37,7 @@ class FakeClaudeTransport implements ClaudeTurnTransport {
   idleHandler: ClaudeIdleTurnHandler | null = null;
   threadHandler: ((event: ClaudeTurnEvent) => void) | null = null;
   idleLive = false;
+  hasBackgroundTasks = false;
   autoCompleteTurn:
     | ((input: { text: string; userMessageId: string; transport: FakeClaudeTransport }) => void)
     | null = null;
@@ -629,8 +630,8 @@ describe("Claude Code HarnessAdapter", () => {
     await adapter.close();
   });
 
-  it("does not report Claude suspension when native process cleanup fails", async () => {
-    const { adapter, transports } = fixture();
+  it("keeps a Claude process whose idle release fails owned and retries it", async () => {
+    const { adapter, dependencies, transports } = fixture();
     const session = await openSession(adapter);
     const lifecycle = session.resourceLifecycle;
     if (!lifecycle) throw new Error("Missing idle lifecycle");
@@ -641,11 +642,112 @@ describe("Claude Code HarnessAdapter", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     transport.close.mockRejectedValueOnce(new Error("process group is still alive"));
 
-    await expect(lifecycle.suspend(new AbortController().signal)).rejects.toThrow(
-      "could not stop safely",
-    );
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "unknown",
+      reason: "Claude Code native process release failed: process group is still alive",
+    });
+    // The Host retries on its next idle tick, and that retry reaches the same process.
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "suspended",
+      scope: "claude-sdk-session",
+    });
+    expect(transport.close).toHaveBeenCalledTimes(2);
+    expect(dependencies.createTransport).toHaveBeenCalledOnce();
+    await adapter.close();
+  });
+
+  it("confirms a failed Claude release before starting another process", async () => {
+    const { adapter, dependencies, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute(textTurn("first"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.finish({ status: "succeeded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    transport.close
+      .mockRejectedValueOnce(new Error("process group is still alive"))
+      .mockRejectedValueOnce(new Error("process group is still alive"));
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+
+    // The old process may still write this native history: no new one may start,
+    // and nothing may roll that history back underneath it.
+    const sourceRef = nativeSessionRefSchema.parse({
+      harnessId: "claude-code",
+      nativeSessionId: transport.sessionId,
+      formatVersion: 1,
+    });
+    await expect(
+      adapter.open({ kind: "rollbackLastTurn", sourceRef, cwd: "/synthetic" }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "sessionBusy" } });
+    await expect(session.execute(textTurn("blocked"))).resolves.toEqual({
+      ok: false,
+      error: {
+        code: "unavailable",
+        message:
+          "Claude Code previous process could not be confirmed stopped: process group is still alive",
+        retryable: true,
+      },
+    });
+    expect(dependencies.createTransport).toHaveBeenCalledOnce();
+
+    await expect(session.execute(textTurn("second"))).resolves.toMatchObject({ ok: true });
+    expect(transport.close).toHaveBeenCalledTimes(3);
+    expect(dependencies.createTransport).toHaveBeenCalledTimes(2);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("retries an unconfirmed Claude release when the Session closes", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute(textTurn("close-retry"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.finish({ status: "succeeded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    transport.close
+      .mockRejectedValueOnce(new Error("process group is still alive"))
+      .mockRejectedValueOnce(new Error("process group is still alive"));
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+
+    // Close owns the retained process too, and never reports what it could not confirm.
+    await expect(session.close()).rejects.toThrow("could not stop safely");
+    expect(transport.close).toHaveBeenCalledTimes(2);
     await expect(adapter.close()).rejects.toThrow("could not stop safely");
-    expect(transport.close).toHaveBeenCalledOnce();
+  });
+
+  it("refuses Claude idle suspension while native background tasks run", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute(textTurn("background-shell"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.finish({ status: "succeeded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // A run_in_background shell outlives its Turn and dies with the process.
+    transport.hasBackgroundTasks = true;
+
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "busy",
+      reason: "Claude Code Session still has native background tasks",
+    });
+    expect(transport.close).not.toHaveBeenCalled();
+
+    transport.hasBackgroundTasks = false;
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "suspended",
+    });
+    await adapter.close();
   });
 
   it("rolls back the last Turn through Claude's Native Fork", async () => {
@@ -5295,6 +5397,7 @@ describe("Claude Code HarnessAdapter", () => {
       readSubagentMessages: async () => [],
       createTransport: () => ({
         sessionId: "claude-id",
+        hasBackgroundTasks: false,
         setAutonomousTurnHandler: () => undefined,
         setIdleTurnHandler: () => undefined,
         setThreadEventHandler: () => undefined,

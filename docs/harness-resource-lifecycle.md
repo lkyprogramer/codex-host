@@ -41,3 +41,11 @@ Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关�
 新增或启用一个 Adapter 的自动挂起，需要定向覆盖：空闲回收、活动与交互拒绝、后台子任务、取消信号、关闭失败、并发唤醒、同一身份与配置恢复，以及真实受管进程退出。模型聊天成功、stub 的 `close` 被调用和主进程退出都不能单独替代这组证据。
 
 本次排查与各 Harness 的当前接入状态、验证结果见 [2026-09-13 排查记录](harness-resource-review-20260913.md)。Cursor 于 2026-09-19 接入统一合同，见 [Cursor 空闲挂起记录](cursor-idle-suspend-20260919.md)。Grok 于 2026-09-22 接入同一合同：空闲时释放受管 ACP 进程组，不调用 `session/close` 或 `_x.ai/session/delete`，后台子代理未结束时拒绝挂起。见 [Grok 空闲挂起记录](grok-idle-suspend-20260922.md)。
+
+2026-09-23 补齐 Claude Code 的同类缺口：
+
+- 原生后台任务（包括 `run_in_background` Shell，不只是子代理）未结束时拒绝挂起。判断只依据 Claude 的 `background_tasks_changed` 电平集合，不依据可能乱序或遗漏的 task 边沿事件。
+- 释放失败返回 `unknown` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback，Turn 以明确的「上一进程未确认停止」错误失败。已拆除的 Transport 不再向 Session 投递迟到输出。
+- 重试时若 leader 已被回收且其 pid 已被其他进程占用，即判定受管组已空，不再发信号；EPERM 按组仍存在继续等待。
+
+剩余边界：两次尝试之间若受管组已自然清空，而其 pid 恰被新进程复用为另一个组的 leader、且该 leader 随后退出只留下组员，仅凭 pid 无法区分，重试的组信号会落到那个组上。这与 Grok 的所有权模型相同，概率低但不可排除；彻底消除需要为组成员记录独立的身份证据。

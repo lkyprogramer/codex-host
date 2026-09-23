@@ -1080,6 +1080,46 @@ describe("ClaudeSdkTransport Model control", () => {
     expect(options(value)).not.toHaveProperty("resume");
   });
 
+  it.skipIf(process.platform === "win32")(
+    "reclaims the inspector's whole process group, not only its direct child",
+    async () => {
+      const value = fixture();
+      const inspector = new ClaudeSdkModelInspector({
+        command: process.execPath,
+        cwd: process.cwd(),
+        closeTimeoutMs: 100,
+        queryFactory: value.queryFactory,
+      });
+      const inspection = inspector.inspect();
+      const spawnProcess = options(value).spawnClaudeCodeProcess;
+      if (!spawnProcess) throw new Error("Missing native process ownership hook");
+      // A CLI that never leaves on EOF, holding an MCP-like child in its group.
+      const child = spawnProcess({
+        command: process.execPath,
+        args: [
+          "-e",
+          "const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); process.stdout.write(String(c.pid)); setInterval(()=>{},1000);",
+        ],
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        env: process.env,
+      }) as ChildProcessWithoutNullStreams;
+      let pid = 0;
+      try {
+        const [chunk] = await once(child.stdout, "data");
+        pid = Number(String(chunk));
+        await inspection;
+        expect(() => process.kill(pid, 0)).toThrow();
+      } finally {
+        for (const target of [pid, child.pid ?? 0]) {
+          try {
+            if (target) process.kill(target, "SIGKILL");
+          } catch {}
+        }
+      }
+    },
+  );
+
   it("uses the SDK default filesystem sources for execution queries", async () => {
     const value = fixture();
 
@@ -1983,9 +2023,13 @@ describe("Claude history replacement fence", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     await expect(value.transport.close()).rejects.toThrow("shutdown could not be confirmed");
     expect(value.fakeQuery.stopTask).toHaveBeenCalledWith("still-running");
+    // The task lived in the owned groups that shutdown already signalled; a retry
+    // re-confirms those groups instead of replaying the first failure.
+    await expect(value.transport.close()).resolves.toBeUndefined();
+    expect(value.fakeQuery.stopTask).toHaveBeenCalledOnce();
   });
 
-  it("rejects close if native output cannot be drained", async () => {
+  it("rejects close if native output cannot be drained, and confirms it on retry", async () => {
     const value = fixture();
     await value.transport.start();
     const close = vi.spyOn(value.fakeQuery, "close").mockImplementation(() => undefined);
@@ -1995,6 +2039,94 @@ describe("Claude history replacement fence", () => {
       close.mockRestore();
       value.fakeQuery.close();
     }
+    await expect(value.transport.close()).resolves.toBeUndefined();
+  });
+
+  it("drops output a torn-down Query yields after a failed shutdown", async () => {
+    const value = fixture();
+    await value.transport.start();
+    const autonomous = vi.fn();
+    value.transport.setAutonomousTurnHandler(autonomous);
+    const close = vi.spyOn(value.fakeQuery, "close").mockImplementation(() => undefined);
+    try {
+      await expect(value.transport.close()).rejects.toThrow("shutdown could not be confirmed");
+      // The undrained Query keeps yielding into a Transport nobody owns any more.
+      value.fakeQuery.push({
+        type: "system",
+        subtype: "task_started",
+        task_id: "late-task",
+      } as unknown as SDKMessage);
+      value.fakeQuery.push({
+        type: "system",
+        subtype: "background_tasks_changed",
+        tasks: [{ task_id: "late-task", task_type: "local_bash", description: "late" }],
+      } as unknown as SDKMessage);
+      completeTurn(value.fakeQuery);
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      expect(value.transport.hasBackgroundTasks).toBe(false);
+      expect(autonomous).not.toHaveBeenCalled();
+    } finally {
+      close.mockRestore();
+      value.fakeQuery.close();
+    }
+    // A refilled task set would make this retry fail forever on the closed Query.
+    await expect(value.transport.close()).resolves.toBeUndefined();
+  });
+
+  it("decides background work from Claude's live level, never from task edges", async () => {
+    const value = fixture();
+    await value.transport.start();
+    // task_started also fires for foreground Tasks, and its edge may never close.
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "task_started",
+      task_id: "foreground-task",
+    } as unknown as SDKMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(value.transport.hasBackgroundTasks).toBe(false);
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "shell-1", task_type: "local_bash", description: "npm run dev" }],
+    } as unknown as SDKMessage);
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "shell-1",
+      status: "completed",
+    } as unknown as SDKMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    // An edge that arrives out of order with the level does not end the work.
+    expect(value.transport.hasBackgroundTasks).toBe(true);
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+    } as unknown as SDKMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(value.transport.hasBackgroundTasks).toBe(false);
+    await value.transport.close();
+  });
+
+  it("reports native background tasks of every kind, not only Subagents", async () => {
+    const value = fixture();
+    await value.transport.start();
+    expect(value.transport.hasBackgroundTasks).toBe(false);
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "shell-1", task_type: "local_bash", description: "npm run dev" }],
+    } as unknown as SDKMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(value.transport.hasBackgroundTasks).toBe(true);
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "background_tasks_changed",
+      tasks: [],
+    } as unknown as SDKMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(value.transport.hasBackgroundTasks).toBe(false);
+    await value.transport.close();
   });
 
   it.skipIf(process.platform === "win32")(

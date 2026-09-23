@@ -52,7 +52,13 @@ claiming successful native cancellation.
   the parent Turn.
 - If a parent result arrives while children are still running, the observer and
   CLI stay alive until they settle or the Session closes. New parent input is
-  rejected as busy during that interval.
+  rejected as busy during that interval. Each running child is judged on its
+  own: one that answers is kept for as long as it runs, and a sibling that
+  answers does not vouch for one that does not. A child that gives no owned
+  native state for 60 seconds after the parent result (no Language Server port,
+  a failed read, or a state that is not this parent's) is reported as
+  interrupted observation without being signalled, and once none remain
+  running the CLI is released.
 - Native Language Server methods and log shapes are compatibility-sensitive.
   Missing or invalid child history returns a typed error, never fabricated
   successful history. Logs above 8 MiB are explicitly unsupported.

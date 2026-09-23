@@ -32,6 +32,15 @@ const infoSchema = z.object({
     .max(32),
 });
 
+/**
+ * How long a finished Turn keeps its process alive for Subagents it cannot
+ * observe at all. The port comes from a buffered native log, so this outlasts
+ * a log flush; a Subagent that answers is kept for as long as it runs.
+ */
+const UNOBSERVED_SUBAGENT_LIMIT_MS = 60_000;
+const UNCONFIRMED_CANCELLATION =
+  "Observation interrupted; native Subagent cancellation could not be confirmed.";
+
 interface Delegation {
   item: HostSubagentDelegationItem;
   completed: boolean;
@@ -47,6 +56,7 @@ interface SubagentOptions {
   emit(event: HostEvent): void;
   complete(snapshot: HostItemSnapshot): void;
   schedule(work: () => Promise<void>): void;
+  unobservedLimitMs?: number;
 }
 
 export class AntigravitySubagents {
@@ -58,6 +68,8 @@ export class AntigravitySubagents {
   #queued = false;
   #ended = false;
   #stopped = false;
+  /** Per running Subagent: when it stopped answering after the Turn ended. */
+  readonly #unobservedSince = new Map<string, number>();
   #cancellation: Promise<void> | undefined;
   #settled: (() => void) | undefined;
   readonly settled = new Promise<void>((resolve) => {
@@ -156,13 +168,55 @@ export class AntigravitySubagents {
     if (this.#stopped) return;
     const parentId = this.#options.parentId();
     const port = await this.#options.port();
-    if (!parentId || port === null) return;
+    const answered =
+      parentId && port !== null ? await this.#refreshStates(port, parentId) : new Set<string>();
+    if (this.#stopped) return;
+    this.#abandonUnobservable(answered);
+    if (this.#ended && !this.running) this.stop();
+  }
+
+  /**
+   * The Turn's process stays alive until its Subagents settle. Once the Turn has
+   * ended, a running Subagent that never answers would hold it forever, so each
+   * one is given up on its own clock; a sibling that answers does not vouch for
+   * it. It is reported like an unconfirmed cancellation and never signalled:
+   * without an answer, it cannot be shown to belong to this parent.
+   */
+  #abandonUnobservable(answered: ReadonlySet<string>): void {
+    const limit = this.#options.unobservedLimitMs ?? UNOBSERVED_SUBAGENT_LIMIT_MS;
+    const now = Date.now();
+    for (const [id, state] of this.#states) {
+      const running = state.status === "running" || state.status === "pending";
+      if (!this.#ended || !running || answered.has(id)) {
+        this.#unobservedSince.delete(id);
+        continue;
+      }
+      const since = this.#unobservedSince.get(id) ?? now;
+      this.#unobservedSince.set(id, since);
+      if (now - since < limit) continue;
+      this.#unobservedSince.delete(id);
+      const resultSummary = UNCONFIRMED_CANCELLATION;
+      this.#states.set(id, { ...state, status: "interrupted", resultSummary });
+      this.#options.emit({
+        type: "subagent.state.changed",
+        nativeSubagentId: id,
+        status: "interrupted",
+        resultSummary,
+      });
+      this.#options.emit({ type: "subagent.transcript.changed", nativeSubagentId: id });
+    }
+  }
+
+  /** Resolves the Subagents that answered with a native state owned by this parent. */
+  async #refreshStates(port: number, parentId: string): Promise<Set<string>> {
+    const answered = new Set<string>();
     for (const [id, previous] of this.#states) {
-      if (this.#stopped) return;
+      if (this.#stopped) return answered;
       let status = previous.status;
       try {
         const value = await subagentRpc(port, id, "GetCascadeTrajectory");
         const observed = subagentRunStatus(value, parentId);
+        if (observed !== null) answered.add(id);
         // Idle is also the state of a cancelled child. Only a new running observation
         // can reactivate it; do not turn yesterday's cancellation into today's success.
         if (observed !== "completed" || (status !== "interrupted" && status !== "failed")) {
@@ -178,7 +232,7 @@ export class AntigravitySubagents {
         cwd: this.#options.cwd,
         outputLimit: this.#options.outputLimit,
       });
-      if (this.#stopped) return;
+      if (this.#stopped) return answered;
       const last = transcript.ok
         ? transcript.value.turns.at(-1)?.items.findLast(({ item }) => item.type === "agentMessage")
             ?.item
@@ -203,7 +257,7 @@ export class AntigravitySubagents {
         }
       }
     }
-    if (this.#ended && !this.running) this.stop();
+    return answered;
   }
 
   finish(outcome: HostItemOutcome): void {
@@ -252,9 +306,7 @@ export class AntigravitySubagents {
         // Report loss of observation distinctly from a confirmed native cancellation.
       }
       if (!wasRunning) continue;
-      const resultSummary = confirmed
-        ? "Cancelled by user"
-        : "Observation interrupted; native Subagent cancellation could not be confirmed.";
+      const resultSummary = confirmed ? "Cancelled by user" : UNCONFIRMED_CANCELLATION;
       this.#states.set(id, { ...state, status: "interrupted", resultSummary });
       this.#options.emit({
         type: "subagent.state.changed",

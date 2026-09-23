@@ -1,4 +1,4 @@
-import type { HostEvent, HostItemSnapshot } from "@codexhost/harness-adapter";
+import type { HostEvent, HostItemSnapshot, HostSubagentState } from "@codexhost/harness-adapter";
 import { hostTurnIdSchema } from "@codexhost/shared-contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type * as TranscriptModule from "../src/subagent-transcript.js";
@@ -68,7 +68,9 @@ const step = (state: string) => ({
   },
 });
 
-function fixture() {
+function fixture(
+  options: { unobservedLimitMs?: number; initialStates?: HostSubagentState[] } = {},
+) {
   const events: HostEvent[] = [];
   const completed: HostItemSnapshot[] = [];
   const observer = new AntigravitySubagents({
@@ -82,6 +84,7 @@ function fixture() {
     schedule: (work) => {
       void work();
     },
+    ...options,
   });
   return { observer, events, completed };
 }
@@ -221,6 +224,96 @@ describe("Antigravity Subagents", () => {
       await observer.settled;
       expect(observer.running).toBe(false);
     } finally {
+      observer.stop();
+    }
+  });
+
+  it("gives up Subagents a finished Turn can no longer observe at all", async () => {
+    vi.mocked(readSubagentTranscript).mockResolvedValue({
+      ok: false,
+      error: { code: "protocolError", message: "Not ready", retryable: true },
+    });
+    const answering = fixture({ unobservedLimitMs: 0 });
+    vi.mocked(subagentRpc).mockResolvedValue(native("RUNNING"));
+    try {
+      answering.observer.handle(step("DONE"));
+      answering.observer.finish({ status: "succeeded" });
+      await answering.observer.refresh();
+      // A Subagent that still answers keeps the process for as long as it runs.
+      expect(answering.observer.running).toBe(true);
+    } finally {
+      answering.observer.stop();
+    }
+
+    const { observer } = fixture({ unobservedLimitMs: 0 });
+    vi.mocked(subagentRpc).mockRejectedValue(new Error("language server gone"));
+    observer.handle(step("DONE"));
+    observer.finish({ status: "succeeded" });
+    await observer.refresh();
+    // Otherwise the Turn's process would be held open with nothing to wait for.
+    await observer.settled;
+    expect(observer.running).toBe(false);
+    expect(observer.state(child)).toMatchObject({
+      status: "interrupted",
+      resultSummary: expect.stringContaining("could not be confirmed"),
+    });
+  });
+
+  it("gives up a silent Subagent even while a sibling still answers", async () => {
+    vi.mocked(readSubagentTranscript).mockResolvedValue({
+      ok: false,
+      error: { code: "protocolError", message: "Not ready", retryable: true },
+    });
+    const stale = "40dce1a0-bc56-4c5d-a50d-264f235f09a9";
+    const running = (id: string): HostSubagentState => ({
+      subagentId: id,
+      nativeSubagentId: id,
+      description: id,
+      background: true,
+      status: "running",
+    });
+    // History can carry a child a previous process left "running"; a finished
+    // sibling that still answers must not keep that one's process alive.
+    const { observer } = fixture({
+      unobservedLimitMs: 0,
+      initialStates: [running(stale), running(child)],
+    });
+    vi.mocked(subagentRpc).mockImplementation(async (_port, id) => {
+      if (id === child) return native("IDLE");
+      throw new Error("unknown conversation");
+    });
+    observer.finish({ status: "succeeded" });
+    await observer.refresh();
+    await observer.settled;
+    expect(observer.state(child)?.status).toBe("completed");
+    expect(observer.state(stale)).toMatchObject({
+      status: "interrupted",
+      resultSummary: expect.stringContaining("could not be confirmed"),
+    });
+    // It is never signalled: without an answer it cannot be shown to be ours.
+    expect(subagentRpc).not.toHaveBeenCalledWith(1, stale, "CancelCascadeInvocation");
+  });
+
+  it("keeps an unobservable Subagent for the whole observation window", async () => {
+    vi.mocked(readSubagentTranscript).mockResolvedValue({
+      ok: false,
+      error: { code: "protocolError", message: "Not ready", retryable: true },
+    });
+    vi.mocked(subagentRpc).mockRejectedValue(new Error("language server gone"));
+    const now = vi.spyOn(Date, "now").mockReturnValue(1_000_000);
+    const { observer } = fixture();
+    try {
+      observer.handle(step("DONE"));
+      observer.finish({ status: "succeeded" });
+      await observer.refresh();
+      now.mockReturnValue(1_059_999);
+      await observer.refresh();
+      expect(observer.running).toBe(true);
+      now.mockReturnValue(1_060_000);
+      await observer.refresh();
+      expect(observer.running).toBe(false);
+    } finally {
+      now.mockRestore();
       observer.stop();
     }
   });

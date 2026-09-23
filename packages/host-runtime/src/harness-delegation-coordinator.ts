@@ -1153,6 +1153,7 @@ export class HarnessDelegationCoordinator {
     }
     const lifecycle = thread.session.resourceLifecycle;
     let lifecycleQuiescence: JobQuiescence | undefined;
+    let reason: string | undefined;
     if (lifecycle) {
       const suspended = await lifecycle.suspend(new AbortController().signal);
       if (suspended.status === "suspended") {
@@ -1168,18 +1169,24 @@ export class HarnessDelegationCoordinator {
         };
       }
       if (suspended.status === "busy") {
-        return { threadId: thread.id, released: false, busy: true, quiescence: "unknown" };
+        return {
+          threadId: thread.id,
+          released: false,
+          busy: true,
+          quiescence: "unknown",
+          ...(suspended.reason ? { reason: suspended.reason } : {}),
+        };
       }
       // An idle suspension that cannot run is not a release decision. A
       // Harness with an explicit owned-job interface still owes this Thread
       // its destructive release path.
       lifecycleQuiescence = suspended.status === "unsupported" ? "unsupported" : "unknown";
+      reason = suspended.reason;
     }
     const adapter = this.#adapters.get(thread.harnessId);
     const releasable = adapter ? ownedJobAdapter(adapter) : undefined;
     let quiescence: JobQuiescence = releasable ? "unknown" : (lifecycleQuiescence ?? "unsupported");
     let proof: ThreadReleaseResult["proof"];
-    let reason: string | undefined;
     if (releasable) {
       try {
         const stopped = await this.#stopLegacyOwnedJobs(releasable, thread.session);

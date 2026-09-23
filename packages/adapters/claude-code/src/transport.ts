@@ -190,6 +190,11 @@ export interface ClaudeTurnTransport {
    */
   setThreadEventHandler(handler: ((event: ClaudeTurnEvent) => void) | null): void;
   setIdleLive(live: boolean): void;
+  /**
+   * True while the native process runs background tasks of any kind, such as a
+   * `run_in_background` shell. They outlive the Turn and die with the process.
+   */
+  readonly hasBackgroundTasks: boolean;
   start(): Promise<void>;
   getContextUsage(): Promise<ClaudeTransportContextUsage | null>;
   getPermissionMode(): ClaudePermissionMode;

@@ -97,6 +97,7 @@ async function fixture(turns = 1) {
       const transport = {
         input,
         sessionId: input.sessionId,
+        hasBackgroundTasks: false,
         start: vi.fn(async () => undefined),
         close: vi.fn(async () => undefined),
         abort: vi.fn(async () => undefined),

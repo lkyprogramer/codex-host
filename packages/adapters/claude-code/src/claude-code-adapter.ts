@@ -375,7 +375,19 @@ function transportFailure(kind: ClaudeTransportFailureKind, detail?: string): Ha
   };
 }
 
+/** A retained process whose release is still unconfirmed blocks every new start. */
+class ClaudeReleaseUnconfirmedError extends Error {
+  constructor(cause: unknown) {
+    super(
+      `Claude Code previous process could not be confirmed stopped: ${cause instanceof Error ? cause.message : String(cause)}`,
+    );
+  }
+}
+
 function startupFailure(error: unknown): HarnessError {
+  if (error instanceof ClaudeReleaseUnconfirmedError) {
+    return { code: "unavailable", message: error.message, retryable: true };
+  }
   if (error instanceof ClaudeCodeExecutableError) {
     return { code: "notInstalled", message: error.message, retryable: false };
   }
@@ -538,6 +550,12 @@ class ClaudeHarnessSession implements HarnessSession {
   #statePublished = false;
   #unpersistedMessageIds: string[] = [];
   #transport: ClaudeTurnTransport | null = null;
+  /**
+   * A Transport whose idle release could not be confirmed. It stays owned until
+   * a retried release confirms it, and no new process may start before then:
+   * the old one could still write to the same native history.
+   */
+  #unreleasedTransport: ClaudeTurnTransport | null = null;
   #hardCancelTask: Promise<void> | null = null;
   #usageGeneration = 0;
   #latestUsage: HostUsage | null = null;
@@ -1010,6 +1028,8 @@ class ClaudeHarnessSession implements HarnessSession {
     return (
       this.#sessionId === sessionId &&
       (this.#phase !== "open" ||
+        // The old process could still be writing the history a rollback reads.
+        this.#unreleasedTransport !== null ||
         this.#active !== null ||
         this.#acceptingTurn ||
         this.#configurationTask !== null ||
@@ -1050,8 +1070,30 @@ class ClaudeHarnessSession implements HarnessSession {
         reason: "Claude Code Session still has native work or observation in progress",
       };
     }
-    // close() changes the phase synchronously before its first await. That is the
-    // atomic admission boundary for late autonomous SDK segments.
+    const transport = this.#transport ?? this.#unreleasedTransport;
+    if (transport?.hasBackgroundTasks) {
+      return {
+        status: "busy" as const,
+        reason: "Claude Code Session still has native background tasks",
+      };
+    }
+    // Leaving "open" before the first await is the atomic admission boundary for
+    // late autonomous SDK segments, exactly as close() does.
+    this.#phase = "closing";
+    this.#transport = null;
+    this.#unreleasedTransport = transport;
+    try {
+      await transport?.close();
+    } catch (error) {
+      // Keep the process owned and the Session usable: the Host retries this
+      // release on its next idle tick, and every start retries it first.
+      if (!this.#closePromise) this.#phase = "open";
+      return {
+        status: "unknown" as const,
+        reason: `Claude Code native process release failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
+    if (this.#unreleasedTransport === transport) this.#unreleasedTransport = null;
     await this.close();
     return { status: "suspended" as const, scope: "claude-sdk-session" };
   }
@@ -1391,6 +1433,8 @@ class ClaudeHarnessSession implements HarnessSession {
         timeout.cancel();
       }
     };
+    await settle(this.#unreleasedTransport?.close());
+    if (failures.length === 0) this.#unreleasedTransport = null;
     // Closing the transport also releases in-flight configuration/initialization RPCs.
     const closingTransport = this.#transport;
     await settle(closingTransport?.close());
@@ -1428,6 +1472,15 @@ class ClaudeHarnessSession implements HarnessSession {
   }
 
   async #startTransport(): Promise<ClaudeTurnTransport> {
+    const unreleased = this.#unreleasedTransport;
+    if (unreleased) {
+      try {
+        await unreleased.close();
+      } catch (error) {
+        throw new ClaudeReleaseUnconfirmedError(error);
+      }
+      if (this.#unreleasedTransport === unreleased) this.#unreleasedTransport = null;
+    }
     if (this.#openMode === "create" && isPendingClaudeSession(this.#nativeRef)) {
       await this.#pendingSessions.claim(this.#nativeRef, this.#cwd);
       this.#pendingClaimed = true;
