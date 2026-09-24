@@ -33,30 +33,38 @@ export interface OwnedProcess<Child extends ChildProcess = ChildProcess> {
   anchored: boolean;
 }
 
-const checkedAnchors = new Map<string, boolean>();
+const warnedAnchors = new Set<string>();
 
 /**
  * The native anchor this Host may use, or null. Only the Host's own
  * environment counts: a Harness environment never selects process ownership.
+ * It is checked on every spawn, so an anchor removed or replaced by an update
+ * is never started as if it were the Harness.
  */
 export function processAnchorPath(): string | null {
   if (process.platform === "win32") return null;
   const configured = process.env[PROCESS_ANCHOR_PATH_ENV];
   if (!configured || !path.isAbsolute(configured)) return null;
-  let usable = checkedAnchors.get(configured);
-  if (usable === undefined) {
-    try {
-      accessSync(configured, constants.X_OK);
-      usable = true;
-    } catch {
-      usable = false;
+  try {
+    accessSync(configured, constants.X_OK);
+    return configured;
+  } catch {
+    if (!warnedAnchors.has(configured)) {
+      warnedAnchors.add(configured);
       process.emitWarning(
         `Process anchor ${configured} is not executable; Harness processes fall back to Host-side tracking`,
       );
     }
-    checkedAnchors.set(configured, usable);
+    return null;
   }
-  return usable ? configured : null;
+}
+
+/** Milliseconds for the anchor protocol; a non-finite bound is a caller bug. */
+function graceMilliseconds(closeTimeoutMs: number): number {
+  if (!Number.isFinite(closeTimeoutMs) || closeTimeoutMs < 0) {
+    throw new TypeError(`closeTimeoutMs must be a finite, non-negative number: ${closeTimeoutMs}`);
+  }
+  return Math.ceil(closeTimeoutMs);
 }
 
 /**
@@ -81,6 +89,7 @@ export function spawnOwnedProcess(
   options: OwnedProcessOptions,
 ): OwnedProcess {
   const stdio = options.stdio ?? ["pipe", "pipe", "pipe"];
+  const graceMs = graceMilliseconds(options.closeTimeoutMs);
   const anchor = processAnchorPath();
   if (!anchor) {
     const detached = process.platform !== "win32";
@@ -104,14 +113,22 @@ export function spawnOwnedProcess(
     });
     return { child, tree, anchored: false };
   }
-  const graceMs = String(Math.max(1, Math.ceil(options.closeTimeoutMs)));
   const child = spawn(
     anchor,
-    ["--exit-grace-ms", graceMs, "--lifeline-grace-ms", graceMs, "--", command, ...args],
+    [
+      "--exit-grace-ms",
+      String(graceMs),
+      "--lifeline-grace-ms",
+      String(graceMs),
+      "--",
+      command,
+      ...args,
+    ],
     {
       ...(options.cwd ? { cwd: options.cwd } : {}),
       ...(options.env ? { env: options.env } : {}),
-      ...(options.signal ? { signal: options.signal } : {}),
+      // The abort signal is handled by the tree below: Node would SIGKILL the
+      // anchor itself, abandoning the group it owns.
       // The anchor leads its own session, so terminal and Host-group signals
       // reach it only through the lifeline and its own handlers.
       detached: true,
@@ -123,7 +140,7 @@ export function spawnOwnedProcess(
   if (!child.pid || !control) return { child, tree: null, anchored: true };
   return {
     child,
-    tree: new AnchoredProcessTree(child, control, command, options),
+    tree: new AnchoredProcessTree(child, control, command, graceMs, options),
     anchored: true,
   };
 }
@@ -140,24 +157,51 @@ interface PendingRelease {
   timer: NodeJS.Timeout;
 }
 
+/** Whether the anchor has reported the Harness's creation yet. */
+type Start = "pending" | "ready" | "failed";
+
+/**
+ * Owns one anchored Harness on the Host side. The `child` handed to the
+ * Adapter is the anchor, so this tree also makes it behave like the Harness:
+ * `kill()` becomes a request to the anchor instead of a signal that would
+ * kill the anchor and abandon the group; `spawn` is emitted only once the
+ * Harness exists; and a Harness that could not be created reports exactly
+ * what a failed `spawn` reports, `error` then `close`, with no `exit`.
+ */
 class AnchoredProcessTree implements OwnedProcessTree {
   readonly #child: ChildProcess;
   readonly #command: string;
   readonly #control: Duplex;
-  readonly #closeTimeoutMs: number;
+  readonly #graceMs: number;
+  readonly #emit: ChildProcess["emit"];
   readonly #onExitCleanupFailure: ((error: unknown) => void) | undefined;
   #buffer = "";
+  #start: Start = "pending";
+  /** Lifecycle events Node raised before the anchor said what happened. */
+  #held: Array<[string, unknown[]]> = [];
   #released = false;
   /** Set once the anchor is gone without confirming; it can no longer help. */
   #lost: Error | null = null;
   #pending: PendingRelease | null = null;
+  /** A termination round was asked for, so its outcome is not an exit report. */
+  #terminationRequested = false;
 
-  constructor(child: ChildProcess, control: Duplex, command: string, options: OwnedProcessOptions) {
+  constructor(
+    child: ChildProcess,
+    control: Duplex,
+    command: string,
+    graceMs: number,
+    options: OwnedProcessOptions,
+  ) {
     this.#child = child;
     this.#command = command;
     this.#control = control;
-    this.#closeTimeoutMs = options.closeTimeoutMs;
+    this.#graceMs = graceMs;
     this.#onExitCleanupFailure = options.onExitCleanupFailure;
+    this.#emit = child.emit.bind(child);
+    child.emit = ((event: string | symbol, ...args: unknown[]) =>
+      this.#route(event, args)) as ChildProcess["emit"];
+    child.kill = ((signal?: NodeJS.Signals | number) => this.#kill(signal)) as ChildProcess["kill"];
     control.setEncoding("utf8");
     control.on("data", (chunk: string) => this.#receive(chunk));
     // Writing after the anchor left fails with EPIPE; its close says enough.
@@ -167,6 +211,20 @@ class AnchoredProcessTree implements OwnedProcessTree {
     control.once("close", () => this.#anchorGone());
     // The lifeline must never be what keeps a Host alive.
     (control as Duplex & { unref?(): void }).unref?.();
+    const signal = options.signal;
+    if (signal) {
+      const abort = () => {
+        this.#emitError(
+          Object.assign(new Error("The operation was aborted", { cause: signal.reason }), {
+            name: "AbortError",
+            code: "ABORT_ERR",
+          }),
+        );
+        child.kill();
+      };
+      if (signal.aborted) queueMicrotask(abort);
+      else signal.addEventListener("abort", abort, { once: true });
+    }
   }
 
   close(): Promise<void> {
@@ -181,14 +239,57 @@ class AnchoredProcessTree implements OwnedProcessTree {
     });
     const timer = setTimeout(
       () => this.#settle(new Error("Process anchor did not answer a release request")),
-      this.#closeTimeoutMs * 2 + ANCHOR_ANSWER_SLACK_MS,
+      this.#graceMs * 2 + ANCHOR_ANSWER_SLACK_MS,
     );
     timer.unref();
     this.#pending = { promise, resolve, reject, timer };
-    this.#control.write(
-      `${JSON.stringify({ op: "terminate", graceMs: Math.max(0, Math.ceil(this.#closeTimeoutMs)) })}\n`,
-    );
+    this.#terminate(this.#graceMs);
     return promise;
+  }
+
+  #terminate(graceMs: number): void {
+    this.#terminationRequested = true;
+    this.#control.write(`${JSON.stringify({ op: "terminate", graceMs })}\n`);
+  }
+
+  /**
+   * `kill()` on the Harness handle. SIGKILL means "now"; any other signal is
+   * the graceful round. Either way the anchor ends the whole group and stays
+   * alive until it is empty, so nothing can orphan the group by accident.
+   */
+  #kill(signal?: NodeJS.Signals | number): boolean {
+    if (this.#released || this.#lost) return false;
+    if (signal === 0) return true;
+    this.#terminate(signal === "SIGKILL" || signal === 9 ? 0 : this.#graceMs);
+    Reflect.set(this.#child, "killed", true);
+    return true;
+  }
+
+  #route(event: string | symbol, args: unknown[]): boolean {
+    const lifecycle = event === "spawn" || event === "exit" || event === "close";
+    if (!lifecycle) return this.#emit(event, ...args);
+    if (this.#start === "pending") {
+      this.#held.push([event as string, args]);
+      return true;
+    }
+    if (this.#start === "failed" && (event === "spawn" || event === "exit")) return false;
+    return this.#emit(event, ...args);
+  }
+
+  /** Releases held lifecycle events once the anchor said what happened. */
+  #begin(start: Exclude<Start, "pending">, error?: Error): void {
+    if (this.#start !== "pending") return;
+    this.#start = start;
+    if (error) this.#emitError(error);
+    const held = this.#held;
+    this.#held = [];
+    for (const [event, args] of held) this.#route(event, args);
+  }
+
+  /** `error` with no listener would crash the Host; report it instead. */
+  #emitError(error: Error): void {
+    if (this.#child.listenerCount("error") > 0) this.#emit("error", error);
+    else process.emitWarning(`Unhandled Harness process error: ${error.message}`);
   }
 
   #receive(chunk: string): void {
@@ -212,7 +313,9 @@ class AnchoredProcessTree implements OwnedProcessTree {
     }
     if (typeof message !== "object" || message === null) return;
     const type = Reflect.get(message, "type");
-    if (type === "released") {
+    if (type === "ready") {
+      this.#begin("ready");
+    } else if (type === "released") {
       this.#released = true;
       this.#settle(null);
     } else if (type === "unconfirmed") {
@@ -221,27 +324,36 @@ class AnchoredProcessTree implements OwnedProcessTree {
         `Owned process group did not exit within cleanup bounds (${typeof live === "number" ? live : "some"} still running)`,
       );
       if (this.#pending) this.#settle(error);
-      else this.#reportExitCleanupFailure(error);
+      // A round the Host asked for reports through that request (or its
+      // timeout); only a round the anchor began on its own is an exit report.
+      else if (!this.#terminationRequested) this.#reportExitCleanupFailure(error);
     } else if (type === "spawnError") {
-      // Nothing was created, so nothing is owned. Surface it the way `spawn`
-      // reports a missing executable, which is what Adapters handle.
+      // Nothing was created, so nothing is owned.
       this.#released = true;
       const code = Reflect.get(message, "code");
       const detail = Reflect.get(message, "message");
-      const error = Object.assign(
-        new Error(`spawn ${this.#command} ${typeof code === "string" ? code : "failed"}`),
-        {
-          ...(typeof code === "string" ? { code } : {}),
-          syscall: `spawn ${this.#command}`,
-          path: this.#command,
-          ...(typeof detail === "string" ? { detail } : {}),
-        },
+      this.#begin(
+        "failed",
+        Object.assign(
+          new Error(`spawn ${this.#command} ${typeof code === "string" ? code : "failed"}`),
+          {
+            ...(typeof code === "string" ? { code } : {}),
+            syscall: `spawn ${this.#command}`,
+            path: this.#command,
+            ...(typeof detail === "string" ? { detail } : {}),
+          },
+        ),
       );
-      this.#child.emit("error", error);
+    } else if (type === "diagnostic") {
+      const detail = Reflect.get(message, "message");
+      process.emitWarning(`Process anchor: ${typeof detail === "string" ? detail : "unknown"}`);
     }
   }
 
   #anchorGone(): void {
+    if (this.#start === "pending") {
+      this.#begin("failed", new Error("Process anchor exited before the Harness started"));
+    }
     if (this.#released) {
       this.#settle(null);
       return;
@@ -252,7 +364,7 @@ class AnchoredProcessTree implements OwnedProcessTree {
       "Process anchor exited without confirming the process group was released",
     );
     if (this.#pending) this.#settle(this.#lost);
-    else this.#reportExitCleanupFailure(this.#lost);
+    else if (!this.#terminationRequested) this.#reportExitCleanupFailure(this.#lost);
   }
 
   #settle(error: Error | null): void {

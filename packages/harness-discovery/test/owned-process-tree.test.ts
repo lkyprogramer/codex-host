@@ -186,6 +186,56 @@ describe("owned process tree", () => {
   );
 
   it.skipIf(process.platform === "win32")(
+    "retries a failed cleanup only while the leader is still unreaped",
+    async () => {
+      const child = Object.assign(new EventEmitter(), {
+        pid: 91_339,
+        exitCode: null as number | null,
+        signalCode: null,
+      }) as unknown as ChildProcess;
+      const tracker = trackOwnedProcessTree(child, { detached: true, closeTimeoutMs: 10 });
+      if (!tracker) throw new Error("Expected synthetic detached child to be tracked");
+      let groupGone = false;
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid) => {
+        if (pid !== -91_339) throw new Error(`Unexpected target ${pid}`);
+        if (groupGone) throw Object.assign(new Error("gone"), { code: "ESRCH" });
+        return true;
+      });
+      try {
+        await expect(tracker.close()).rejects.toThrow(/did not exit within cleanup bounds/);
+        // Node has not reaped the leader, so its group id is still this spawn's.
+        groupGone = true;
+        await expect(tracker.close()).resolves.toBeUndefined();
+      } finally {
+        kill.mockRestore();
+      }
+
+      const reaped = Object.assign(new EventEmitter(), {
+        pid: 91_340,
+        exitCode: null as number | null,
+        signalCode: null,
+      }) as unknown as ChildProcess & { exitCode: number | null };
+      const failed = trackOwnedProcessTree(reaped, { detached: true, closeTimeoutMs: 10 });
+      if (!failed) throw new Error("Expected synthetic detached child to be tracked");
+      const signalled: unknown[] = [];
+      const killAgain = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
+        signalled.push([pid, signal]);
+        return true;
+      });
+      try {
+        await expect(failed.close()).rejects.toThrow(/did not exit within cleanup bounds/);
+        reaped.exitCode = 0;
+        const before = signalled.length;
+        // Once reaped, the pid may belong to anyone: the failure stays.
+        await expect(failed.close()).rejects.toThrow(/did not exit within cleanup bounds/);
+        expect(signalled).toHaveLength(before);
+      } finally {
+        killAgain.mockRestore();
+      }
+    },
+  );
+
+  it.skipIf(process.platform === "win32")(
     "reclaims a remaining descendant when the tracked leader exits before close",
     async () => {
       const leader = spawn(process.execPath, ["-e", leaderCode], {

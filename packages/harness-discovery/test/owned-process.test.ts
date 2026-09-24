@@ -56,6 +56,11 @@ async function readLine(child: ChildProcess): Promise<string> {
   throw new Error(`Fixture ended before a line: ${buffered}`);
 }
 
+/** Resolves on `close` without the `error` listener `events.once` would add. */
+function closed(child: ChildProcess): Promise<void> {
+  return new Promise((resolve) => child.once("close", () => resolve()));
+}
+
 /** A Harness that starts a TERM-ignoring grandchild and reports its pid. */
 const stubbornGrandchild = [
   "-e",
@@ -136,6 +141,105 @@ describe.skipIf(process.platform === "win32")("anchored Harness processes", () =
     // The exit arrives only once the leftover grandchild is gone.
     expect(code).toBe(0);
     expect(alive(grandchild)).toBe(false);
+  });
+
+  it("routes kill to the anchor, so even SIGKILL releases the whole group", async () => {
+    useAnchor(requireRealAnchor());
+    const marker = path.join(os.tmpdir(), `codexhost-kill-${process.pid}-${Date.now()}`);
+    const { child } = spawnOwnedProcess(
+      process.execPath,
+      [
+        "-e",
+        [
+          "const {spawn}=require('node:child_process');",
+          `const c=spawn(process.execPath,['-e','process.on("SIGTERM",()=>{});require("node:fs").writeFileSync(${JSON.stringify(marker)},"");setInterval(()=>{},1000)'],{stdio:'ignore'});`,
+          "process.stdout.write(c.pid+'\\n');",
+          "setInterval(()=>{},1000);",
+        ].join(""),
+      ],
+      { closeTimeoutMs: 7_000 },
+    );
+    const grandchild = Number(await readLine(child));
+    leftovers.push(grandchild);
+    // Only once the grandchild ignores TERM does a SIGKILL have work to do.
+    await expect.poll(() => existsSync(marker), { timeout: 5_000 }).toBe(true);
+    const anchorPid = child.pid;
+    // The Claude SDK's shutdown: SIGTERM, then SIGKILL well before a long
+    // grace ends. Killing the anchor itself would abandon the grandchild.
+    expect(child.kill("SIGTERM")).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(alive(grandchild)).toBe(true);
+    expect(child.kill("SIGKILL")).toBe(true);
+    const [, signal] = (await once(child, "exit")) as [number | null, NodeJS.Signals | null];
+    expect(signal).toBe("SIGTERM");
+    expect(alive(grandchild)).toBe(false);
+    if (anchorPid) expect(alive(anchorPid)).toBe(false);
+    expect(child.kill("SIGKILL")).toBe(false);
+    await rm(marker, { force: true });
+  });
+
+  it("reports a missing Harness exactly as a failed spawn does", async () => {
+    useAnchor(requireRealAnchor());
+    const { child, tree } = spawnOwnedProcess("/nonexistent/codexhost-harness", [], {
+      closeTimeoutMs: 200,
+    });
+    const events: string[] = [];
+    let failure: NodeJS.ErrnoException | undefined;
+    child.on("spawn", () => events.push("spawn"));
+    child.on("exit", () => events.push("exit"));
+    child.on("error", (error: NodeJS.ErrnoException) => {
+      failure = error;
+      events.push("error");
+    });
+    await closed(child);
+    events.push("close");
+    expect(events).toEqual(["error", "close"]);
+    expect(failure?.code).toBe("ENOENT");
+    await expect(tree?.close()).resolves.toBeUndefined();
+  });
+
+  it("emits spawn only once the Harness exists", async () => {
+    useAnchor(requireRealAnchor());
+    const { child } = spawnOwnedProcess(process.execPath, ["-e", "process.exit(0)"], {
+      closeTimeoutMs: 200,
+    });
+    const events: string[] = [];
+    for (const event of ["spawn", "exit", "close"]) child.on(event, () => events.push(event));
+    await closed(child);
+    expect(events).toEqual(["spawn", "exit", "close"]);
+  });
+
+  it("turns an abort into a release of the whole group", async () => {
+    useAnchor(requireRealAnchor());
+    const controller = new AbortController();
+    const { child } = spawnOwnedProcess(process.execPath, stubbornGrandchild, {
+      closeTimeoutMs: 200,
+      signal: controller.signal,
+    });
+    const grandchild = Number(await readLine(child));
+    leftovers.push(grandchild);
+    const failure = once(child, "error");
+    controller.abort();
+    const [error] = (await failure) as [NodeJS.ErrnoException];
+    expect(error.name).toBe("AbortError");
+    await once(child, "exit");
+    expect(alive(grandchild)).toBe(false);
+  });
+
+  it("reports a Harness error nobody listens for instead of crashing the Host", async () => {
+    useAnchor(requireRealAnchor());
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+    try {
+      const { child } = spawnOwnedProcess("/nonexistent/codexhost-harness", [], {
+        closeTimeoutMs: 200,
+      });
+      await closed(child);
+      expect(warning).toHaveBeenCalledWith(
+        expect.stringContaining("Unhandled Harness process error"),
+      );
+    } finally {
+      warning.mockRestore();
+    }
   });
 
   it("ends the Harness tree when the Host dies without closing anything", async () => {
@@ -323,6 +427,55 @@ describe.skipIf(process.platform === "win32")("anchor protocol", () => {
     await expect(tree?.close()).resolves.toBeUndefined();
   });
 
+  it("keeps the outcome of a round the Host asked for out of exit reports", async () => {
+    useAnchor(await fakeAnchor("send({ type: 'unconfirmed', live: 1 });"));
+    const onExitCleanupFailure = vi.fn();
+    const { child } = spawnOwnedProcess("harness", [], {
+      closeTimeoutMs: 100,
+      onExitCleanupFailure,
+    });
+    await once(child, "spawn");
+    child.kill();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    expect(onExitCleanupFailure).not.toHaveBeenCalled();
+    child.stdin?.destroy();
+    process.kill(child.pid ?? 0, "SIGKILL");
+  });
+
+  it("passes an anchor diagnostic to the Host", async () => {
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+    try {
+      useAnchor(await fakeAnchor(""));
+      const file = path.join(directory, "diagnostic.mjs");
+      await writeFile(
+        file,
+        [
+          `#!${process.execPath}`,
+          "import net from 'node:net';",
+          "const control = new net.Socket({ fd: 3, readable: true, writable: true });",
+          "control.write(JSON.stringify({ type: 'ready', pid: process.pid, pgid: process.pid }) + '\\n');",
+          "control.write(JSON.stringify({ type: 'diagnostic', message: 'cannot read /proc' }) + '\\n');",
+          "control.on('end', () => process.exit(0));",
+        ].join("\n"),
+      );
+      await chmod(file, 0o755);
+      useAnchor(file);
+      const { child } = spawnOwnedProcess("harness", [], { closeTimeoutMs: 100 });
+      await expect
+        .poll(
+          () =>
+            warning.mock.calls.some(([message]) => String(message).includes("cannot read /proc")),
+          {
+            timeout: 5_000,
+          },
+        )
+        .toBe(true);
+      process.kill(child.pid ?? 0, "SIGKILL");
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
   it("reports cleanup that failed after the Harness left on its own", async () => {
     const file = path.join(directory, "exit-failure.mjs");
     await writeFile(
@@ -366,12 +519,18 @@ describe("process anchor selection", () => {
     expect(code).toBe(3);
   });
 
+  it("rejects a close bound that is not a finite, non-negative number", () => {
+    expect(() => spawnOwnedProcess(process.execPath, [], { closeTimeoutMs: Number.NaN })).toThrow(
+      "closeTimeoutMs must be a finite, non-negative number",
+    );
+  });
+
   it("ignores a relative or unusable anchor path", () => {
     useAnchor("relative/codexhost-anchor");
     expect(processAnchorPath()).toBeNull();
     const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
     try {
-      useAnchor(path.join(os.tmpdir(), "codexhost-anchor-missing-for-test"));
+      useAnchor(path.join(os.tmpdir(), `codexhost-anchor-missing-${process.pid}-${Date.now()}`));
       expect(processAnchorPath()).toBeNull();
       expect(warning).toHaveBeenCalledOnce();
     } finally {

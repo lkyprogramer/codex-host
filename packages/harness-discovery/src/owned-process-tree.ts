@@ -1,6 +1,9 @@
-import { spawnSync, type ChildProcess } from "node:child_process";
+import { execFile, type ChildProcess } from "node:child_process";
 import path from "node:path";
 import { setTimeout } from "node:timers/promises";
+import { promisify } from "node:util";
+
+const executeFile = promisify(execFile);
 
 export interface OwnedProcessTreeOptions {
   /** Must reflect the options used for the original spawn. */
@@ -48,7 +51,11 @@ async function waitForGroupExit(pid: number, timeoutMs: number): Promise<boolean
   return true;
 }
 
-function closeWindowsTree(child: ChildProcess, timeoutMs: number, leaderExited: boolean): void {
+async function closeWindowsTree(
+  child: ChildProcess,
+  timeoutMs: number,
+  leaderExited: boolean,
+): Promise<void> {
   const pid = child.pid;
   if (!pid) throw new Error("Owned Windows process tree has no process id");
   if (leaderExited || child.exitCode !== null || child.signalCode !== null) {
@@ -58,19 +65,19 @@ function closeWindowsTree(child: ChildProcess, timeoutMs: number, leaderExited: 
   if (!systemRoot || !path.win32.isAbsolute(systemRoot)) {
     throw new Error("Windows SystemRoot is unavailable for owned process-tree cleanup");
   }
-  const result = spawnSync(
-    path.win32.join(systemRoot, "System32", "taskkill.exe"),
-    ["/PID", String(pid), "/T", "/F"],
-    {
-      stdio: "ignore",
-      timeout: timeoutMs,
-      windowsHide: true,
-    },
-  );
-  if (result.error) throw result.error;
-  if (result.status !== 0) {
+  // Asynchronous: a synchronous taskkill would stall every Thread on the Host
+  // event loop for as long as the tree takes to die.
+  try {
+    await executeFile(
+      path.win32.join(systemRoot, "System32", "taskkill.exe"),
+      ["/PID", String(pid), "/T", "/F"],
+      { timeout: timeoutMs, windowsHide: true },
+    );
+  } catch (error) {
+    const status = typeof error === "object" && error !== null ? Reflect.get(error, "code") : null;
     throw new Error(
-      `Owned Windows process tree taskkill failed with status ${result.status ?? "unknown"}`,
+      `Owned Windows process tree taskkill failed with status ${typeof status === "number" ? status : "unknown"}`,
+      { cause: error },
     );
   }
 }
@@ -81,6 +88,7 @@ class TrackedOwnedProcessTree implements OwnedProcessTree {
   readonly #pid: number;
   readonly #timeoutMs: number;
   #closePromise: Promise<void> | null = null;
+  #closeFailed = false;
   #leaderExited = false;
 
   constructor(child: ChildProcess, options: OwnedProcessTreeOptions) {
@@ -91,6 +99,10 @@ class TrackedOwnedProcessTree implements OwnedProcessTree {
     this.#timeoutMs = options.closeTimeoutMs;
     child.once("exit", () => {
       this.#leaderExited = true;
+      // Windows reaches a tree only through its living root, so a cleanup
+      // started after the root exited can only fail; it would report a false
+      // failure for every Harness that simply finished.
+      if (process.platform === "win32") return;
       // The leader's exit is not proof that its detached group is empty. Start
       // cleanup at the observed exit boundary, while this tracker still owns
       // the exact spawn group; later callers share the same operation.
@@ -102,22 +114,34 @@ class TrackedOwnedProcessTree implements OwnedProcessTree {
   }
 
   close(): Promise<void> {
-    if (this.#closePromise) return this.#closePromise;
+    if (this.#closePromise && !(this.#closeFailed && this.#leaderUnreaped())) {
+      return this.#closePromise;
+    }
+    this.#closeFailed = false;
     const closing = this.#close();
     this.#closePromise = closing;
-    // A failed cleanup stays failed: this tracker only ever holds a pid, and
-    // replaying it later would signal whatever owns that pid by then. A caller
-    // that wants to retry must re-establish ownership evidence of its own.
     void closing.then(
       () => undefined,
-      () => undefined,
+      () => {
+        this.#closeFailed = true;
+      },
     );
     return closing;
   }
 
+  /**
+   * A failed cleanup may be retried only while Node has not reaped the
+   * leader: until then its pid, and on POSIX its process-group id, cannot
+   * belong to anyone else. Once it has been reaped the failure stays failed,
+   * because replaying it would signal whatever owns that pid by then.
+   */
+  #leaderUnreaped(): boolean {
+    return !this.#leaderExited && this.#child.exitCode === null && this.#child.signalCode === null;
+  }
+
   async #close(): Promise<void> {
     if (process.platform === "win32") {
-      closeWindowsTree(this.#child, this.#timeoutMs, this.#leaderExited);
+      await closeWindowsTree(this.#child, this.#timeoutMs, this.#leaderExited);
       return;
     }
     // This tracker is only made for a detached POSIX spawn. Its pid is the
