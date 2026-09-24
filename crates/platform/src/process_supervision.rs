@@ -22,6 +22,10 @@ pub struct ChildProcessGuard {
 pub struct ChildProcessGuard {
     tree: std::sync::Mutex<ObservedProcessTree>,
     armed: bool,
+    /// Processes running this executable release their own descendants once
+    /// asked (the process anchor). Killing one outright would strand what it
+    /// owns, so a forced round leaves them to finish.
+    self_releasing: Option<PathBuf>,
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -45,6 +49,17 @@ impl ChildProcessGuard {
     }
 
     fn signal(&self, signal: nix::sys::signal::Signal) -> Result<(), PlatformError> {
+        self.signal_sparing(signal, false).map(|_| ())
+    }
+
+    /// Signals every owned process; with `spare_self_releasing`, processes
+    /// running the self-releasing executable are left out. Returns whether
+    /// any of those were spared.
+    fn signal_sparing(
+        &self,
+        signal: nix::sys::signal::Signal,
+        spare_self_releasing: bool,
+    ) -> Result<bool, PlatformError> {
         #[cfg(target_os = "macos")]
         use nix::errno::Errno;
         #[cfg(target_os = "macos")]
@@ -54,9 +69,19 @@ impl ChildProcessGuard {
 
         self.with_tree(|tree| {
             let root_group = tree.process_group_id();
-            let owned = tree.observe()?;
+            let mut owned = tree.observe()?;
             if owned.is_empty() {
-                return Ok(());
+                return Ok(false);
+            }
+            if spare_self_releasing && let Some(executable) = &self.self_releasing {
+                let before = owned.len();
+                owned.retain(|process| &process.executable != executable);
+                if owned.len() != before {
+                    // The spared processes share the root group, so a group
+                    // signal would reach them too; signal the rest one by one.
+                    tree.signal_processes(&owned, signal)?;
+                    return Ok(true);
+                }
             }
             #[cfg(target_os = "macos")]
             let process_group = i32::try_from(root_group).map_err(|_| {
@@ -84,7 +109,7 @@ impl ChildProcessGuard {
                 .filter(|process| process.process_group_id != root_group)
                 .collect::<Vec<_>>();
             tree.signal_processes(&escaped, signal)?;
-            Ok(())
+            Ok(false)
         })
     }
 }
@@ -154,6 +179,29 @@ impl SupervisedChild {
             return guard.signal(nix::sys::signal::Signal::SIGKILL);
         }
         self.child.kill().map_err(PlatformError::Io)
+    }
+
+    /// Marks processes running `executable` as self-releasing: see
+    /// [`SupervisedChild::force_terminate_sparing_self_releasing`].
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn set_self_releasing_executable(&mut self, executable: &Path) {
+        if let Some(guard) = &mut self.guard {
+            guard.self_releasing = Some(
+                std::fs::canonicalize(executable).unwrap_or_else(|_| executable.to_path_buf()),
+            );
+        }
+    }
+
+    /// Kills every owned process except the self-releasing ones, which were
+    /// already asked to finish and are still reclaiming what they own.
+    /// Returns whether any were spared; the caller kills them with
+    /// [`SupervisedChild::force_terminate`] only once they overstay.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    pub fn force_terminate_sparing_self_releasing(&mut self) -> Result<bool, PlatformError> {
+        match &self.guard {
+            Some(guard) => guard.signal_sparing(nix::sys::signal::Signal::SIGKILL, true),
+            None => self.child.kill().map(|()| false).map_err(PlatformError::Io),
+        }
     }
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -307,6 +355,7 @@ pub fn spawn_supervised(command: &mut Command) -> Result<SupervisedChild, Platfo
         guard: Some(ChildProcessGuard {
             tree: std::sync::Mutex::new(ObservedProcessTree::new_following_root_exec(root)),
             armed: true,
+            self_releasing: None,
         }),
     })
 }
@@ -371,6 +420,85 @@ mod tests {
             .force_terminate()
             .expect("terminate supervised script");
         child.wait().expect("wait for supervised script");
+        fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn a_forced_round_spares_self_releasing_processes_until_asked_again() {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system clock is before the Unix epoch")
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "codexhost-self-releasing-{}-{unique}",
+            std::process::id()
+        ));
+        fs::create_dir(&directory).expect("create temporary directory");
+        let anchor = directory.join("fake-anchor");
+        fs::copy("/bin/sleep", &anchor).expect("copy a stand-in anchor");
+        // A copied platform binary keeps Apple's signature for a different
+        // path and is killed on exec; sign the copy ad hoc.
+        #[cfg(target_os = "macos")]
+        assert!(
+            Command::new("/usr/bin/codesign")
+                .args(["--force", "--sign", "-"])
+                .arg(&anchor)
+                .output()
+                .expect("run codesign")
+                .status
+                .success()
+        );
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("\"$1\" 30 & /bin/sleep 30 & wait")
+            .arg("sh")
+            .arg(&anchor);
+        let mut child = spawn_supervised(&mut command).expect("supervise the tree");
+        child.set_self_releasing_executable(&anchor);
+        let anchor = fs::canonicalize(&anchor).expect("resolve the stand-in anchor");
+        // Background jobs of a non-interactive shell stay in its group, which
+        // outlives the shell itself.
+        let group = child.id();
+        let processes = move |executable: &std::path::Path| {
+            super::super::process::process_snapshots()
+                .expect("process table")
+                .into_iter()
+                .filter(|process| {
+                    process.process_group_id == group && process.executable == executable
+                })
+                .count()
+        };
+        let sleep = fs::canonicalize("/bin/sleep").expect("resolve /bin/sleep");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while processes(&anchor) == 0 || processes(&sleep) == 0 {
+            assert!(Instant::now() < deadline, "tree never started");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            child
+                .force_terminate_sparing_self_releasing()
+                .expect("forced round")
+        );
+        child.wait().expect("root exits");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while processes(&sleep) != 0 {
+            assert!(Instant::now() < deadline, "the plain descendant survived");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            child.has_live_processes().expect("observe"),
+            "the anchor was killed"
+        );
+        child.force_terminate().expect("final round");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while child.has_live_processes().expect("observe") {
+            assert!(
+                Instant::now() < deadline,
+                "the anchor survived the final round"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
         fs::remove_dir_all(directory).expect("remove temporary directory");
     }
 }

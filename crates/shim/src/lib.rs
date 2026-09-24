@@ -165,11 +165,17 @@ fn wait_for_child(
 ) -> ShimResult<ChildOutcome> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
     const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+    /// Process anchors were asked to end their Harness groups with the rest
+    /// of the tree. Once everything else is killed they confirm the groups
+    /// empty and exit; only an anchor that overstays this is killed, since
+    /// killing one strands whatever its group still holds.
+    const SELF_RELEASE_BUDGET: Duration = Duration::from_secs(5);
 
     let mut root_status = None;
     let mut forwarded_signal = None;
     let mut deadline = None;
     let mut forced = false;
+    let mut self_release_deadline = None;
     let mut terminated_descendants = false;
     let mut desktop_input_closed = false;
     let mut last_process_tree_refresh = None;
@@ -230,8 +236,14 @@ fn wait_for_child(
             deadline = Some(Instant::now() + TERMINATION_GRACE);
         }
         if !forced && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            child.force_terminate()?;
+            if child.force_terminate_sparing_self_releasing()? {
+                self_release_deadline = Some(Instant::now() + SELF_RELEASE_BUDGET);
+            }
             forced = true;
+        }
+        if self_release_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            child.force_terminate()?;
+            self_release_deadline = None;
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -744,6 +756,18 @@ fn child_command(
     Ok(command)
 }
 
+/// The anchor the Host's Harness processes run under: the installed one, or
+/// for a remote SSH wrapper (a copy of the Shim) the one its profile names.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_process_anchor(shim: &Path) -> Option<PathBuf> {
+    process_anchor_path(shim).or_else(|| {
+        (env::var_os(REMOTE_SSH_MANAGED_ENV).as_deref() == Some(std::ffi::OsStr::new("1")))
+            .then(|| env::var_os(PROCESS_ANCHOR_PATH_ENV))
+            .flatten()
+            .map(PathBuf::from)
+    })
+}
+
 /// The anchor ships beside the Shim in every layout: `libexec/` when
 /// installed, the Cargo target directory in a source checkout.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -830,6 +854,10 @@ pub fn run_proxy_with_observer(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = spawn_supervised(&mut command)?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(anchor) = host_process_anchor(&current_executable) {
+        child.set_self_releasing_executable(&anchor);
+    }
     let child_id = child.id();
     if let Some(lease) = &mut local_runtime_lease
         && let Err(error) = lease.set_child_process_id(child_id)
