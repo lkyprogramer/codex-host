@@ -4,7 +4,7 @@ import type { ChildProcess } from "node:child_process";
 
 import { describe, expect, it, vi } from "vitest";
 
-import { trackOwnedProcessTree } from "../src/index.js";
+import { trackOwnedProcessTree } from "../src/owned-process-tree.js";
 
 function isProcessGroupAlive(pid: number): boolean {
   try {

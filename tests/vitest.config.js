@@ -13,6 +13,7 @@ export default defineConfig({
       "tools/**/*.test.mjs",
     ],
     maxWorkers: 4,
+    setupFiles: [path.resolve(import.meta.dirname, "vitest.setup.js")],
     passWithNoTests: false,
   },
 });
