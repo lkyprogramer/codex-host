@@ -226,6 +226,22 @@ describe.skipIf(process.platform === "win32")("anchored Harness processes", () =
     expect(alive(grandchild)).toBe(false);
   });
 
+  it("reports nothing for an abort that arrives after the Harness is gone", async () => {
+    useAnchor(requireRealAnchor());
+    const controller = new AbortController();
+    const { child } = spawnOwnedProcess(process.execPath, ["-e", "process.exit(0)"], {
+      closeTimeoutMs: 200,
+      signal: controller.signal,
+    });
+    const errors: unknown[] = [];
+    child.on("error", (error) => errors.push(error));
+    await closed(child);
+    controller.abort();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    // Node reports an abort only when it stopped something.
+    expect(errors).toEqual([]);
+  });
+
   it("reports a Harness error nobody listens for instead of crashing the Host", async () => {
     useAnchor(requireRealAnchor());
     const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
@@ -427,7 +443,7 @@ describe.skipIf(process.platform === "win32")("anchor protocol", () => {
     await expect(tree?.close()).resolves.toBeUndefined();
   });
 
-  it("keeps the outcome of a round the Host asked for out of exit reports", async () => {
+  it("reports a kill() round that could not confirm the group", async () => {
     useAnchor(await fakeAnchor("send({ type: 'unconfirmed', live: 1 });"));
     const onExitCleanupFailure = vi.fn();
     const { child } = spawnOwnedProcess("harness", [], {
@@ -435,10 +451,42 @@ describe.skipIf(process.platform === "win32")("anchor protocol", () => {
       onExitCleanupFailure,
     });
     await once(child, "spawn");
+    // Nobody waits on a kill(); a group it could not empty is still a leak.
     child.kill();
-    await new Promise((resolve) => setTimeout(resolve, 300));
+    await expect.poll(() => onExitCleanupFailure.mock.calls.length, { timeout: 5_000 }).toBe(1);
+    expect(String(onExitCleanupFailure.mock.calls[0]?.[0])).toContain("1 still running");
+    process.kill(child.pid ?? 0, "SIGKILL");
+  });
+
+  it("gives a close() round's failure to that close() alone", async () => {
+    useAnchor(await fakeAnchor("send({ type: 'unconfirmed', live: 1 });"));
+    const onExitCleanupFailure = vi.fn();
+    const { child, tree } = spawnOwnedProcess("harness", [], {
+      closeTimeoutMs: 100,
+      onExitCleanupFailure,
+    });
+    await once(child, "spawn");
+    await expect(tree?.close()).rejects.toThrow("1 still running");
+    await new Promise((resolve) => setTimeout(resolve, 100));
     expect(onExitCleanupFailure).not.toHaveBeenCalled();
-    child.stdin?.destroy();
+    process.kill(child.pid ?? 0, "SIGKILL");
+  });
+
+  it("keeps a close bound within the anchor's own limit", async () => {
+    useAnchor(
+      await fakeAnchor("setTimeout(() => { send({ type: 'released' }); process.exit(0); }, 50);"),
+    );
+    // Unclamped, twice this overflows Node's timer range and fires at once.
+    const { tree } = spawnOwnedProcess("harness", [], { closeTimeoutMs: 1e12 });
+    await expect(tree?.close()).resolves.toBeUndefined();
+  });
+
+  it("rejects an unknown signal name like Node does", async () => {
+    useAnchor(await fakeAnchor(""));
+    const { child } = spawnOwnedProcess("harness", [], { closeTimeoutMs: 100 });
+    expect(() => child.kill("SIGBOGUS" as NodeJS.Signals)).toThrow(
+      expect.objectContaining({ code: "ERR_UNKNOWN_SIGNAL" }),
+    );
     process.kill(child.pid ?? 0, "SIGKILL");
   });
 

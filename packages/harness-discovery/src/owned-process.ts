@@ -1,5 +1,6 @@
 import { spawn, type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { accessSync, constants } from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import type { Duplex } from "node:stream";
 
@@ -59,12 +60,15 @@ export function processAnchorPath(): string | null {
   }
 }
 
+/** The anchor clamps every grace to this; the Host's own timers follow it. */
+const MAX_GRACE_MS = 600_000;
+
 /** Milliseconds for the anchor protocol; a non-finite bound is a caller bug. */
 function graceMilliseconds(closeTimeoutMs: number): number {
   if (!Number.isFinite(closeTimeoutMs) || closeTimeoutMs < 0) {
     throw new TypeError(`closeTimeoutMs must be a finite, non-negative number: ${closeTimeoutMs}`);
   }
-  return Math.ceil(closeTimeoutMs);
+  return Math.min(Math.ceil(closeTimeoutMs), MAX_GRACE_MS);
 }
 
 /**
@@ -183,8 +187,13 @@ class AnchoredProcessTree implements OwnedProcessTree {
   /** Set once the anchor is gone without confirming; it can no longer help. */
   #lost: Error | null = null;
   #pending: PendingRelease | null = null;
-  /** A termination round was asked for, so its outcome is not an exit report. */
-  #terminationRequested = false;
+  /**
+   * A close() round whose outcome is owed to that call, even after its timer
+   * gave up. Rounds started by kill() have no caller waiting on them, so their
+   * failures are reported like any other cleanup failure.
+   */
+  #closeOutcomeOwed = false;
+  #stopWatchingAbort: () => void = () => undefined;
 
   constructor(
     child: ChildProcess,
@@ -213,17 +222,24 @@ class AnchoredProcessTree implements OwnedProcessTree {
     (control as Duplex & { unref?(): void }).unref?.();
     const signal = options.signal;
     if (signal) {
+      // As Node does: stop the process, and report the abort only if that
+      // stop took effect. A Harness already gone has nothing to abort.
       const abort = () => {
+        this.#stopWatchingAbort();
+        if (!child.kill()) return;
         this.#emitError(
           Object.assign(new Error("The operation was aborted", { cause: signal.reason }), {
             name: "AbortError",
             code: "ABORT_ERR",
           }),
         );
-        child.kill();
       };
-      if (signal.aborted) queueMicrotask(abort);
-      else signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) {
+        queueMicrotask(abort);
+      } else {
+        signal.addEventListener("abort", abort, { once: true });
+        this.#stopWatchingAbort = () => signal.removeEventListener("abort", abort);
+      }
     }
   }
 
@@ -243,12 +259,12 @@ class AnchoredProcessTree implements OwnedProcessTree {
     );
     timer.unref();
     this.#pending = { promise, resolve, reject, timer };
+    this.#closeOutcomeOwed = true;
     this.#terminate(this.#graceMs);
     return promise;
   }
 
   #terminate(graceMs: number): void {
-    this.#terminationRequested = true;
     this.#control.write(`${JSON.stringify({ op: "terminate", graceMs })}\n`);
   }
 
@@ -258,6 +274,11 @@ class AnchoredProcessTree implements OwnedProcessTree {
    * alive until it is empty, so nothing can orphan the group by accident.
    */
   #kill(signal?: NodeJS.Signals | number): boolean {
+    if (typeof signal === "string" && !(signal in os.constants.signals)) {
+      throw Object.assign(new TypeError(`Unknown signal: ${signal}`), {
+        code: "ERR_UNKNOWN_SIGNAL",
+      });
+    }
     if (this.#released || this.#lost) return false;
     if (signal === 0) return true;
     this.#terminate(signal === "SIGKILL" || signal === 9 ? 0 : this.#graceMs);
@@ -317,19 +338,19 @@ class AnchoredProcessTree implements OwnedProcessTree {
       this.#begin("ready");
     } else if (type === "released") {
       this.#released = true;
+      this.#closeOutcomeOwed = false;
+      this.#stopWatchingAbort();
       this.#settle(null);
     } else if (type === "unconfirmed") {
       const live = Reflect.get(message, "live");
       const error = new Error(
         `Owned process group did not exit within cleanup bounds (${typeof live === "number" ? live : "some"} still running)`,
       );
-      if (this.#pending) this.#settle(error);
-      // A round the Host asked for reports through that request (or its
-      // timeout); only a round the anchor began on its own is an exit report.
-      else if (!this.#terminationRequested) this.#reportExitCleanupFailure(error);
+      this.#reportRoundFailure(error);
     } else if (type === "spawnError") {
       // Nothing was created, so nothing is owned.
       this.#released = true;
+      this.#stopWatchingAbort();
       const code = Reflect.get(message, "code");
       const detail = Reflect.get(message, "message");
       this.#begin(
@@ -351,6 +372,7 @@ class AnchoredProcessTree implements OwnedProcessTree {
   }
 
   #anchorGone(): void {
+    this.#stopWatchingAbort();
     if (this.#start === "pending") {
       this.#begin("failed", new Error("Process anchor exited before the Harness started"));
     }
@@ -363,8 +385,25 @@ class AnchoredProcessTree implements OwnedProcessTree {
     this.#lost = new Error(
       "Process anchor exited without confirming the process group was released",
     );
-    if (this.#pending) this.#settle(this.#lost);
-    else if (!this.#terminationRequested) this.#reportExitCleanupFailure(this.#lost);
+    this.#reportRoundFailure(this.#lost);
+  }
+
+  /**
+   * A failed round reaches whoever owns it: the waiting close(), nobody when
+   * a close() already gave up on it (its caller was told), and otherwise the
+   * exit-cleanup report, whether the anchor or a kill() started the round.
+   */
+  #reportRoundFailure(error: Error): void {
+    if (this.#pending) {
+      this.#closeOutcomeOwed = false;
+      this.#settle(error);
+      return;
+    }
+    if (this.#closeOutcomeOwed) {
+      this.#closeOutcomeOwed = false;
+      return;
+    }
+    this.#reportExitCleanupFailure(error);
   }
 
   #settle(error: Error | null): void {
