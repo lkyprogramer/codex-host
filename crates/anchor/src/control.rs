@@ -11,6 +11,7 @@ use serde_json::Value;
 const MAX_GRACE: Duration = Duration::from_secs(600);
 /// A command line longer than this is discarded rather than buffered forever.
 const MAX_LINE_BYTES: usize = 64 * 1024;
+const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub enum Command {
     Terminate { grace: Duration },
@@ -29,8 +30,12 @@ pub struct Control {
 
 impl Control {
     pub fn new(fd: OwnedFd) -> Self {
+        let stream = UnixStream::from(fd);
+        // A Host that stops reading without closing must not stall
+        // supervision; its messages are best effort anyway.
+        let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
         Self {
-            stream: UnixStream::from(fd),
+            stream,
             pending: Vec::new(),
         }
     }

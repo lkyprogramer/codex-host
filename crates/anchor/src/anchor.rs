@@ -28,7 +28,14 @@ const MIN_KILL_WAIT: Duration = Duration::from_millis(500);
 const ORPHANED_RETRY_LIMIT: Duration = Duration::from_secs(30);
 const ACTIVE_TICK: Duration = Duration::from_millis(20);
 const IDLE_TICK: Duration = Duration::from_secs(1);
+/// Membership scans back off from this to MAX_SCAN_INTERVAL: a group that
+/// empties fast is released at once, a lingering one does not cost a core.
+const FIRST_SCAN_INTERVAL: Duration = Duration::from_millis(20);
+const MAX_SCAN_INTERVAL: Duration = Duration::from_millis(250);
 
+// These can equal a Harness's own exit codes. The Host never reads them as
+// such: a real Harness outcome always follows `released`, a failed spawn
+// `spawnError`, on the control socket.
 const EXIT_USAGE: i32 = 2;
 const EXIT_SPAWN_FAILED: i32 = 127;
 /// The Host is gone and the group still has members after every retry.
@@ -64,15 +71,20 @@ pub fn run(arguments: Vec<OsString>) -> ! {
         }
     };
     #[cfg(target_os = "linux")]
-    {
-        // Descendants that leave the group through setsid or a double fork
-        // come back to the anchor once their parent is gone.
-        let _ = nix::sys::prctl::set_child_subreaper(true);
-    }
+    // Descendants that leave the group through setsid or a double fork come
+    // back to the anchor once their parent is gone.
+    let subreaper = nix::sys::prctl::set_child_subreaper(true)
+        .err()
+        .map(|error| format!("cannot become a child subreaper: {error}"));
+    #[cfg(not(target_os = "linux"))]
+    let subreaper: Option<String> = None;
     let mut anchor = Anchor::new(control, &options);
     let leader = anchor.spawn(&options);
     silence_standard_streams();
     anchor.announce_ready(leader);
+    if let Some(message) = subreaper {
+        anchor.diagnose(message);
+    }
     anchor.supervise(wakeups)
 }
 
@@ -196,6 +208,10 @@ struct Anchor {
     exit: Option<LeaderExit>,
     termination: Option<Termination>,
     orphaned_at: Option<Instant>,
+    next_scan: Instant,
+    scan_interval: Duration,
+    /// A diagnostic already told the Host why the group cannot be observed.
+    scan_diagnosed: bool,
 }
 
 impl Anchor {
@@ -208,6 +224,9 @@ impl Anchor {
             exit: None,
             termination: None,
             orphaned_at: None,
+            next_scan: Instant::now(),
+            scan_interval: FIRST_SCAN_INTERVAL,
+            scan_diagnosed: false,
         }
     }
 
@@ -215,6 +234,12 @@ impl Anchor {
         if let Some(control) = self.control.as_mut() {
             control.send(&message);
         }
+    }
+
+    /// Standard error is /dev/null once the Harness runs; the Host is told
+    /// why a group cannot be observed or fully owned instead.
+    fn diagnose(&mut self, message: String) {
+        self.send(json!({ "type": "diagnostic", "message": message }));
     }
 
     /// Creates the Harness as the leader of a new process group. The group id
@@ -229,7 +254,10 @@ impl Anchor {
             // (prctl, getppid) between fork and exec.
             unsafe {
                 command.pre_exec(move || {
-                    // If the anchor dies, the leader must not outlive it.
+                    // If the anchor dies, the leader must not outlive it. Only
+                    // the leader is covered: the rest of the group survives an
+                    // anchor that is itself killed, which is why nothing may
+                    // SIGKILL the anchor on purpose.
                     nix::sys::prctl::set_pdeathsig(Signal::SIGKILL)?;
                     if nix::unistd::getppid() != anchor {
                         return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
@@ -294,8 +322,8 @@ impl Anchor {
                 };
                 (ready(2), ready(0), ready(1))
             };
-            if child_ready {
-                Wakeups::drain(&mut wakeups.child);
+            if child_ready && Wakeups::drain(&mut wakeups.child) {
+                self.reap_adopted();
             }
             if termination_ready && Wakeups::drain(&mut wakeups.termination) {
                 self.request_termination(self.lifeline_grace);
@@ -304,6 +332,15 @@ impl Anchor {
                 self.receive_control();
             }
             self.advance();
+        }
+    }
+
+    /// Adopted descendants that exit while the leader still runs would stay
+    /// zombies for the whole session; reap them as they go.
+    fn reap_adopted(&self) {
+        #[cfg(target_os = "linux")]
+        if let Some(leader) = self.leader {
+            group::linux::live_adopted_children(leader);
         }
     }
 
@@ -329,11 +366,26 @@ impl Anchor {
         }
     }
 
+    /// Starts a termination round, or brings the one in progress forward when
+    /// the new request is more urgent: a later, shorter grace (or a lost
+    /// lifeline) must never wait out an earlier, longer one.
     fn request_termination(&mut self, grace: Duration) {
-        if self.termination.is_some() {
+        let now = Instant::now();
+        self.scan_interval = FIRST_SCAN_INTERVAL;
+        self.next_scan = now;
+        if let Some(termination) = self.termination.as_mut() {
+            if let Stage::Graceful { until } = termination.stage {
+                if grace.is_zero() {
+                    termination.stage = Stage::Forced {
+                        until: now + MIN_KILL_WAIT,
+                    };
+                    self.signal_all(Signal::SIGKILL);
+                } else if now + grace < until {
+                    termination.stage = Stage::Graceful { until: now + grace };
+                }
+            }
             return;
         }
-        let now = Instant::now();
         let stage = if grace.is_zero() {
             self.signal_all(Signal::SIGKILL);
             Stage::Forced {
@@ -352,22 +404,25 @@ impl Anchor {
         };
         group::signal_group(leader, signal);
         #[cfg(target_os = "linux")]
-        for adopted in group::linux::live_adopted_children(nix::unistd::getpid(), leader) {
-            group::signal_process(adopted, signal);
-        }
+        group::linux::signal_adopted(leader, signal);
     }
 
-    fn live_members(&self) -> usize {
+    fn live_members(&mut self) -> usize {
         let Some(leader) = self.leader else {
             return 0;
         };
         let leader_live = usize::from(self.exit.is_none());
-        let group = group::live_group_members(leader, leader);
-        #[cfg(target_os = "linux")]
-        let adopted = group::linux::live_adopted_children(nix::unistd::getpid(), leader).len();
-        #[cfg(not(target_os = "linux"))]
-        let adopted = 0;
-        leader_live + group + adopted
+        let others = match group::live_members(leader, leader) {
+            Ok(others) => others,
+            Err(message) => {
+                if !self.scan_diagnosed {
+                    self.scan_diagnosed = true;
+                    self.diagnose(message);
+                }
+                1
+            }
+        };
+        leader_live + others
     }
 
     fn advance(&mut self) {
@@ -383,12 +438,15 @@ impl Anchor {
             // shells behind; reclaim them the same way a close would.
             self.request_termination(self.exit_grace);
         }
-        let Some(exit) = self.exit else {
-            self.advance_termination();
-            return;
-        };
-        if self.live_members() == 0 {
-            self.finish(leader, exit);
+        if let Some(exit) = self.exit {
+            let now = Instant::now();
+            if now >= self.next_scan {
+                if self.live_members() == 0 {
+                    self.finish(leader, exit);
+                }
+                self.next_scan = now + self.scan_interval;
+                self.scan_interval = (self.scan_interval * 2).min(MAX_SCAN_INTERVAL);
+            }
         }
         self.advance_termination();
     }
@@ -418,7 +476,11 @@ impl Anchor {
                     self.request_termination(self.lifeline_grace);
                 }
             }
-            _ => {}
+            // Members that join late (a descendant adopted after the first
+            // KILL, one that escaped its parent) are killed on every tick of
+            // the forced window rather than surviving until the next round.
+            Stage::Forced { .. } => self.signal_all(Signal::SIGKILL),
+            Stage::Graceful { .. } => {}
         }
     }
 
