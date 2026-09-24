@@ -2256,9 +2256,7 @@ describe("Claude history replacement fence", () => {
     },
   );
 
-  // Only the native anchor reports the exit after the group is gone; the
-  // Host-side fallback reclaims it asynchronously.
-  it.skipIf(process.platform === "win32" || !processAnchorPath())(
+  it.skipIf(process.platform === "win32")(
     "reclaims what a wrapper leaves behind as soon as the wrapper exits",
     async () => {
       const value = fixture();
@@ -2280,9 +2278,17 @@ describe("Claude history replacement fence", () => {
         const [chunk] = await once(child.stdout, "data");
         pid = Number(String(chunk));
         if (child.exitCode === null) await once(child, "exit");
-        // The exit is reported only after the owned group, including the
-        // wrapper's surviving child, is gone; nothing waits for a later close.
-        expect(() => process.kill(pid, 0)).toThrow();
+        if (processAnchorPath()) {
+          // The anchor reports the exit only once the owned group, including
+          // the wrapper's surviving child, is gone.
+          expect(() => process.kill(pid, 0)).toThrow();
+        } else {
+          // The Host-side fallback starts the same reclaim at the exit.
+          await vi.waitFor(() => expect(() => process.kill(pid, 0)).toThrow(), {
+            timeout: 2_000,
+          });
+        }
+        // Nothing waited for a later close to reclaim it.
         await expect(value.transport.close()).resolves.toBeUndefined();
       } finally {
         if (pid) {

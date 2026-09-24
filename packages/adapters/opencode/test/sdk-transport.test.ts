@@ -52,7 +52,8 @@ function isAlive(pid: number): boolean {
 function stopOwnedFixtureGroup(child: ChildProcessWithoutNullStreams | undefined): void {
   if (!child?.pid || process.platform === "win32") return;
   try {
-    // An owned child routes SIGKILL to its whole group.
+    // Anchored, SIGKILL ends the whole owned group; in the fallback it reaches
+    // the leader only, and the caller also kills the fixture's child directly.
     child.kill("SIGKILL");
   } catch (error) {
     // ESRCH: already gone. EPERM: only an unreaped zombie is left.
