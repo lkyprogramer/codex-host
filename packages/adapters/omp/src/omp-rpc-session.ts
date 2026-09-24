@@ -506,6 +506,21 @@ const nodeProcessAdapter: OmpRpcProcessAdapter = {
   },
 };
 
+/** Races a startup step against a deadline whose timer never outlives it. */
+async function withDeadline<T>(step: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      step,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export class OmpRpcSession {
   readonly #options: Required<
     Pick<
@@ -533,9 +548,15 @@ export class OmpRpcSession {
   #stderrTail = "";
   #frameDecoder = new OmpFrameDecoder();
   #readyResolve: (() => void) | null = null;
-  readonly #ready = new Promise<void>((resolve) => {
+  #readyReject: ((error: Error) => void) | null = null;
+  /** Settles on the native ready signal, or on the first fault before it. */
+  readonly #ready = new Promise<void>((resolve, reject) => {
     this.#readyResolve = resolve;
+    this.#readyReject = reject;
   });
+  // A fault may settle it before startup awaits it (or after startup already
+  // failed another way); that must never surface as an unhandled rejection.
+  readonly #readyObserved = this.#ready.catch(() => undefined);
 
   constructor(
     options: OmpRpcSessionOptions,
@@ -629,27 +650,19 @@ export class OmpRpcSession {
         );
       }
     });
-    await Promise.race([
+    await withDeadline(
       new Promise<void>((resolve, reject) => {
         child.once("spawn", resolve);
         child.once("error", reject);
       }),
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(
-          () => reject(new Error("Omp RPC start timed out")),
-          this.#options.commandTimeoutMs,
-        ),
-      ),
-    ]);
-    await Promise.race([
+      this.#options.commandTimeoutMs,
+      "Omp RPC start timed out",
+    );
+    await withDeadline(
       this.#ready,
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(
-          () => reject(new Error("Omp RPC ready signal timed out")),
-          this.#options.commandTimeoutMs,
-        ),
-      ),
-    ]);
+      this.#options.commandTimeoutMs,
+      "Omp RPC ready signal timed out",
+    );
     await this.#send("negotiate_protocol", { protocolVersion: 2 }).catch(() => undefined);
     try {
       await this.#send("set_subagent_subscription", { level: "events" });
@@ -1053,6 +1066,7 @@ export class OmpRpcSession {
     if (value.type === "ready") {
       this.#readyResolve?.();
       this.#readyResolve = null;
+      this.#readyReject = null;
       return;
     }
     if (value.type === "response") {
@@ -1701,6 +1715,11 @@ export class OmpRpcSession {
   #fail(error: OmpRpcFaultError): void {
     if (this.#closed || this.#failed) return;
     this.#failed = true;
+    // A process that dies before its ready signal must fail startup now, not
+    // after the whole command timeout.
+    this.#readyReject?.(error);
+    this.#readyResolve = null;
+    this.#readyReject = null;
     this.#rejectAll(error);
     this.#options.onFault?.(error);
   }

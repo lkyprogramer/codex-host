@@ -504,7 +504,9 @@ export async function probeDeepSeekExecutableGeneration(
     owned = dependencies.spawn(invocation.command, invocation.arguments, {
       env: environment,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      closeTimeoutMs: cleanupTimeoutMs,
+      // TERM and KILL each get half, so the whole group is gone within the
+      // cleanup budget this probe reports against.
+      closeTimeoutMs: Math.max(1, Math.floor(cleanupTimeoutMs / 2)),
     });
   } catch (error) {
     throw isMissingExecutableError(error)

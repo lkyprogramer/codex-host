@@ -329,7 +329,8 @@ export class KiroAcpTransport {
         env: environment,
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
         timeoutMs: this.#commandTimeoutMs,
-        maxOutputBytes: 1024 * 1024,
+        // stdout (the catalog) and stderr together.
+        maxOutputBytes: 2 * 1024 * 1024,
         closeTimeoutMs: this.#closeTimeoutMs,
       });
       if (listing.code !== 0) {

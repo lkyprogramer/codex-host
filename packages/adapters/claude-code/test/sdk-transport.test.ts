@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
 import type { PermissionUpdate, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { processAnchorPath } from "@codexhost/harness-discovery";
 import { harnessThinkingOptionIdSchema } from "@codexhost/shared-contracts";
 
 import {
@@ -2255,7 +2256,9 @@ describe("Claude history replacement fence", () => {
     },
   );
 
-  it.skipIf(process.platform === "win32")(
+  // Only the native anchor reports the exit after the group is gone; the
+  // Host-side fallback reclaims it asynchronously.
+  it.skipIf(process.platform === "win32" || !processAnchorPath())(
     "reclaims what a wrapper leaves behind as soon as the wrapper exits",
     async () => {
       const value = fixture();

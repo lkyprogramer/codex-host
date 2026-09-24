@@ -52,7 +52,8 @@ function isAlive(pid: number): boolean {
 function stopOwnedFixtureGroup(child: ChildProcessWithoutNullStreams | undefined): void {
   if (!child?.pid || process.platform === "win32") return;
   try {
-    process.kill(-child.pid, "SIGKILL");
+    // An owned child routes SIGKILL to its whole group.
+    child.kill("SIGKILL");
   } catch (error) {
     // ESRCH: already gone. EPERM: only an unreaped zombie is left.
     const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : null;
