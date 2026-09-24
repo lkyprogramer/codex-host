@@ -185,6 +185,9 @@ spawnOwnedProcess(command, args, {
 | 回退 tracker 失败后永不重试（Windows 上 Grok 退化） | leader 未被回收前允许重试，回收后保持失败 |
 | Windows 回退：每次短命令正常退出都报清理失败；taskkill 同步阻塞事件循环 | Windows 不在 leader 退出时自动清理；taskkill 改为异步 |
 | DeepSeek 探测清理预算与 anchor 窗口错位 | TERM / KILL 各占预算一半 |
+| abort 在 Harness 已结束后仍补发 `AbortError`，监听器不移除（复查发现） | 与 Node 一致：kill 生效才报告，释放 / 创建失败 / anchor 丢失时移除监听 |
+| `kill()` 发起的回合失败无人得知（复查发现） | 只有 `close()` 的回合由该调用承接；`kill()` 与 anchor 自发回合的失败经 `onExitCleanupFailure` 上报 |
+| 控制通道写超时可能截断一行并与下一条消息粘连（复查发现） | 非阻塞写加发送缓冲，可写时续写；退出前有界 flush 最后的 `released` / `spawnError` |
 | 其余：多线程主线程退出误判、重复计数、不可读 `/proc` 无诊断、控制写阻塞、Shim 符号链接路径与继承环境、Host 请求的回合被误报为退出清理失败、anchor 路径永久缓存、非法 `closeTimeoutMs` | 均已修复；anchor 诊断经 `diagnostic` 消息转为 Host warning |
 
 
