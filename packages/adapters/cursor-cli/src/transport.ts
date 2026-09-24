@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
@@ -9,7 +9,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import { cursorDiagnostic } from "./diagnostics.js";
 import { cursorInvocation } from "./command.js";
 import {
@@ -111,25 +111,20 @@ export class CursorTransport {
       this.options.command,
       this.options.force,
     );
-    const child = spawn(invocation.command, invocation.arguments, {
-      cwd: this.options.cwd,
-      env: this.options.environment,
-      windowsHide: true,
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      stdio: "pipe",
-      ...(process.platform === "win32" ? {} : { detached: true }),
-    });
-    this.#child = child;
     const fault = (message: string) => {
       this.#fault = new Error(message);
       this.#rejectFault(this.#fault);
     };
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
+    const { child, tree } = spawnOwnedProcess(invocation.command, invocation.arguments, {
+      cwd: this.options.cwd,
+      env: this.options.environment,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       closeTimeoutMs: CLOSE_TIMEOUT_MS,
       onExitCleanupFailure: (error) =>
         fault(`Cursor ACP owned process cleanup failed: ${String(error)}`),
     });
+    this.#child = child;
+    this.#ownedProcessTree = tree;
     child.on("error", () => fault("Cursor ACP process could not start"));
     child.on("exit", (code) => fault(`Cursor ACP process exited (${code ?? "signal"})`));
     child.stderr.resume(); // Native diagnostics may contain secrets; never copy them to Host events.

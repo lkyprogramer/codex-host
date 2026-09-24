@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
+import type { OwnedProcess } from "@codexhost/harness-discovery";
 import { harnessThinkingOptionIdSchema } from "@codexhost/shared-contracts";
 import { describe, expect, it, vi } from "vitest";
 
@@ -49,6 +50,15 @@ type Scenario =
   | "stats-error"
   | "stats-timeout"
   | "missing-session-id";
+
+/** Fakes own no OS process, so their tree must never signal a real pid. */
+function owned(child: FakePiRpcProcess): OwnedProcess<ChildProcessWithoutNullStreams> {
+  return {
+    child: child as unknown as ChildProcessWithoutNullStreams,
+    tree: { close: async () => undefined },
+    anchored: false,
+  };
+}
 
 class FakePiRpcProcess extends EventEmitter {
   readonly stdin = new PassThrough();
@@ -720,10 +730,7 @@ function session(
 ): PiRpcSession {
   const processAdapter: PiRpcProcessAdapter = {
     spawn() {
-      return new FakePiRpcProcess(
-        scenario,
-        options.nativeCompactionDelayMs,
-      ) as unknown as ChildProcessWithoutNullStreams;
+      return owned(new FakePiRpcProcess(scenario, options.nativeCompactionDelayMs));
     },
   };
   return new PiRpcSession(
@@ -754,7 +761,7 @@ function autonomousSession(onFault = vi.fn()): {
     {
       spawn() {
         fake = new FakePiRpcProcess("final-only");
-        return fake as unknown as ChildProcessWithoutNullStreams;
+        return owned(fake);
       },
     },
   );
@@ -782,7 +789,7 @@ describe("Pi RPC Turn aggregation", () => {
     const rpc = new PiRpcSession(
       { cwd: process.cwd(), closeTimeoutMs: 500 },
       {
-        spawn: () => child as unknown as ChildProcessWithoutNullStreams,
+        spawn: () => owned(child),
       },
     );
     await rpc.start();
@@ -917,7 +924,7 @@ describe("Pi RPC Turn aggregation", () => {
   it("starts the native process without a codexhost Extension option", async () => {
     const spawnProcess = vi.fn((options: PiRpcProcessOptions) => {
       expect(options.cwd).toBe(process.cwd());
-      return new FakePiRpcProcess("final-only") as unknown as ChildProcessWithoutNullStreams;
+      return owned(new FakePiRpcProcess("final-only"));
     });
     const rpc = new PiRpcSession(
       {
@@ -939,7 +946,7 @@ describe("Pi RPC Turn aggregation", () => {
       expect(options.environment.PATH?.split(path.delimiter)).toContain(
         path.dirname(process.execPath),
       );
-      return new FakePiRpcProcess("final-only") as unknown as ChildProcessWithoutNullStreams;
+      return owned(new FakePiRpcProcess("final-only"));
     });
     const rpc = new PiRpcSession(
       {
@@ -1055,9 +1062,7 @@ describe("Pi RPC Turn aggregation", () => {
   });
 
   it("passes Native resume and Fork Session files to the Pi process adapter", async () => {
-    const spawnProcess = vi.fn(
-      () => new FakePiRpcProcess("final-only") as unknown as ChildProcessWithoutNullStreams,
-    );
+    const spawnProcess = vi.fn(() => owned(new FakePiRpcProcess("final-only")));
     const resumed = new PiRpcSession(
       { cwd: process.cwd(), sessionFile: "/synthetic/source.jsonl" },
       { spawn: spawnProcess },
@@ -1065,6 +1070,7 @@ describe("Pi RPC Turn aggregation", () => {
     await resumed.start();
     expect(spawnProcess).toHaveBeenLastCalledWith(
       expect.objectContaining({ sessionFile: "/synthetic/source.jsonl" }),
+      expect.objectContaining({ closeTimeoutMs: expect.any(Number) }),
     );
     await resumed.close();
 
@@ -1075,6 +1081,7 @@ describe("Pi RPC Turn aggregation", () => {
     await forked.start();
     expect(spawnProcess).toHaveBeenLastCalledWith(
       expect.objectContaining({ forkSessionFile: "/synthetic/source.jsonl" }),
+      expect.objectContaining({ closeTimeoutMs: expect.any(Number) }),
     );
     await forked.close();
   });

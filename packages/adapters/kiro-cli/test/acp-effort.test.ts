@@ -132,10 +132,17 @@ vi.mock("node:child_process", async (original) => ({
 
 // The in-memory ACP peer has no OS PID or detached process group. Model the
 // tracker contract explicitly so this test never attempts to signal a real PID.
-vi.mock("@codexhost/harness-discovery", async (importOriginal) => ({
-  ...(await importOriginal()),
-  trackOwnedProcessTree: () => ({ close: async () => undefined }),
-}));
+vi.mock("@codexhost/harness-discovery", async (importOriginal) => {
+  const { spawn } = await import("node:child_process");
+  return {
+    ...(await importOriginal()),
+    spawnOwnedProcess: (command: string, args: readonly string[]) => ({
+      child: spawn(command, [...args]),
+      tree: { close: async () => undefined },
+      anchored: false,
+    }),
+  };
+});
 
 let transport: KiroAcpTransport;
 beforeEach(() => {

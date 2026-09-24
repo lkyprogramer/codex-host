@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
@@ -8,7 +8,7 @@ import {
   type RequestPermissionResponse,
   type SessionNotification,
 } from "@agentclientprotocol/sdk";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import { codeBuddyInvocation } from "./command.js";
 import { bounded, CodeBuddyError, record } from "./common.js";
 
@@ -61,19 +61,15 @@ export class CodeBuddyAcpClient implements CodeBuddyClient {
   ) {
     void this.#failed.catch(() => {});
     const invocation = codeBuddyInvocation(options.environment, options.ephemeral);
-    this.#child = spawn(invocation.command, invocation.arguments, {
+    const owned = spawnOwnedProcess(invocation.command, invocation.arguments, {
       cwd: options.cwd,
       env: invocation.environment,
-      stdio: "pipe",
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      detached: process.platform !== "win32",
-    });
-    this.#ownedProcessTree = trackOwnedProcessTree(this.#child, {
-      detached: process.platform !== "win32",
       closeTimeoutMs: 3_000,
       onExitCleanupFailure: (error) => this.#fault(error),
     });
+    this.#child = owned.child;
+    this.#ownedProcessTree = owned.tree;
     this.#exited = new Promise((resolve) => this.#child.once("close", () => resolve()));
     this.#child.stderr.on("data", () => {
       /* Native diagnostics can contain credentials. */

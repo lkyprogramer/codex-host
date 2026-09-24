@@ -1,9 +1,13 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { parseHostUsage, sanitizeDiagnosticTail, type HostUsage } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import {
+  spawnOwnedProcess,
+  type OwnedProcess,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 import {
   harnessThinkingOptionIdSchema,
   jsonValueSchema,
@@ -211,8 +215,17 @@ export interface OmpRpcProcessOptions {
   permissionMode?: OmpPermissionMode;
 }
 
+/** How the Session's native process is owned and when its cleanup failed. */
+export interface OmpRpcProcessOwnership {
+  closeTimeoutMs: number;
+  onExitCleanupFailure(error: unknown): void;
+}
+
 export interface OmpRpcProcessAdapter {
-  spawn(options: OmpRpcProcessOptions): ChildProcessWithoutNullStreams;
+  spawn(
+    options: OmpRpcProcessOptions,
+    ownership: OmpRpcProcessOwnership,
+  ): OwnedProcess<ChildProcessWithoutNullStreams>;
 }
 
 interface PendingCommand {
@@ -482,15 +495,13 @@ export function ompRpcProcessCommand(
 }
 
 const nodeProcessAdapter: OmpRpcProcessAdapter = {
-  spawn(options) {
+  spawn(options, ownership) {
     const invocation = ompRpcProcessCommand(options);
-    return spawn(invocation.command, invocation.arguments, {
+    return spawnOwnedProcess(invocation.command, invocation.arguments, {
       cwd: options.cwd,
       env: options.environment,
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      ...ownership,
     });
   },
 };
@@ -561,33 +572,37 @@ export class OmpRpcSession {
 
   async start(): Promise<this> {
     if (this.#child || this.#closed) throw new Error("Omp RPC Session cannot be started twice");
-    const child = this.#processAdapter.spawn({
-      cwd: this.#options.cwd,
-      ...(this.#options.command ? { command: this.#options.command } : {}),
-      environment: withNodeRuntimeOnPath({
-        ...process.env,
-        ...this.#options.environment,
-        OMP_SKIP_VERSION_CHECK: "1",
-        OMP_TELEMETRY: "0",
-      }),
-      ...(this.#options.sessionFile ? { sessionFile: this.#options.sessionFile } : {}),
-      ...(this.#options.forkSessionFile ? { forkSessionFile: this.#options.forkSessionFile } : {}),
-      ...(this.#options.model ? { model: this.#options.model } : {}),
-      ...(this.#options.permissionMode ? { permissionMode: this.#options.permissionMode } : {}),
-    });
-    this.#child = child;
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
-      closeTimeoutMs: this.#options.closeTimeoutMs,
-      onExitCleanupFailure: (error) =>
-        this.#fail(
-          new OmpRpcFaultError(
-            "processExited",
-            `Omp RPC owned process cleanup failed: ${message(error)}`,
-            this.stderrTail,
+    const { child, tree } = this.#processAdapter.spawn(
+      {
+        cwd: this.#options.cwd,
+        ...(this.#options.command ? { command: this.#options.command } : {}),
+        environment: withNodeRuntimeOnPath({
+          ...process.env,
+          ...this.#options.environment,
+          OMP_SKIP_VERSION_CHECK: "1",
+          OMP_TELEMETRY: "0",
+        }),
+        ...(this.#options.sessionFile ? { sessionFile: this.#options.sessionFile } : {}),
+        ...(this.#options.forkSessionFile
+          ? { forkSessionFile: this.#options.forkSessionFile }
+          : {}),
+        ...(this.#options.model ? { model: this.#options.model } : {}),
+        ...(this.#options.permissionMode ? { permissionMode: this.#options.permissionMode } : {}),
+      },
+      {
+        closeTimeoutMs: this.#options.closeTimeoutMs,
+        onExitCleanupFailure: (error) =>
+          this.#fail(
+            new OmpRpcFaultError(
+              "processExited",
+              `Omp RPC owned process cleanup failed: ${message(error)}`,
+              this.stderrTail,
+            ),
           ),
-        ),
-    });
+      },
+    );
+    this.#child = child;
+    this.#ownedProcessTree = tree;
     child.stdout.on("data", (chunk: Buffer) => this.#push(chunk));
     child.stdout.on("end", () => {
       if (this.#buffer.length !== 0) {

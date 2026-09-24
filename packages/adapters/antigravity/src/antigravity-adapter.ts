@@ -51,7 +51,9 @@ import {
 } from "@codexhost/harness-adapter";
 import {
   commandInvocation,
-  trackOwnedProcessTree,
+  runOwnedProcess,
+  spawnOwnedProcess,
+  type OwnedProcessResult,
   type OwnedProcessTree,
 } from "@codexhost/harness-discovery";
 import {
@@ -472,6 +474,9 @@ function normalizedProcessError(
   };
 }
 
+/** Short CLI calls (model catalog, quota) print little; this only bounds a runaway. */
+const BUFFERED_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
+
 async function runBuffered(
   executable: string,
   arguments_: string[],
@@ -481,33 +486,28 @@ async function runBuffered(
   signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string }> {
   const invocation = commandInvocation(executable, arguments_, environment);
-  return await new Promise((resolve, reject) => {
-    const child = spawn(invocation.command, invocation.arguments, {
+  let result: OwnedProcessResult;
+  try {
+    // A call that times out or is aborted is stopped as a whole tree.
+    result = await runOwnedProcess(invocation.command, invocation.arguments, {
       cwd,
       env: environment,
-      ...(signal ? { signal, killSignal: "SIGKILL" as const } : {}),
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      stdio: ["ignore", "pipe", "pipe"],
+      timeoutMs,
+      maxOutputBytes: BUFFERED_OUTPUT_LIMIT_BYTES,
+      ...(signal ? { signal } : {}),
     });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Antigravity CLI timed out after ${timeoutMs} ms`));
-    }, timeoutMs);
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(stderr.trim() || `Antigravity CLI exited with code ${String(code)}`));
-    });
-  });
+  } catch (error) {
+    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ETIMEDOUT") {
+      throw new Error(`Antigravity CLI timed out after ${timeoutMs} ms`, { cause: error });
+    }
+    throw error;
+  }
+  if (result.code === 0) return { stdout: result.stdout, stderr: result.stderr };
+  throw new Error(
+    result.stderr.trim() ||
+      `Antigravity CLI exited with ${result.signal ?? `code ${String(result.code)}`}`,
+  );
 }
 
 class AntigravitySession implements HarnessSession {
@@ -728,15 +728,28 @@ class AntigravitySession implements HarnessSession {
     arguments_.push("--log-file", logPath);
     const invocation = commandInvocation(this.#executable, arguments_, environment);
     let child: ChildProcessByStdio<Writable, Readable, Readable>;
+    let processTree: OwnedProcessTree | null = null;
     try {
-      child = spawn(invocation.command, invocation.arguments, {
-        cwd: this.#cwd,
-        env: environment,
-        detached: process.platform !== "win32",
-        windowsHide: true,
-        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      if (process.platform === "win32") {
+        // A self-exiting Windows Turn needs a Job Object to retain descendant
+        // ownership after exit; tracking it here would turn its normal exit
+        // into a false fault.
+        child = spawn(invocation.command, invocation.arguments, {
+          cwd: this.#cwd,
+          env: environment,
+          windowsHide: true,
+          windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } else {
+        const owned = spawnOwnedProcess(invocation.command, invocation.arguments, {
+          cwd: this.#cwd,
+          env: environment,
+          closeTimeoutMs: 2_000,
+        });
+        child = owned.child;
+        processTree = owned.tree;
+      }
     } catch (error) {
       await questions.dispose();
       return {
@@ -747,15 +760,7 @@ class AntigravitySession implements HarnessSession {
     const active: ActiveTurn = {
       command,
       process: child,
-      // A self-exiting Windows Turn needs a Job Object to retain descendant
-      // ownership after exit. Do not turn its normal exit into a false fault.
-      processTree:
-        process.platform === "win32"
-          ? null
-          : trackOwnedProcessTree(child, {
-              detached: true,
-              closeTimeoutMs: 2_000,
-            }),
+      processTree,
       exited: new Promise<void>((resolve) => child.once("close", () => resolve())),
       questions,
       subagents: new AntigravitySubagents({

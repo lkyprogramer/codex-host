@@ -1087,7 +1087,9 @@ describe("ClaudeSdkTransport Model control", () => {
       const inspector = new ClaudeSdkModelInspector({
         command: process.execPath,
         cwd: process.cwd(),
-        closeTimeoutMs: 100,
+        // Close waits this long for a natural exit first, so the fixture can
+        // report its grandchild before the group is reclaimed under load.
+        closeTimeoutMs: 2_000,
         queryFactory: value.queryFactory,
       });
       const inspection = inspector.inspect();
@@ -1127,7 +1129,9 @@ describe("ClaudeSdkTransport Model control", () => {
       const inspector = new ClaudeSdkModelInspector({
         command: process.execPath,
         cwd: process.cwd(),
-        closeTimeoutMs: 100,
+        // Close waits this long for a natural exit first, so the fixture can
+        // report its grandchild before the group is reclaimed under load.
+        closeTimeoutMs: 2_000,
         queryFactory: value.queryFactory,
       });
       const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
@@ -2206,13 +2210,15 @@ describe("Claude history replacement fence", () => {
         command: process.execPath,
         args: [
           "-e",
-          "process.on('SIGTERM',()=>process.exit(3)); process.stdin.resume(); setTimeout(()=>process.exit(0),40);",
+          "process.on('SIGTERM',()=>process.exit(3)); process.stdin.resume(); process.stdout.write('ready\\n'); setTimeout(()=>process.exit(0),40);",
         ],
         signal: new AbortController().signal,
         cwd: process.cwd(),
         env: process.env,
       }) as ChildProcessWithoutNullStreams;
       try {
+        // A signal that lands before the handler exists proves nothing here.
+        await once(child.stdout, "data");
         await value.transport.close();
         expect(child.exitCode).toBe(0);
         expect(child.signalCode).toBeNull();
@@ -2231,12 +2237,16 @@ describe("Claude history replacement fence", () => {
       if (!spawnProcess) throw new Error("Missing native process ownership hook");
       const child = spawnProcess({
         command: process.execPath,
-        args: ["-e", "process.on('SIGTERM',()=>process.exit(3)); setInterval(()=>{},1000);"],
+        args: [
+          "-e",
+          "process.on('SIGTERM',()=>process.exit(3)); process.stdout.write('ready\\n'); setInterval(()=>{},1000);",
+        ],
         signal: new AbortController().signal,
         cwd: process.cwd(),
         env: process.env,
       }) as ChildProcessWithoutNullStreams;
       try {
+        await once(child.stdout, "data");
         await value.transport.close();
         expect(child.exitCode).toBe(3);
       } finally {
@@ -2246,7 +2256,7 @@ describe("Claude history replacement fence", () => {
   );
 
   it.skipIf(process.platform === "win32")(
-    "stops wrapper children even when the wrapper has exited",
+    "reclaims what a wrapper leaves behind as soon as the wrapper exits",
     async () => {
       const value = fixture();
       await value.transport.start();
@@ -2267,9 +2277,10 @@ describe("Claude history replacement fence", () => {
         const [chunk] = await once(child.stdout, "data");
         pid = Number(String(chunk));
         if (child.exitCode === null) await once(child, "exit");
-        expect(() => process.kill(pid, 0)).not.toThrow();
-        await value.transport.close();
+        // The exit is reported only after the owned group, including the
+        // wrapper's surviving child, is gone; nothing waits for a later close.
         expect(() => process.kill(pid, 0)).toThrow();
+        await expect(value.transport.close()).resolves.toBeUndefined();
       } finally {
         if (pid) {
           try {

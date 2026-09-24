@@ -3,11 +3,40 @@ import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
+import type * as HarnessDiscovery from "@codexhost/harness-discovery";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { harnessPermissionModeIdSchema } from "@codexhost/shared-contracts";
 
 import { GrokAcpTransport } from "../src/acp-transport.js";
+
+/** Observes every release the Transport asks of its owned tree. */
+const ownership = vi.hoisted(() => ({ releases: 0, failNext: 0 }));
+
+vi.mock("@codexhost/harness-discovery", async (importOriginal) => {
+  const actual = await importOriginal<typeof HarnessDiscovery>();
+  return {
+    ...actual,
+    spawnOwnedProcess: (...args: Parameters<typeof actual.spawnOwnedProcess>) => {
+      const owned = actual.spawnOwnedProcess(...args);
+      const tree = owned.tree;
+      if (!tree) return owned;
+      return {
+        ...owned,
+        tree: {
+          close: async () => {
+            ownership.releases += 1;
+            if (ownership.failNext > 0) {
+              ownership.failNext -= 1;
+              throw new Error("Owned process group did not exit within cleanup bounds");
+            }
+            return tree.close();
+          },
+        },
+      };
+    },
+  };
+});
 
 const groups: number[] = [];
 
@@ -135,6 +164,8 @@ function recorded(log: string): {
 describe("Grok owned process release", () => {
   afterEach(() => {
     for (const pid of groups.splice(0)) killGroup(pid);
+    ownership.releases = 0;
+    ownership.failNext = 0;
   });
 
   it.skipIf(process.platform === "win32")(
@@ -173,9 +204,9 @@ describe("Grok owned process release", () => {
   );
 
   it.skipIf(process.platform === "win32")(
-    "retries a failed idle release and confirms the same spawn group",
+    "retries a failed idle release against the same owned tree",
     async () => {
-      const { directory, logPath, transport } = await startFixture({ closeTimeoutMs: 0 });
+      const { directory, logPath, transport } = await startFixture();
       try {
         await transport.open({
           kind: "create",
@@ -183,13 +214,16 @@ describe("Grok owned process release", () => {
         });
         const before = recorded(await readFile(logPath, "utf8"));
         groups.push(before.leader);
-        // A zero budget observes no exit, so the first release fails even
-        // though it already escalated to SIGKILL.
-        await expect(transport.releaseOwnedProcess()).rejects.toThrow();
-        await expect.poll(() => groupState(before.leader), { timeout: 2_000 }).toBe("gone");
-        // The tracker refuses to be replayed, so the retry has to prove the
-        // same spawn is gone by identity instead of reporting unknown forever.
+        ownership.failNext = 1;
+        await expect(transport.releaseOwnedProcess()).rejects.toThrow("did not exit");
+        // No second process is started: the retry asks the tree that owns the
+        // original spawn, which confirms its group is gone.
         await expect(transport.releaseOwnedProcess()).resolves.toBeUndefined();
+        expect(ownership.releases).toBe(2);
+        await expect.poll(() => groupState(before.leader), { timeout: 2_000 }).toBe("gone");
+        expect(
+          recorded(await readFile(logPath, "utf8")).methods.filter((m) => m === "initialize"),
+        ).toHaveLength(1);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }
@@ -208,17 +242,11 @@ describe("Grok owned process release", () => {
         const before = recorded(await readFile(logPath, "utf8"));
         groups.push(before.leader);
         // A close tolerates an unconfirmed tree. A release that rides on it
-        // must still probe the owned group instead of inheriting that result.
+        // must still have the owned tree confirm instead of inheriting that.
         await transport.close();
-        const kill = vi.spyOn(process, "kill");
-        let probes: unknown[][] = [];
-        try {
-          await expect(transport.releaseOwnedProcess()).resolves.toBeUndefined();
-          probes = kill.mock.calls.filter(([target]) => target === -before.leader);
-        } finally {
-          kill.mockRestore();
-        }
-        expect(probes.length).toBeGreaterThan(0);
+        const afterClose = ownership.releases;
+        await expect(transport.releaseOwnedProcess()).resolves.toBeUndefined();
+        expect(ownership.releases).toBe(afterClose + 1);
       } finally {
         await rm(directory, { recursive: true, force: true });
       }

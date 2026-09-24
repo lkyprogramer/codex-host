@@ -1,10 +1,10 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
+import { spawnOwnedProcess, type OwnedProcess } from "@codexhost/harness-discovery";
 
 import {
   deepSeekProcessInvocation,
-  killDeepSeekProcessTree,
   resolveDeepSeekCommand,
   type DeepSeekCommandInvocation,
 } from "./executable.js";
@@ -65,13 +65,12 @@ export interface DeepSeekGenerationProbeDependencies {
     args: string[],
     options: {
       env: NodeJS.ProcessEnv;
-      detached: boolean;
-      stdio: "pipe";
-      windowsHide: true;
       windowsVerbatimArguments?: boolean;
+      closeTimeoutMs: number;
     },
-  ): ChildProcess;
-  terminateProcessTree(child: ChildProcess, timeoutMs: number): void;
+  ): OwnedProcess;
+  /** Ends the whole probe process tree, never just its leader. */
+  terminateProcessTree(process: OwnedProcess, timeoutMs: number): void | Promise<void>;
 }
 
 const DEFAULT_TIMEOUT_MS = 5_000;
@@ -278,7 +277,7 @@ function capturedText(output: OutputBuffer): string {
 }
 
 async function terminateVersionProcess(
-  child: ChildProcess,
+  owned: OwnedProcess,
   closed: Promise<void>,
   cleanupTimeoutMs: number,
   dependencies: Pick<DeepSeekGenerationProbeDependencies, "terminateProcessTree">,
@@ -286,7 +285,13 @@ async function terminateVersionProcess(
   const deadline = Date.now() + cleanupTimeoutMs;
   const failures: Error[] = [];
   try {
-    dependencies.terminateProcessTree(child, cleanupTimeoutMs);
+    let timer: NodeJS.Timeout | undefined;
+    await Promise.race([
+      Promise.resolve(dependencies.terminateProcessTree(owned, cleanupTimeoutMs)),
+      new Promise<void>((resolve) => {
+        timer = setTimeout(resolve, cleanupTimeoutMs);
+      }),
+    ]).finally(() => clearTimeout(timer));
   } catch (error) {
     failures.push(error instanceof Error ? error : new Error(String(error)));
   }
@@ -309,7 +314,7 @@ async function terminateVersionProcess(
 }
 
 async function captureVersionOutput(
-  child: ChildProcess,
+  owned: OwnedProcess,
   input: {
     readonly invocationKind: DeepSeekCommandInvocation["kind"];
     readonly signal?: AbortSignal;
@@ -319,6 +324,7 @@ async function captureVersionOutput(
   },
   dependencies: Pick<DeepSeekGenerationProbeDependencies, "terminateProcessTree">,
 ): Promise<CapturedVersionOutput> {
+  const child: ChildProcess = owned.child;
   const childStdout = child.stdout;
   const childStderr = child.stderr;
   const stdout: OutputBuffer = { chunks: [], bytes: 0 };
@@ -431,7 +437,7 @@ async function captureVersionOutput(
       });
     }
     const cleanupError = await terminateVersionProcess(
-      child,
+      owned,
       closeObserved ? Promise.resolve() : closed,
       input.cleanupTimeoutMs,
       dependencies,
@@ -462,9 +468,8 @@ async function captureVersionOutput(
 export async function probeDeepSeekExecutableGeneration(
   options: ProbeDeepSeekGenerationOptions = {},
   dependencies: DeepSeekGenerationProbeDependencies = {
-    spawn: (command, args, spawnOptions) => spawn(command, args, spawnOptions),
-    terminateProcessTree: (child, timeoutMs) =>
-      killDeepSeekProcessTree(child, process.platform, timeoutMs),
+    spawn: (command, args, spawnOptions) => spawnOwnedProcess(command, args, spawnOptions),
+    terminateProcessTree: (owned) => owned.tree?.close(),
   },
 ): Promise<DeepSeekExecutableGeneration> {
   if (options.signal?.aborted) {
@@ -494,14 +499,12 @@ export async function probeDeepSeekExecutableGeneration(
     [...command.arguments, "--version"],
     environment,
   );
-  let child: ChildProcess;
+  let owned: OwnedProcess;
   try {
-    child = dependencies.spawn(invocation.command, invocation.arguments, {
+    owned = dependencies.spawn(invocation.command, invocation.arguments, {
       env: environment,
-      detached: process.platform !== "win32",
-      stdio: "pipe",
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      closeTimeoutMs: cleanupTimeoutMs,
     });
   } catch (error) {
     throw isMissingExecutableError(error)
@@ -509,7 +512,7 @@ export async function probeDeepSeekExecutableGeneration(
       : probeError("processExited", "DeepSeek Harness --version could not start");
   }
   const output = await captureVersionOutput(
-    child,
+    owned,
     {
       invocationKind: command.kind,
       ...(options.signal ? { signal: options.signal } : {}),

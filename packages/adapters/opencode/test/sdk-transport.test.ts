@@ -1,8 +1,13 @@
-import { spawn as spawnNative, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
+import {
+  spawnOwnedProcess,
+  type OwnedProcess,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 import type { Event } from "@opencode-ai/sdk/v2";
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
 import { describe, expect, it, vi } from "vitest";
@@ -24,6 +29,14 @@ class FakeChild extends EventEmitter {
   signalCode: NodeJS.Signals | null = null;
 }
 
+/** Fakes own no OS process, so their tree must never signal a real pid. */
+function owned(
+  child: FakeChild,
+  tree: OwnedProcessTree = { close: async () => undefined },
+): OwnedProcess<ChildProcessWithoutNullStreams> {
+  return { child: child as unknown as ChildProcessWithoutNullStreams, tree, anchored: false };
+}
+
 function isAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);
@@ -41,8 +54,9 @@ function stopOwnedFixtureGroup(child: ChildProcessWithoutNullStreams | undefined
   try {
     process.kill(-child.pid, "SIGKILL");
   } catch (error) {
-    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ESRCH")
-      return;
+    // ESRCH: already gone. EPERM: only an unreaped zombie is left.
+    const code = typeof error === "object" && error !== null ? Reflect.get(error, "code") : null;
+    if (code === "ESRCH" || code === "EPERM") return;
     throw error;
   }
 }
@@ -113,7 +127,7 @@ describe("OpenCode SDK transport", () => {
             `opencode server listening on http://127.0.0.1:${4_000 + children.length}\n`,
           );
         });
-        return child as unknown as ChildProcessWithoutNullStreams;
+        return owned(child);
       },
       sleep: async () => undefined,
     };
@@ -167,7 +181,7 @@ describe("OpenCode SDK transport", () => {
         queueMicrotask(() => {
           child.stdout.write("opencode server listening on http://127.0.0.1:4010\n");
         });
-        return child as unknown as ChildProcessWithoutNullStreams;
+        return owned(child);
       },
       sleep: async () => undefined,
     };
@@ -200,7 +214,7 @@ describe("OpenCode SDK transport", () => {
           queueMicrotask(() => {
             child.stdout.write("opencode server listening on http://127.0.0.1:4011\n");
           });
-          return child as unknown as ChildProcessWithoutNullStreams;
+          return owned(child);
         },
         sleep: async () => undefined,
       },
@@ -229,12 +243,13 @@ describe("OpenCode SDK transport", () => {
           createClient: () => clientWith(),
           randomPassword: () => "synthetic-password",
           spawn: (_command, _args, options) => {
-            server = spawnNative(process.execPath, [fixturePath], options);
+            const process_ = spawnOwnedProcess(process.execPath, [fixturePath], options);
+            server = process_.child;
             server.stdout.on("data", (chunk: Buffer | string) => {
               const match = chunk.toString().match(/fixture-child-pid=(\d+)/u);
               if (match?.[1]) fixtureChildPid = Number(match[1]);
             });
-            return server;
+            return process_;
           },
           sleep: async () => undefined,
         },
@@ -251,12 +266,16 @@ describe("OpenCode SDK transport", () => {
         await vi.waitFor(() => expect(isAlive(childPid)).toBe(false), { timeout: 1_000 });
       } finally {
         stopOwnedFixtureGroup(server);
+        if (fixtureChildPid && isAlive(fixtureChildPid)) process.kill(fixtureChildPid, "SIGKILL");
       }
     },
   );
 
-  it("keeps Server admission closed after a failed cleanup without guessing a later pid is owned", async () => {
+  it("keeps Server admission closed while its process tree cannot be released", async () => {
     const child = new FakeChild();
+    const release = vi.fn(async () => {
+      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+    });
     const connection = new OpenCodeServerConnection(
       { command: process.execPath, environment: { PATH: process.env.PATH }, closeTimeoutMs: 20 },
       {
@@ -266,23 +285,17 @@ describe("OpenCode SDK transport", () => {
           queueMicrotask(() => {
             child.stdout.write("opencode server listening on http://127.0.0.1:4012\n");
           });
-          return child as unknown as ChildProcessWithoutNullStreams;
+          return owned(child, { close: release });
         },
         sleep: async () => undefined,
       },
     );
     await connection.client();
-    const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => {
-      if (pid === -child.pid && signal === 0) return true;
-      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
-    });
-    try {
-      await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
-      await expect(connection.client()).rejects.toMatchObject({ code: "unavailable" });
-    } finally {
-      kill.mockRestore();
-    }
     await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
+    await expect(connection.client()).rejects.toMatchObject({ code: "unavailable" });
+    // The owned tree is asked again rather than a bare pid being guessed at.
+    await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
+    expect(release).toHaveBeenCalledTimes(2);
   });
 
   it("checks SDK result errors while accepting the prompt_async 204 payload", async () => {

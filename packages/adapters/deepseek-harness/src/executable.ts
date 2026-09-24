@@ -1,4 +1,3 @@
-import { spawnSync, type ChildProcess } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
 import path from "node:path";
 
@@ -87,44 +86,4 @@ export function deepSeekProcessInvocation(
     arguments: ["/d", "/v:off", "/s", "/c", `"${commandLine}"`],
     windowsVerbatimArguments: true,
   };
-}
-
-export function resolveWindowsTaskkillPath(environment: NodeJS.ProcessEnv): string {
-  const systemRoot =
-    environmentValue(environment, "SystemRoot") ?? environmentValue(environment, "windir");
-  if (!systemRoot || !/^[A-Za-z]:[\\/]/u.test(systemRoot)) {
-    throw new Error("Windows SystemRoot is unavailable or invalid");
-  }
-  return path.win32.join(systemRoot, "System32", "taskkill.exe");
-}
-
-export function killDeepSeekProcessTree(
-  child: ChildProcess,
-  platform: NodeJS.Platform,
-  timeoutMs: number,
-): void {
-  if (!child.pid) {
-    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-    return;
-  }
-  if (platform === "win32") {
-    const result = spawnSync(
-      resolveWindowsTaskkillPath(process.env),
-      ["/pid", String(child.pid), "/t", "/f"],
-      {
-        stdio: "ignore",
-        windowsHide: true,
-        timeout: timeoutMs,
-      },
-    );
-    if (result.error) throw result.error;
-    return;
-  }
-  try {
-    process.kill(-child.pid, "SIGKILL");
-  } catch (error) {
-    if (typeof error !== "object" || error === null || Reflect.get(error, "code") !== "ESRCH") {
-      throw error;
-    }
-  }
 }

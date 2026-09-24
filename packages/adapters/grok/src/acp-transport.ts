@@ -1,12 +1,11 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { Readable, Writable } from "node:stream";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
-import { processStartToken, reclaimOwnedGroup, type OwnedGroupRef } from "./owned-group.js";
+import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import type { HarnessPermissionModeId } from "@codexhost/shared-contracts";
 import {
   ClientSideConnection,
@@ -552,13 +551,7 @@ export class GrokAcpTransport {
   #sessionId: string | null = null;
   #startupModelId: string | undefined;
   #stderrTail = "";
-  #owned: {
-    pid: number;
-    startedAtMs: number;
-    startToken: string;
-  } | null = null;
   #ownedTree: OwnedProcessTree | null = null;
-  #ownedTreeFailed = false;
   #shutdownPromise: Promise<void> | null = null;
   #shutdownMode: ShutdownMode | null = null;
 
@@ -802,24 +795,10 @@ export class GrokAcpTransport {
       environment: this.#options.environment ?? process.env,
     });
     const invocation = grokInvocation(executable, process.platform, this.#startupModelId);
-    const child = spawn(invocation.command, invocation.arguments, {
+    const { child, tree } = spawnOwnedProcess(invocation.command, invocation.arguments, {
       cwd: this.#options.cwd,
       env: { ...process.env, ...this.#options.environment },
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-    });
-    this.#child = child;
-    if (typeof child.pid === "number") {
-      this.#owned = {
-        pid: child.pid,
-        startedAtMs: Date.now(),
-        startToken: processStartToken(child.pid),
-      };
-    }
-    this.#ownedTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
       closeTimeoutMs: this.#options.closeTimeoutMs,
       onExitCleanupFailure: (error) =>
         this.#fault(
@@ -829,6 +808,8 @@ export class GrokAcpTransport {
           ),
         ),
     });
+    this.#child = child;
+    this.#ownedTree = tree;
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
     });
@@ -1019,40 +1000,22 @@ export class GrokAcpTransport {
     }
   }
 
-  /** Identity of the group this Transport spawned, for a bounded reclaim. */
-  #ownedGroup(): OwnedGroupRef | null {
-    const owned = this.#owned;
-    const child = this.#child;
-    if (!owned || !child?.pid) return null;
-    return {
-      pid: owned.pid,
-      pgid: process.platform === "win32" ? owned.pid : -owned.pid,
-      startToken: owned.startToken,
-      leaderExited: child.exitCode !== null || child.signalCode !== null,
-    };
-  }
-
-  ownedProcess(): { pid: number; pgid: number; startedAtMs: number } | null {
-    const owned = this.#owned;
-    const child = this.#child;
-    if (!owned || !child?.pid) return null;
-    return {
-      pid: owned.pid,
-      pgid: process.platform === "win32" ? owned.pid : -owned.pid,
-      startedAtMs: owned.startedAtMs,
-    };
-  }
-
-  async stopOwnedJobs(timeoutMs = this.#options.closeTimeoutMs): Promise<{
+  /**
+   * Stops the owned ACP process for an explicit Thread release. Quiescence is
+   * confirmed only by the owned tree reporting every member gone.
+   */
+  async stopOwnedJobs(): Promise<{
     quiescence: "confirmed" | "unknown";
-    proof?: { pid: number; pgid: number; scope: string };
+    proof?: { pid: number; scope: string };
   }> {
-    const owned = this.ownedProcess();
+    const pid = this.#child?.pid;
+    const tree = this.#ownedTree;
     await this.close();
-    if (!owned) return { quiescence: "unknown" };
-    const proof = { pid: owned.pid, pgid: owned.pgid, scope: "grok-acp-child" };
-    const group = this.#ownedGroup();
-    if (!group || (await reclaimOwnedGroup(group, timeoutMs))) {
+    if (!pid || !tree) return { quiescence: "unknown" };
+    const proof = { pid, scope: "grok-acp-child" };
+    try {
+      await tree.close();
+    } catch {
       return { quiescence: "unknown", proof };
     }
     return { quiescence: "confirmed", proof };
@@ -1069,18 +1032,16 @@ export class GrokAcpTransport {
     await this.#beginShutdown("release");
     // A shutdown already in flight, or one that finished earlier, ran under
     // close semantics that tolerate an unconfirmed tree. An idle release
-    // cannot inherit that: it confirms the owned group on its own.
-    if (shared !== null && shared !== "release") await this.#confirmOwnedGroupGone();
+    // cannot inherit that: it asks the owned tree to confirm on its own.
+    if (shared !== null && shared !== "release") await this.#confirmReleased();
   }
 
-  async #confirmOwnedGroupGone(): Promise<void> {
-    const group = this.#ownedGroup();
-    if (!group) {
+  async #confirmReleased(): Promise<void> {
+    const tree = this.#ownedTree;
+    if (!tree) {
       throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
     }
-    if (await reclaimOwnedGroup(group, this.#options.closeTimeoutMs)) {
-      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
-    }
+    await tree.close();
   }
 
   cancel(): Promise<void> {
@@ -1162,28 +1123,16 @@ export class GrokAcpTransport {
 
   /**
    * Idle release must never report success over an unconfirmed process tree;
-   * an explicit close stays tolerant and reports through its own paths.
+   * an explicit close stays tolerant and reports through its own paths. An
+   * anchored tree may be asked again after a failure; the Host-side fallback
+   * keeps its first failure rather than signalling a bare pid later.
    */
   async #reclaimOwnedGroup(owned: OwnedProcessTree, mode: ShutdownMode): Promise<void> {
     if (mode !== "release") {
       await owned.close().catch(() => undefined);
       return;
     }
-    if (!this.#ownedTreeFailed) {
-      try {
-        await owned.close();
-        return;
-      } catch (error) {
-        // The tracker holds a pid alone, so it refuses to be replayed once a
-        // cleanup failed. Later attempts must carry their own ownership proof.
-        this.#ownedTreeFailed = true;
-        throw error;
-      }
-    }
-    // The tracker will not be replayed, so the retry carries its own evidence:
-    // the recorded spawn identity decides whether this group may be signalled
-    // again, and only an observed exit counts as released.
-    await this.#confirmOwnedGroupGone();
+    await owned.close();
   }
 
   #handleUpdate(notification: SessionNotification): void {

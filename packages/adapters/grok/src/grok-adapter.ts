@@ -189,10 +189,9 @@ export interface GrokAcpTransportLike {
   cancel(): Promise<void>;
   close(): Promise<void>;
   releaseOwnedProcess(): Promise<void>;
-  ownedProcess?(): { pid: number; pgid: number; startedAtMs: number } | null;
-  stopOwnedJobs?(timeoutMs?: number): Promise<{
+  stopOwnedJobs?(): Promise<{
     quiescence: "confirmed" | "unknown";
-    proof?: { pid: number; pgid: number; scope: string };
+    proof?: { pid: number; scope: string };
   }>;
 }
 
@@ -1678,10 +1677,10 @@ class GrokHarnessSession implements HarnessSession {
 
   async stopOwnedJobs(): Promise<{
     quiescence: "confirmed" | "unknown" | "unsupported";
-    proof?: { pid: number; pgid: number; scope: string };
+    proof?: { pid: number; scope: string };
   }> {
     if (typeof this.#transport.stopOwnedJobs !== "function") return { quiescence: "unsupported" };
-    return this.#transport.stopOwnedJobs(this.#closeTimeoutMs);
+    return this.#transport.stopOwnedJobs();
   }
 
   #fault(error: GrokTransportError): void {
@@ -2163,7 +2162,7 @@ export class GrokAdapter implements HarnessAdapter {
 
   async stopOwnedJobs(session: HarnessSession): Promise<{
     quiescence: "confirmed" | "unknown" | "unsupported";
-    proof?: { pid: number; pgid: number; scope: string };
+    proof?: { pid: number; scope: string };
   }> {
     if (!(session instanceof GrokHarnessSession)) {
       return { quiescence: "unsupported" };

@@ -13,6 +13,11 @@ import {
   type OmpTurnEvent,
 } from "../src/omp-rpc-session.js";
 
+/** Fakes own no OS process, so their tree must never signal a real pid. */
+function owned(child: unknown): never {
+  return { child, tree: { close: async () => undefined }, anchored: false } as never;
+}
+
 class FakeOmpProcess extends EventEmitter {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
@@ -292,7 +297,9 @@ describe("OMP RPC session", () => {
 
   it("starts through ready/negotiation and settles a streamed text turn on agent_end", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -306,7 +313,9 @@ describe("OMP RPC session", () => {
 
   it("requests lossless Subagent forwarding when the native RPC supports it", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
 
     await session.start();
@@ -319,7 +328,9 @@ describe("OMP RPC session", () => {
 
   it("keeps Subagent forwarding disabled when an older native RPC rejects the subscription", async () => {
     const process = new FakeOmpProcess("complete", undefined, "none", false);
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
 
     await session.start();
@@ -330,7 +341,9 @@ describe("OMP RPC session", () => {
 
   it("does not replay Assistant messages from agent_end after message_end", async () => {
     const process = new FakeOmpProcess("complete", undefined, "replay");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -350,7 +363,9 @@ describe("OMP RPC session", () => {
 
   it("recovers the final Assistant message from agent_end when message_end is absent", async () => {
     const process = new FakeOmpProcess("complete", undefined, "fallback");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -370,7 +385,9 @@ describe("OMP RPC session", () => {
 
   it("bridges blocking OMP RPC UI requests and sends the selected response", async () => {
     const process = new FakeOmpProcess("complete", undefined, "approval");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -403,7 +420,9 @@ describe("OMP RPC session", () => {
 
   it("projects Subagent lifecycle frames from the RPC stream", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -434,7 +453,9 @@ describe("OMP RPC session", () => {
 
   it("correlates manual Compact RPC events without an active Prompt Turn", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     const events: OmpTurnEvent[] = [];
     await session.start();
@@ -451,7 +472,9 @@ describe("OMP RPC session", () => {
 
   it("fails a manual Compact when native compaction never reaches a terminal event", async () => {
     const process = new FakeOmpProcess("stalled");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const onFault = vi.fn();
     const session = new OmpRpcSession(
       {
@@ -508,7 +531,9 @@ describe("OMP RPC session", () => {
         .join("\n") + "\n",
     );
     const process = new FakeOmpProcess("complete", sessionFile);
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession(
       { cwd: directory, sessionFile, commandTimeoutMs: 2_000 },
       adapter,
@@ -535,7 +560,9 @@ describe("OMP RPC session", () => {
 
   it("branches to a distinct OMP session through the RPC branch command", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     await expect(session.fork("entry-1")).resolves.toMatchObject({
@@ -546,7 +573,9 @@ describe("OMP RPC session", () => {
 
   it("reads a Subagent transcript through OMP RPC", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     await expect(
@@ -561,7 +590,9 @@ describe("OMP RPC session", () => {
 
   it("forwards background Subagent frames after the parent Turn is idle", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const events: OmpTurnEvent[] = [];
     const session = new OmpRpcSession(
       {

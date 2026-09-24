@@ -1,10 +1,14 @@
 import { randomBytes } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import {
+  spawnOwnedProcess,
+  type OwnedProcess,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 
 import {
   OpenCodeExecutableError,
@@ -25,10 +29,9 @@ export interface OpenCodeServerOptions {
 
 interface SpawnOptions {
   env: NodeJS.ProcessEnv;
-  stdio: "pipe";
-  detached: boolean;
-  windowsHide: boolean;
   windowsVerbatimArguments?: boolean;
+  closeTimeoutMs: number;
+  onExitCleanupFailure(error: unknown): void;
 }
 
 export interface OpenCodeServerDependencies {
@@ -38,7 +41,11 @@ export interface OpenCodeServerDependencies {
     headers: Record<string, string>;
   }): OpencodeClient;
   randomPassword(): string;
-  spawn(command: string, args: string[], options: SpawnOptions): ChildProcessWithoutNullStreams;
+  spawn(
+    command: string,
+    args: string[],
+    options: SpawnOptions,
+  ): OwnedProcess<ChildProcessWithoutNullStreams>;
   sleep(milliseconds: number): Promise<void>;
 }
 
@@ -162,11 +169,7 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
     dependencies: OpenCodeServerDependencies = {
       createClient: (input) => createOpencodeClient(input),
       randomPassword: () => randomBytes(32).toString("base64url"),
-      spawn: (command, args, spawnOptions) =>
-        spawn(command, args, {
-          ...spawnOptions,
-          windowsVerbatimArguments: spawnOptions.windowsVerbatimArguments,
-        }),
+      spawn: (command, args, spawnOptions) => spawnOwnedProcess(command, args, spawnOptions),
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     },
   ) {
@@ -257,14 +260,17 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
       OPENCODE_SERVER_PASSWORD: password,
     };
     const invocation = openCodeServerInvocation(executable, environment);
-    let child: ChildProcessWithoutNullStreams;
+    let owned: OwnedProcess<ChildProcessWithoutNullStreams>;
     try {
-      child = this.#dependencies.spawn(invocation.command, invocation.arguments, {
+      owned = this.#dependencies.spawn(invocation.command, invocation.arguments, {
         env: environment,
-        stdio: "pipe",
-        detached: process.platform !== "win32",
-        windowsHide: true,
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+        closeTimeoutMs: this.#closeTimeoutMs,
+        onExitCleanupFailure: (error) => {
+          this.#stderrTail = sanitizeDiagnosticTail(
+            `${this.#stderrTail}OpenCode Server process cleanup failed: ${errorText(error)}\n`,
+          );
+        },
       });
     } catch (error) {
       throw new OpenCodeTransportError(
@@ -275,16 +281,9 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
         { cause: error },
       );
     }
+    const child = owned.child;
     this.#child = child;
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
-      closeTimeoutMs: this.#closeTimeoutMs,
-      onExitCleanupFailure: (error) => {
-        this.#stderrTail = sanitizeDiagnosticTail(
-          `${this.#stderrTail}OpenCode Server process cleanup failed: ${errorText(error)}\n`,
-        );
-      },
-    });
+    this.#ownedProcessTree = owned.tree;
     child.once("exit", () => {
       if (this.#child !== child) return;
       this.#connection = null;

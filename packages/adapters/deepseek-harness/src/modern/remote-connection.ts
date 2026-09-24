@@ -1,12 +1,12 @@
 /** Managed DeepSeek Harness Modern Web Remote transport. */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import type { IncomingMessage } from "node:http";
 import { StringDecoder } from "node:string_decoder";
 
 import WebSocket from "ws";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
 
 import { deepSeekProcessInvocation } from "../executable.js";
 
@@ -101,10 +101,8 @@ export interface ModernRemoteConnectionDependencies {
     args: string[],
     options: {
       env: NodeJS.ProcessEnv;
-      stdio: "pipe";
-      windowsHide: true;
       windowsVerbatimArguments: boolean;
-      detached: boolean;
+      closeTimeoutMs: number;
     },
   ) => ChildProcess;
   readonly fetch: (input: URL, init: RequestInit) => Promise<Response>;
@@ -141,7 +139,11 @@ function positiveSafeInteger(value: number, name: string, maximum: number): numb
 const managedProcessTrees = new WeakMap<ChildProcess, OwnedProcessTree>();
 
 const DEFAULT_DEPENDENCIES: ModernRemoteConnectionDependencies = {
-  spawn: (command, args, options) => spawn(command, args, options),
+  spawn: (command, args, options) => {
+    const { child, tree } = spawnOwnedProcess(command, args, options);
+    if (tree) managedProcessTrees.set(child, tree);
+    return child;
+  },
   fetch: (input, init) => globalThis.fetch(input, init),
   createWebSocket: (url, cookie, maxPayloadBytes) =>
     new WebSocket(url, {
@@ -853,22 +855,13 @@ export class ModernRemoteConnection {
     try {
       child = this.#dependencies.spawn(invocation.command, invocation.arguments, {
         env: this.#environment,
-        stdio: "pipe",
-        windowsHide: true,
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-        detached: this.#dependencies.platform !== "win32",
+        closeTimeoutMs: this.#closeTimeoutMs,
       });
     } catch (error) {
       throw this.#spawnFailure(error);
     }
     this.#child = child;
-    if (this.#dependencies.killProcessTree === DEFAULT_DEPENDENCIES.killProcessTree) {
-      const tree = trackOwnedProcessTree(child, {
-        detached: this.#dependencies.platform !== "win32",
-        closeTimeoutMs: this.#closeTimeoutMs,
-      });
-      if (tree) managedProcessTrees.set(child, tree);
-    }
     child.stderr?.on("data", (chunk: Buffer | string) => {
       const truncated =
         typeof chunk === "string"

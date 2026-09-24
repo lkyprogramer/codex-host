@@ -1,11 +1,10 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
-import { execFile } from "node:child_process";
-import { promisify } from "node:util";
 import { setTimeout as delay } from "node:timers/promises";
 import {
   commandInvocation,
-  trackOwnedProcessTree,
+  runOwnedProcess,
+  spawnOwnedProcess,
   type OwnedProcessTree,
 } from "@codexhost/harness-discovery";
 
@@ -324,16 +323,21 @@ export class KiroAcpTransport {
         environment,
         process.platform,
       );
-      const { stdout } = await promisify(execFile)(invocation.command, invocation.arguments, {
+      // A timed-out listing is stopped as a whole tree, not just its leader.
+      const listing = await runOwnedProcess(invocation.command, invocation.arguments, {
         cwd: this.#options.cwd,
         env: environment,
-        windowsHide: true,
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-        timeout: this.#commandTimeoutMs,
-        maxBuffer: 1024 * 1024,
-        encoding: "utf8",
+        timeoutMs: this.#commandTimeoutMs,
+        maxOutputBytes: 1024 * 1024,
+        closeTimeoutMs: this.#closeTimeoutMs,
       });
-      return { ...initialize, catalog: parseKiroCliModels(JSON.parse(stdout)) };
+      if (listing.code !== 0) {
+        throw new Error(
+          `Kiro model listing exited with ${listing.signal ?? `code ${String(listing.code)}`}: ${listing.stderr.trim()}`,
+        );
+      }
+      return { ...initialize, catalog: parseKiroCliModels(JSON.parse(listing.stdout)) };
     } catch (error) {
       const classified = classifyStartupError(error);
       await this.close().catch(() => undefined);
@@ -707,17 +711,10 @@ export class KiroAcpTransport {
     });
     const invocation = kiroInvocation(executable);
 
-    const child = spawn(invocation.command, invocation.arguments, {
+    const { child, tree } = spawnOwnedProcess(invocation.command, invocation.arguments, {
       cwd: this.#options.cwd,
       env: { ...process.env, ...this.#options.environment },
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-    });
-    this.#child = child;
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
       closeTimeoutMs: this.#closeTimeoutMs,
       onExitCleanupFailure: (error) =>
         this.#fault(
@@ -727,6 +724,8 @@ export class KiroAcpTransport {
           ),
         ),
     });
+    this.#child = child;
+    this.#ownedProcessTree = tree;
 
     child.stderr.on("data", (chunk: Buffer | string) => {
       this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);

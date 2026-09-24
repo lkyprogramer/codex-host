@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 
 import {
   query,
@@ -10,6 +10,7 @@ import {
   type SpawnOptions,
 } from "@anthropic-ai/claude-agent-sdk";
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
+import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import type { HarnessAccountSnapshot, HarnessThinkingOptionId } from "@codexhost/shared-contracts";
 import { projectClaudeAccountUsage } from "./account-usage.js";
 
@@ -17,7 +18,6 @@ import { resolveClaudeCodeExecutable, withNodeRuntimeOnPath } from "./command.js
 import type { ClaudeModelInspectionSnapshot } from "./model-catalog.js";
 import { ClaudeNativeTurnAccumulator, parseClaudePlanLimitEvent } from "./native-message.js";
 import { isClaudePermissionMode, type ClaudePermissionMode } from "./permission-modes.js";
-import { closeClaudeProcessGroup } from "./process-fence.js";
 import { claudeThinkingConfiguration, parseClaudeThinkingOptionId } from "./thinking-options.js";
 import type {
   ClaudeApprovalRequest,
@@ -364,7 +364,7 @@ function canDeliverSettlementImmediately(
 
 export class ClaudeSdkTransport implements ClaudeTurnTransport {
   readonly sessionId: string;
-  readonly #children: ChildProcessWithoutNullStreams[] = [];
+  readonly #owned: OwnedChild[] = [];
   readonly #abortTimeoutMs: number;
   readonly #closeTimeoutMs: number;
   readonly #command: string | undefined;
@@ -828,15 +828,14 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
       failures.push(error);
     }
     const stopOwnedProcesses = async (): Promise<void> => {
-      // A Windows root that already left cannot be enumerated; Unix groups are
-      // still signalled so a wrapper's surviving children are covered.
+      // A Windows root that already left cannot be enumerated. Everywhere else
+      // the owned tree confirms the whole group, including a wrapper's
+      // surviving children, and may be asked again after a failed attempt.
       const owned =
         process.platform === "win32"
-          ? this.#children.filter((child) => !processExited(child))
-          : this.#children;
-      const stopped = await Promise.allSettled(
-        owned.map((child) => closeClaudeProcessGroup(child, this.#closeTimeoutMs)),
-      );
+          ? this.#owned.filter(({ child }) => !processExited(child))
+          : this.#owned;
+      const stopped = await Promise.allSettled(owned.map(({ tree }) => tree?.close()));
       for (const result of stopped) if (result.status === "rejected") failures.push(result.reason);
     };
     // Ending the prompt stream makes the SDK close the CLI's stdin, and the CLI
@@ -845,7 +844,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     // lands between an OAuth refresh and its write-back strands the rotated token
     // for every process sharing the credentials.
     this.#input.end();
-    await awaitNaturalExit(this.#children, this.#closeTimeoutMs);
+    await awaitNaturalExit(children(this.#owned), this.#closeTimeoutMs);
     // taskkill needs a living root to enumerate the Windows tree. Unix groups remain addressable
     // after their root exits, so let the SDK initiate its native cleanup first there.
     if (process.platform === "win32") await stopOwnedProcesses();
@@ -858,7 +857,7 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     const exitTimeout = rejectAfter(this.#closeTimeoutMs, "Claude SDK process did not exit");
     try {
       await Promise.race([
-        Promise.all(this.#children.map(waitForProcessExit)),
+        Promise.all(children(this.#owned).map(waitForProcessExit)),
         exitTimeout.promise,
       ]);
     } catch (error) {
@@ -1038,20 +1037,47 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
   }
 
   #spawn(options: SpawnOptions): ChildProcessWithoutNullStreams {
-    const child = spawn(options.command, options.args, {
-      cwd: options.cwd,
-      env: options.env,
-      signal: options.signal,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      detached: process.platform !== "win32",
+    const owned = spawnOwnedChild(options, this.#closeTimeoutMs, (message) => {
+      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${message}`);
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
-    });
-    this.#children.push(child);
-    return child;
+    this.#owned.push(owned);
+    return owned.child;
   }
+}
+
+/** One CLI process and the tree that owns everything it started. */
+interface OwnedChild {
+  child: ChildProcessWithoutNullStreams;
+  tree: OwnedProcessTree | null;
+}
+
+function children(owned: readonly OwnedChild[]): ChildProcessWithoutNullStreams[] {
+  return owned.map(({ child }) => child);
+}
+
+/**
+ * The SDK spawn hook. The owned tree reclaims whatever a CLI leaves behind
+ * when it exits on its own (MCP servers, background shells) and confirms the
+ * whole group on close; a cleanup failure after such an exit is diagnostic.
+ */
+function spawnOwnedChild(
+  options: SpawnOptions,
+  closeTimeoutMs: number,
+  diagnose: (message: string) => void,
+): OwnedChild {
+  const { child, tree } = spawnOwnedProcess(options.command, options.args, {
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+    env: options.env,
+    signal: options.signal,
+    closeTimeoutMs,
+    onExitCleanupFailure: (error) => {
+      if (process.platform !== "win32") {
+        diagnose(`Claude CLI process cleanup failed: ${String(error)}\n`);
+      }
+    },
+  });
+  child.stderr.on("data", (chunk: Buffer | string) => diagnose(chunk.toString()));
+  return { child, tree };
 }
 
 async function readAccountUsage(activeQuery: Query): Promise<HarnessAccountSnapshot | null> {
@@ -1081,7 +1107,7 @@ async function awaitNaturalExit(
 }
 
 export class ClaudeSdkModelInspector implements ClaudeModelInspector {
-  readonly #children: ChildProcessWithoutNullStreams[] = [];
+  readonly #owned: OwnedChild[] = [];
   #stderrTail = "";
   readonly #closeTimeoutMs: number;
   readonly #command: string | undefined;
@@ -1179,7 +1205,7 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
     // in-flight request (a usage probe can be the one that refreshes OAuth) and
     // leave on stdin EOF before any signal is sent.
     this.#input.end();
-    await awaitNaturalExit(this.#children, this.#closeTimeoutMs);
+    await awaitNaturalExit(children(this.#owned), this.#closeTimeoutMs);
     try {
       this.#query?.close();
     } catch (error) {
@@ -1190,12 +1216,9 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
       // Reclaim the whole owned group: MCP servers from user settings outlive a
       // CLI that had to be killed. Inspection stays best effort, so a group that
       // cannot be confirmed must not replace the inspection result.
-      // TERM and KILL each get half the budget, so a stuck group costs inspect()
-      // no more than the single signal window it had before group reclaim.
-      const phaseMs = Math.max(1, Math.ceil(this.#closeTimeoutMs / 2));
-      const stopped = await Promise.allSettled(
-        this.#children.map((child) => closeClaudeProcessGroup(child, phaseMs)),
-      );
+      // Each tree was created with half the budget per phase (see #spawn), so
+      // a stuck group costs inspect() no more than one signal window.
+      const stopped = await Promise.allSettled(this.#owned.map(({ tree }) => tree?.close()));
       for (const result of stopped) {
         if (result.status === "rejected") {
           process.emitWarning(
@@ -1206,32 +1229,27 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
       this.#query = null;
       return;
     }
-    for (const child of this.#children) {
+    for (const child of children(this.#owned)) {
       if (!processExited(child)) child.kill("SIGTERM");
     }
     await Promise.race([
-      Promise.all(this.#children.map(waitForProcessExit)),
+      Promise.all(children(this.#owned).map(waitForProcessExit)),
       delay(this.#closeTimeoutMs),
     ]);
-    for (const child of this.#children) {
+    for (const child of children(this.#owned)) {
       if (!processExited(child)) child.kill("SIGKILL");
     }
     this.#query = null;
   }
 
   #spawn(options: SpawnOptions): ChildProcessWithoutNullStreams {
-    const child = spawn(options.command, options.args, {
-      cwd: options.cwd,
-      env: options.env,
-      signal: options.signal,
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      detached: process.platform !== "win32",
+    // TERM and KILL each get half the budget, so a stuck group costs inspect()
+    // no more than the single signal window it had before group reclaim.
+    const phaseMs = Math.max(1, Math.ceil(this.#closeTimeoutMs / 2));
+    const owned = spawnOwnedChild(options, phaseMs, (message) => {
+      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${message}`);
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
-    });
-    this.#children.push(child);
-    return child;
+    this.#owned.push(owned);
+    return owned.child;
   }
 }
