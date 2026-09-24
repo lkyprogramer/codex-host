@@ -28,9 +28,15 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 
 清理只能针对 Adapter 创建并跟踪的资源。禁止通过进程名称批量结束同名 CLI，或把截图中的 PID 当作永久有效的所有权依据。
 
-回收前必须能把目标重新归属到本次 spawn：进程句柄尚未观察到退出，或组 id 未被内核回收，都足以证明剩余成员仍属本次 spawn；否则用启动时记录的身份证据核对，避免 pid 复用后误杀他人。无法证明所有权时不发信号，按未确认失败——「读不到身份证据」必须与「证据不匹配」区分开，前者不得当作已释放。
+Adapter 只通过 `harness-discovery` 的 `spawnOwnedProcess` 创建自己拥有的 Harness 进程，不直接对 pid 发信号；`tools/check-boundaries.mjs` 禁止生产代码出现 `process.kill(-pid)`。macOS 与 Linux 上，Shim 注入 `CODEXHOST_PROCESS_ANCHOR_PATH`，每个 Harness 由原生 `codexhost-anchor` 启动并拥有（设计见[进程 Anchor 与整改计划](process-anchor-remediation-plan.md)）：
 
-Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关闭需要有界 TERM → KILL，并观察整个受管组的退出；Windows 需要平台自己的进程树关闭与结果检查。丢失所有权或无法验证退出时返回失败，不能报告成功。
+- anchor 以独立进程组创建 Harness，并在组内还有存活成员时绝不回收 leader，所以组号不可能被复用；对组发信号永远只命中本次 spawn，失败后的重试天然安全。
+- 关闭为有界 TERM → KILL，只有组内不再有非僵尸成员才报告已释放；只剩僵尸不再与「仍存活」混淆。
+- leader 自行退出时，anchor 立即回收它留下的 MCP、后台 shell 等进程；Host 看到的 `exit` 仍是 Harness 自己的退出码或信号，只是在组清空之后才到达。
+- Host 以任何方式退出（包括被 SIGKILL）时，anchor 的控制通道断开，它独立结束整组，Shim 是否存活都不影响。
+- Linux 上 anchor 是 subreaper，`setsid` / double fork 逃出组的后代会被收养并一并回收；macOS 没有对应原语，这类后代仍依赖 Shim 的全局账本兜底。
+
+Windows、或找不到 anchor 的开发环境回退到 Host 侧 tracker：leader 退出即开始回收，失败后不重放（它只持有 pid），按未确认失败处理。丢失所有权或无法验证退出时返回失败，不能报告成功。
 
 不同 Session 的环境、执行策略和 cwd 仍保持隔离；资源回收不是把所有 Session 合并到一个共享 Server。
 

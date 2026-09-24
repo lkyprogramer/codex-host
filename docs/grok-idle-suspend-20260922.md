@@ -10,6 +10,8 @@
 
 1. `GrokHarnessSession.resourceLifecycle.suspend`：信号已中止，或 Session 已关闭 / 故障，返回 `unknown`；活动 Turn、压缩、配置、待回答审批，或 `#backgroundSubagents` 仍有原生后台子代理，返回 `busy`；还没有核对过的 Native Turn，返回 `unknown`。准入通过后同步进入 closing，再释放受管进程组。成功时 scope 为 `grok-acp-session`，并结束输出通道。
 2. 空闲释放调用 `releaseOwnedProcess`。Unix 下先结束 stdin，再给 leader 一段有界时间按 EOF 自行退出（`updates.jsonl` 由它写完），随后用 `trackOwnedProcessTree` 确认整个受管进程组退出；Windows 不先送 EOF，直接走 taskkill 进程树关闭，因为 root 先退出后无法再确认整棵树——这相对改动前是 Grok 破坏性 `close` 的行为变化（Windows 上 CLI 不再有 EOF 刷盘窗口），与 Kiro 的同类实现一致。不调用 ACP `session/close`，也不调用 `_x.ai/session/delete`。本地 `updates.jsonl` 仍是 `session/load` 的恢复来源。显式 `close` / `stopOwnedJobs` 仍会发送 `session/close`（能力声明存在时）。
+> 2026-09-24 起，本条与下列所有权规则已由原生进程 anchor 取代：Grok 通过 `spawnOwnedProcess` 启动，释放与重试都由 anchor 确认同一个被钉住的进程组，`owned-group.ts` 与 `ps -o lstart` 身份证明已删除。以下保留为当时的设计记录，见[进程 Anchor 与整改计划](process-anchor-remediation-plan.md)。
+
 3. 进程组没有退出时释放失败，Transport 不标记为已关闭，Session 回到 open，返回 `unknown` 并带上原始失败原因，Host 按既有退避重试。`trackOwnedProcessTree` 只持有 pid，一次清理失败后不再重放（否则会对可能被复用的 pid 发信号），因此重试改用 `owned-group.ts` 的 `reclaimOwnedGroup`。它在发信号前先判定所有权：
 
 - leader 已不在：组 id 在成员未清空前不会被内核回收，所以剩下的必是本次 spawn 的子孙，可以发信号；

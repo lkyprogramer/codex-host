@@ -58,19 +58,22 @@ Node 以 `stdio[3] = "pipe"` 创建一个双向 socket，anchor 在 fd 3 上收�
 spawnOwnedProcess(command, args, {
   cwd, env, stdio, windowsHide, windowsVerbatimArguments,
   closeTimeoutMs, onExitCleanupFailure,
-}): { child: ChildProcess; tree: OwnedProcessTree; anchored: boolean }
+}): { child: ChildProcess; tree: OwnedProcessTree | null; anchored: boolean }
 ```
 
 - anchor 可用（POSIX 且 `CODEXHOST_PROCESS_ANCHOR_PATH` 指向可执行文件）时：`child` 是 anchor 进程（stdin/stdout/stderr 即 Harness 的管道），`tree.close()` 发送 terminate 并等待 anchor 以“已确认为空”退出；收到 `unconfirmed` 时 reject，**可以再次调用重试**。
 - anchor 的 `spawnError` 转成 `child` 上的 `error` 事件（带 `code`），保留 Adapter 现有的 ENOENT 等启动错误处理。
 - anchor 不可用（Windows、找不到二进制的开发 / 测试环境）时回退到现有 `detached` + `trackOwnedProcessTree`，语义与现在相同（失败不重试，fail-closed）。
-- Adapter 不再直接对任何 pid 发信号；`packages/` 中禁止负 pid 的 `process.kill` 与 `taskkill`（除 `harness-discovery` 的回退实现），由 `tools/check-boundaries.mjs` 检查。
+- 一次性的短命令（模型目录、额度、版本探测）使用 `runOwnedProcess`：超时、超出输出上限或被中止时，整棵进程树停止后才 reject。
+- Adapter 不再直接对任何 pid 发信号：`packages/*/src` 中除 `harness-discovery` 的回退 tracker 外禁止 `process.kill(-pid)`，由 `tools/check-boundaries.mjs` 按语法树检查。Windows 的 `taskkill` 目前只存在于该回退 tracker，阶段 D 由 Windows anchor 取代。
 
 ### 3.4 打包与定位
 
 - 新 crate `crates/anchor`，二进制 `codexhost-anchor`，纳入 workspace 默认成员与 `build:rust`。
 - 安装布局与 `codexhost-shim` 同目录（`libexec/`）；开发环境同在 `target/debug/`。
 - Shim 启动 Host 时注入 `CODEXHOST_PROCESS_ANCHOR_PATH`（Shim 所在目录下的 `codexhost-anchor`，存在才注入）。
+- 远程 SSH Host 的 wrapper 是 Shim 的拷贝，anchor 不在它旁边；受管 profile 在原 Shim 旁的 anchor 可执行时导出该变量。
+- `npm run test:typescript` 先编译 anchor，`tests/vitest.setup.js` 为整个测试套件注入它，所有 Adapter 的真实进程测试都走生产路径。
 - 发行 payload 与 npm 包加入该二进制，并参与现有签名 / 公证流程。
 
 ### 3.5 能消除的问题
@@ -165,6 +168,21 @@ spawnOwnedProcess(command, args, {
 
 - Claude 释放未确认期间旧进程写入的原生历史不会投影到 Host（见 `harness-resource-lifecycle.md`）。anchor 落地后，释放失败只剩“组内进程拒绝退出”这一种情况，概率进一步降低。
 - Antigravity 历史孤儿子任务判定依赖“每个 Turn 进程等待自己的子任务”这一前提。
+
+### 4.6 阶段 A 完成情况（分支 `feat/process-anchor`）
+
+| ID | 状态 | 说明 |
+| --- | --- | --- |
+| PL-1 | 已修（POSIX） | lifeline：Host 被 SIGKILL 后整棵 Harness 树退出，由 `harness-discovery` 与 anchor 集成测试覆盖 |
+| PL-2 | 已修 | Grok 改用 `spawnOwnedProcess`；`owned-group.ts` 与同步 `ps` 已删除 |
+| PL-3 | 已修 | DeepSeek 版本探测与 modern Web 均经 owned tree；`killDeepSeekProcessTree` 已删除 |
+| PL-4 | 已修 | Claude CLI 退出即回收组内剩余进程；`process-fence.ts` 已删除 |
+| PL-5 | 已修（POSIX） | leader 未回收即钉住组号 |
+| PL-6 | 已修（POSIX） | anchor 下 `close()` 失败后可重试；回退 tracker 仍按设计 fail-closed |
+| PL-7 | POSIX 已修 | Kiro `list-models`、Antigravity `runBuffered` 改用 `runOwnedProcess`；Windows 部分留在阶段 D |
+| PL-8 | 已修 | TS 中只剩 `harness-discovery` 的回退 tracker 对进程组发信号，边界检查强制 |
+
+阶段 A 顺带去掉了测试中的一类隐患：Pi、OMP、OpenCode 的 fake 进程带固定 pid（42000、45001、91337），以前被真实 tracker 接管，close 时会对同号的真实进程组发信号；现在 fake 只返回不接触系统进程的 fake tree。
 
 ## 5. 修复顺序
 
