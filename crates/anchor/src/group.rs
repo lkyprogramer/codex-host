@@ -93,7 +93,9 @@ mod macos {
         if written == size {
             return Ok(Some((info.pbsi_status, info.pbsi_pgid)));
         }
-        if std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
+        // errno describes only a failed call; a short positive read leaves a
+        // stale value that must not turn a live member into a missing one.
+        if written <= 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH) {
             return Ok(None);
         }
         Err(())

@@ -11,7 +11,8 @@ use serde_json::Value;
 const MAX_GRACE: Duration = Duration::from_secs(600);
 /// A command line longer than this is discarded rather than buffered forever.
 const MAX_LINE_BYTES: usize = 64 * 1024;
-const WRITE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Bound for the last messages written just before the anchor exits.
+const EXIT_FLUSH_TIMEOUT: Duration = Duration::from_secs(1);
 
 pub enum Command {
     Terminate { grace: Duration },
@@ -26,18 +27,26 @@ pub enum Received {
 pub struct Control {
     stream: UnixStream,
     pending: Vec<u8>,
+    /// Bytes not yet accepted by the socket. Kept whole, so a Host that is
+    /// slow to read never receives half a line glued to the next message.
+    outbound: Vec<u8>,
 }
 
 impl Control {
     pub fn new(fd: OwnedFd) -> Self {
         let stream = UnixStream::from(fd);
-        // A Host that stops reading without closing must not stall
-        // supervision; its messages are best effort anyway.
-        let _ = stream.set_write_timeout(Some(WRITE_TIMEOUT));
+        // Supervision must never stall on a Host that stops reading.
+        let _ = stream.set_nonblocking(true);
         Self {
             stream,
             pending: Vec::new(),
+            outbound: Vec::new(),
         }
+    }
+
+    /// True while queued messages wait for the socket to become writable.
+    pub fn wants_write(&self) -> bool {
+        !self.outbound.is_empty()
     }
 
     pub fn fd(&self) -> BorrowedFd<'_> {
@@ -62,11 +71,46 @@ impl Control {
         }
     }
 
-    /// Best effort: a Host that stopped reading has nothing left to learn.
+    /// Queues one line and writes as much as the socket accepts now.
     pub fn send(&mut self, message: &Value) {
-        let mut line = message.to_string();
-        line.push('\n');
-        let _ = self.stream.write_all(line.as_bytes());
+        self.outbound
+            .extend_from_slice(message.to_string().as_bytes());
+        self.outbound.push(b'\n');
+        self.flush();
+    }
+
+    /// Writes queued bytes until the socket would block.
+    pub fn flush(&mut self) {
+        while !self.outbound.is_empty() {
+            match self.stream.write(&self.outbound) {
+                Ok(0) => {
+                    self.outbound.clear();
+                    return;
+                }
+                Ok(written) => {
+                    self.outbound.drain(..written);
+                }
+                Err(error) if error.kind() == ErrorKind::Interrupted => {}
+                Err(error) if error.kind() == ErrorKind::WouldBlock => return,
+                // The Host is gone: nobody is left to read anything.
+                Err(_) => {
+                    self.outbound.clear();
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The anchor is about to exit: give its last messages (`released`,
+    /// `spawnError`) a bounded chance to reach a Host that is still reading.
+    pub fn flush_before_exit(&mut self) {
+        if self.outbound.is_empty() {
+            return;
+        }
+        let _ = self.stream.set_nonblocking(false);
+        let _ = self.stream.set_write_timeout(Some(EXIT_FLUSH_TIMEOUT));
+        let _ = self.stream.write_all(&self.outbound);
+        self.outbound.clear();
     }
 
     fn drain_lines(&mut self) -> Vec<Command> {
@@ -139,5 +183,34 @@ mod tests {
         assert!(matches!(control.receive(), Received::Commands(commands) if commands.len() == 2));
         drop(host);
         assert!(matches!(control.receive(), Received::Closed));
+    }
+
+    #[test]
+    fn never_blocks_or_splits_lines_when_the_host_is_slow() {
+        let (left, right) = UnixStream::pair().unwrap();
+        let mut control = Control::new(OwnedFd::from(left));
+        // Far more than a socket buffer holds, with nobody reading yet.
+        for index in 0..20_000 {
+            control.send(&serde_json::json!({ "type": "diagnostic", "message": index }));
+        }
+        assert!(control.wants_write());
+        let reader = std::thread::spawn(move || {
+            let mut text = String::new();
+            let mut host = right;
+            host.read_to_string(&mut text).unwrap();
+            text
+        });
+        while control.wants_write() {
+            control.flush();
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        drop(control);
+        let text = reader.join().unwrap();
+        let lines: Vec<&str> = text.lines().collect();
+        assert_eq!(lines.len(), 20_000);
+        for (index, line) in lines.iter().enumerate() {
+            let value: Value = serde_json::from_str(line).unwrap();
+            assert_eq!(value["message"], index);
+        }
     }
 }

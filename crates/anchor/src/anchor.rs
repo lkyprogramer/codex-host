@@ -236,6 +236,14 @@ impl Anchor {
         }
     }
 
+    /// Ends the anchor once its final messages had a chance to be read.
+    fn exit(&mut self, code: i32) -> ! {
+        if let Some(control) = self.control.as_mut() {
+            control.flush_before_exit();
+        }
+        std::process::exit(code);
+    }
+
     /// Standard error is /dev/null once the Harness runs; the Host is told
     /// why a group cannot be observed or fully owned instead.
     fn diagnose(&mut self, message: String) {
@@ -284,7 +292,7 @@ impl Anchor {
                     "code": code,
                     "message": error.to_string(),
                 }));
-                std::process::exit(EXIT_SPAWN_FAILED);
+                self.exit(EXIT_SPAWN_FAILED);
             }
         }
     }
@@ -300,28 +308,38 @@ impl Anchor {
             } else {
                 IDLE_TICK
             };
-            let (control_ready, child_ready, termination_ready) = {
+            let (control_ready, control_writable, child_ready, termination_ready) = {
                 let mut descriptors = vec![
                     PollFd::new(wakeups.child.as_fd(), PollFlags::POLLIN),
                     PollFd::new(wakeups.termination.as_fd(), PollFlags::POLLIN),
                 ];
                 if let Some(control) = self.control.as_ref() {
-                    descriptors.push(PollFd::new(control.fd(), PollFlags::POLLIN));
+                    let interest = if control.wants_write() {
+                        PollFlags::POLLIN | PollFlags::POLLOUT
+                    } else {
+                        PollFlags::POLLIN
+                    };
+                    descriptors.push(PollFd::new(control.fd(), interest));
                 }
                 let timeout = PollTimeout::try_from(tick).unwrap_or(PollTimeout::MAX);
                 let _ = poll(&mut descriptors, timeout);
-                let ready = |index: usize| {
+                let events = |index: usize, wanted: PollFlags| {
                     descriptors
                         .get(index)
                         .and_then(PollFd::revents)
-                        .is_some_and(|events| {
-                            events.intersects(
-                                PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR,
-                            )
-                        })
+                        .is_some_and(|events| events.intersects(wanted))
                 };
-                (ready(2), ready(0), ready(1))
+                let readable = PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR;
+                (
+                    events(2, readable),
+                    events(2, PollFlags::POLLOUT),
+                    events(0, readable),
+                    events(1, readable),
+                )
             };
+            if control_writable && let Some(control) = self.control.as_mut() {
+                control.flush();
+            }
             if child_ready && Wakeups::drain(&mut wakeups.child) {
                 self.reap_adopted();
             }
@@ -382,6 +400,8 @@ impl Anchor {
                     self.signal_all(Signal::SIGKILL);
                 } else if now + grace < until {
                     termination.stage = Stage::Graceful { until: now + grace };
+                    // The forced window follows the grace that now applies.
+                    termination.grace = grace;
                 }
             }
             return;
@@ -471,7 +491,7 @@ impl Anchor {
                     if now.duration_since(orphaned_at) >= ORPHANED_RETRY_LIMIT {
                         // Exiting releases the pinned group id, but a group
                         // that survives this many KILLs is beyond the anchor.
-                        std::process::exit(EXIT_ABANDONED);
+                        self.exit(EXIT_ABANDONED);
                     }
                     self.request_termination(self.lifeline_grace);
                 }
@@ -488,6 +508,9 @@ impl Anchor {
     /// Host's `exit` event reports the Harness, not the anchor.
     fn finish(&mut self, leader: Pid, exit: LeaderExit) -> ! {
         self.send(json!({ "type": "released" }));
+        if let Some(control) = self.control.as_mut() {
+            control.flush_before_exit();
+        }
         let _ = waitpid(leader, None);
         match exit {
             LeaderExit::Code(code) => std::process::exit(code),
