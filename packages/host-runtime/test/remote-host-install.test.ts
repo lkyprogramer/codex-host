@@ -221,6 +221,10 @@ describe("remote SSH Host installation", () => {
       );
       expect(profile).toContain(`export CODEXHOST_HOST_RUNTIME_PATH='${hostRuntimePath}'`);
       expect(profile).toContain("export CODEXHOST_REMOTE_SSH_MANAGED='1'");
+      const anchorPath = path.join(path.dirname(shimPath), "codexhost-anchor");
+      expect(profile).toContain(
+        `if [ -x '${anchorPath}' ]; then export CODEXHOST_PROCESS_ANCHOR_PATH='${anchorPath}'; fi`,
+      );
       expect(profile).toContain(`export CODEXHOST_CLAUDE_COMMAND='${claudeCommand}'`);
       expect(profile).toContain(
         `CODEXHOST_DATA_DIR='${path.join(home, ".codexhost", "remote", "data")}'`,

@@ -129,6 +129,7 @@ export function npmReleaseBuildCommands(
         "codexhost-shim",
         "--package",
         "codexhost-updater",
+        ...(target.hostPlatform === "win32" ? [] : ["--package", "codexhost-anchor"]),
       ],
     },
   ];
@@ -205,6 +206,7 @@ export function expectedNpmPackagePaths(target) {
     `libexec/codexhost-shim${target.executableSuffix}`,
     ...(target.hostPlatform === "win32" ? ["libexec/codexhost-node-repl.exe"] : []),
     `libexec/codexhost-updater${target.executableSuffix}`,
+    ...(target.hostPlatform === "win32" ? [] : ["libexec/codexhost-anchor"]),
     "app/codexhost-distribution.json",
     "app/desktop-controller.mjs",
     "app/host-runtime.mjs",
@@ -965,6 +967,14 @@ export async function prepareNpmPackage({
     "npm Updater",
     true,
   );
+  if (target.hostPlatform !== "win32") {
+    await copyReleaseFile(
+      path.join(rustOutput, "codexhost-anchor"),
+      path.join(packageRoot, "libexec", "codexhost-anchor"),
+      "npm process anchor",
+      true,
+    );
+  }
 
   await runCommand(
     {

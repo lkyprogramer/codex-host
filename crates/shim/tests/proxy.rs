@@ -1258,6 +1258,19 @@ fn forwards_validated_host_runtime_paths_to_the_host_runtime() {
             .any(|line| line == format!("host_runtime_path={expected}")),
         "Host Runtime did not inherit the validated runtime path: {identity}"
     );
+    // The anchor ships beside the Shim; the Host is told where only if it exists.
+    let anchor = shim_path().with_file_name("codexhost-anchor");
+    let expected_anchor = if cfg!(target_os = "windows") || !anchor.is_file() {
+        String::new()
+    } else {
+        anchor.display().to_string()
+    };
+    assert!(
+        identity
+            .lines()
+            .any(|line| line == format!("process_anchor_path={expected_anchor}")),
+        "Host Runtime did not receive the process anchor path: {identity}"
+    );
 
     drop(stdin);
     if !wait_for_process_exit(&mut shim, Duration::from_secs(5)) {

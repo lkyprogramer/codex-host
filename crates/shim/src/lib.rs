@@ -29,6 +29,8 @@ pub type ShimResult<T> = Result<T, Box<dyn Error>>;
 
 pub const HOST_NODE_PATH_ENV: &str = "CODEXHOST_HOST_NODE_PATH";
 pub const HOST_RUNTIME_PATH_ENV: &str = "CODEXHOST_HOST_RUNTIME_PATH";
+/// Where the Host finds the native process anchor that owns each Harness.
+pub const PROCESS_ANCHOR_PATH_ENV: &str = "CODEXHOST_PROCESS_ANCHOR_PATH";
 pub const REMOTE_SSH_MANAGED_ENV: &str = "CODEXHOST_REMOTE_SSH_MANAGED";
 const DATA_DIRECTORY_ENV: &str = "CODEXHOST_DATA_DIR";
 const LAUNCHER_PID_ENV: &str = "CODEXHOST_LAUNCHER_PID";
@@ -689,6 +691,10 @@ fn child_command(
                 if inherited_remote_profile {
                     command.env_remove(DATA_DIRECTORY_ENV);
                 }
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                if let Some(anchor) = process_anchor_path(current_executable) {
+                    command.env(PROCESS_ANCHOR_PATH_ENV, anchor);
+                }
                 command.envs(remote_proxy_environment);
                 configure_background_command(&mut command);
                 return Ok(command);
@@ -719,11 +725,20 @@ fn child_command(
         .env_remove(CODEX_CLI_PATH_ENV)
         .env_remove(HOST_NODE_PATH_ENV)
         .env_remove(HOST_RUNTIME_PATH_ENV)
+        .env_remove(PROCESS_ANCHOR_PATH_ENV)
         .env_remove(REMOTE_SSH_MANAGED_ENV)
         .env_remove(REMOTE_LISTENER_CHILD_ENV);
     command.envs(remote_proxy_environment);
     configure_background_command(&mut command);
     Ok(command)
+}
+
+/// The anchor ships beside the Shim in every layout: `libexec/` when
+/// installed, the Cargo target directory in a source checkout.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn process_anchor_path(shim: &Path) -> Option<PathBuf> {
+    let anchor = shim.with_file_name("codexhost-anchor");
+    anchor.is_file().then_some(anchor)
 }
 
 /// Resolve the official CLI for both the launcher-managed process tree and

@@ -92,7 +92,7 @@ describe("release Payload", () => {
       await createPayload(root, target);
       const paths = await validatePayload({ payloadRoot: root, target, root: "/repo/source" });
       expect(paths).toEqual(expectedPayloadPaths(target));
-      expect(paths).toHaveLength(20 + preinstalledHarnessPluginPaths().length);
+      expect(paths).toHaveLength(21 + preinstalledHarnessPluginPaths().length);
       expect(expectedPayloadPaths(releaseTarget("windows-x64"))).toHaveLength(
         22 + preinstalledHarnessPluginPaths().length,
       );
@@ -106,6 +106,10 @@ describe("release Payload", () => {
         "bin/codexhost-start.exe",
       );
       expect(paths).toContain("libexec/codexhost-updater");
+      expect(paths).toContain("libexec/codexhost-anchor");
+      expect(expectedPayloadPaths(releaseTarget("windows-x64"))).not.toContain(
+        "libexec/codexhost-anchor",
+      );
       expect(paths).toContain("app/codexhost-distribution.json");
       expect(paths).not.toContain("release-manifest.json");
       expect(paths).not.toContain("SHA256SUMS.txt");

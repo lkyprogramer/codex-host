@@ -361,6 +361,7 @@ describe("npm package release", () => {
     expect(commands.at(-1).args).toContain("codexhost-launcher");
     expect(commands.at(-1).args).toContain("codexhost-shim");
     expect(commands.at(-1).args).toContain("codexhost-updater");
+    expect(commands.at(-1).args).toContain("codexhost-anchor");
     expect(commands.at(-1).args).not.toContain("codexhost-platform");
   });
 
@@ -641,6 +642,10 @@ describe("npm package release", () => {
       );
       expect(paths).not.toContain("libexec/codexhost-node-repl");
       expect(paths).toContain("libexec/codexhost-updater");
+      expect(paths).toContain("libexec/codexhost-anchor");
+      expect(expectedNpmPackagePaths(releaseTarget("windows-x64"))).not.toContain(
+        "libexec/codexhost-anchor",
+      );
       expect(paths).toContain("app/codexhost-distribution.json");
       await mkdir(path.join(root, "runtime"), { recursive: true });
       await writeFile(path.join(root, "runtime/node"), "unexpected");

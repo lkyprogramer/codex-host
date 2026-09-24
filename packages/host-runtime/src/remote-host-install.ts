@@ -236,6 +236,10 @@ function removeManagedProfileBlock(contents: string): string {
 
 function installManagedProfileBlock(contents: string, manifest: RemoteHostManifestV1): string {
   const base = removeManagedProfileBlock(contents);
+  // The wrapper is a copy of the Shim, so the process anchor is not beside it.
+  // The package ships it beside the original Shim; the Host falls back to its
+  // own process tracking when an older package has none.
+  const processAnchorPath = path.join(path.dirname(manifest.shimPath), "codexhost-anchor");
   const environment = [
     `export CODEX_INSTALL_DIR=${shellQuote(path.dirname(manifest.wrapperPath))}`,
     `export PATH=${shellQuote(path.dirname(manifest.wrapperPath))}:${shellQuote(path.dirname(manifest.nodePath))}:${shellQuote(path.dirname(manifest.stockCodexPath))}:"\${PATH:-/usr/local/bin:/usr/bin:/bin}"`,
@@ -245,6 +249,7 @@ function installManagedProfileBlock(contents: string, manifest: RemoteHostManife
     `export CODEXHOST_DATA_DIR=${shellQuote(manifest.dataDirectory)}`,
     "export CODEXHOST_DEFAULT_AGENT='codex'",
     "export CODEXHOST_REMOTE_SSH_MANAGED='1'",
+    `if [ -x ${shellQuote(processAnchorPath)} ]; then export CODEXHOST_PROCESS_ANCHOR_PATH=${shellQuote(processAnchorPath)}; fi`,
     ...(manifest.claudeCommand
       ? [`export CODEXHOST_CLAUDE_COMMAND=${shellQuote(manifest.claudeCommand)}`]
       : []),
