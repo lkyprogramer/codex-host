@@ -692,8 +692,19 @@ fn child_command(
                     command.env_remove(DATA_DIRECTORY_ENV);
                 }
                 #[cfg(any(target_os = "macos", target_os = "linux"))]
-                if let Some(anchor) = process_anchor_path(current_executable) {
-                    command.env(PROCESS_ANCHOR_PATH_ENV, anchor);
+                match process_anchor_path(current_executable) {
+                    Some(anchor) => {
+                        command.env(PROCESS_ANCHOR_PATH_ENV, anchor);
+                    }
+                    // A remote SSH wrapper is a copy of the Shim; its profile
+                    // names the anchor beside the original. Anywhere else an
+                    // inherited value is not this installation's anchor.
+                    None if env::var_os(REMOTE_SSH_MANAGED_ENV).as_deref()
+                        != Some(std::ffi::OsStr::new("1")) =>
+                    {
+                        command.env_remove(PROCESS_ANCHOR_PATH_ENV);
+                    }
+                    None => {}
                 }
                 command.envs(remote_proxy_environment);
                 configure_background_command(&mut command);
@@ -737,6 +748,8 @@ fn child_command(
 /// installed, the Cargo target directory in a source checkout.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn process_anchor_path(shim: &Path) -> Option<PathBuf> {
+    // Resolve a symlinked invocation to the real installation first.
+    let shim = std::fs::canonicalize(shim).unwrap_or_else(|_| shim.to_path_buf());
     let anchor = shim.with_file_name("codexhost-anchor");
     anchor.is_file().then_some(anchor)
 }
