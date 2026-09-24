@@ -95,13 +95,32 @@ const PROCESS_GROUP_SIGNAL_OWNER = ["harness-discovery", "src", "owned-process-t
 function processGroupSignals(sourceText, filePath) {
   const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
   const lines = [];
+  // `process`, `globalThis.process` or `global.process`.
+  function isProcess(node) {
+    if (ts.isIdentifier(node)) return node.text === "process";
+    return (
+      ts.isPropertyAccessExpression(node) &&
+      node.name.text === "process" &&
+      ts.isIdentifier(node.expression) &&
+      (node.expression.text === "globalThis" || node.expression.text === "global")
+    );
+  }
+  // `<process>.kill` or `<process>["kill"]`.
+  function isKill(callee) {
+    if (ts.isPropertyAccessExpression(callee)) {
+      return callee.name.text === "kill" && isProcess(callee.expression);
+    }
+    return (
+      ts.isElementAccessExpression(callee) &&
+      ts.isStringLiteralLike(callee.argumentExpression) &&
+      callee.argumentExpression.text === "kill" &&
+      isProcess(callee.expression)
+    );
+  }
   function visit(node) {
     if (
       ts.isCallExpression(node) &&
-      ts.isPropertyAccessExpression(node.expression) &&
-      ts.isIdentifier(node.expression.expression) &&
-      node.expression.expression.text === "process" &&
-      node.expression.name.text === "kill" &&
+      isKill(node.expression) &&
       node.arguments[0] &&
       ts.isPrefixUnaryExpression(node.arguments[0]) &&
       node.arguments[0].operator === ts.SyntaxKind.MinusToken
