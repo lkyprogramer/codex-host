@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/anchor",
   "crates/launcher",
   "crates/platform",
   "crates/shim",
@@ -7,6 +8,7 @@ members = [
   "tools/gate-a/native",
 ]
 default-members = [
+  "crates/anchor",
   "crates/launcher",
   "crates/platform",
   "crates/shim",

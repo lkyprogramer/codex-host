@@ -83,6 +83,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "codexhost-anchor"
+version = "0.7.0-local.11"
+dependencies = [
+ "libc",
+ "libproc",
+ "nix",
+ "serde_json",
+ "signal-hook",
+]
+
+[[package]]
 name = "codexhost-gate-a-native"
 version = "0.7.0-local.11"
 dependencies = [

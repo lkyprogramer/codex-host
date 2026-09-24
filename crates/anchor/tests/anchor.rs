@@ -1,0 +1,312 @@
+#![cfg(any(target_os = "macos", target_os = "linux"))]
+
+use std::io::{BufRead, BufReader, ErrorKind, Write};
+use std::os::fd::AsRawFd;
+use std::os::unix::net::UnixStream;
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::PathBuf;
+use std::process::{Child, Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
+
+use serde_json::Value;
+
+/// One anchor under test, with the Host end of its fd 3 socket.
+struct Anchored {
+    child: Child,
+    host: BufReader<UnixStream>,
+}
+
+impl Anchored {
+    fn start(options: &[&str], program: &[&str]) -> Self {
+        let (host, anchor_end) = UnixStream::pair().unwrap();
+        let descriptor = anchor_end.as_raw_fd();
+        let mut command = Command::new(env!("CARGO_BIN_EXE_codexhost-anchor"));
+        command
+            .args(options)
+            .arg("--")
+            .args(program)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::inherit());
+        // SAFETY: dup2 is async-signal-safe; it only places the socket on fd 3
+        // (and clears close-on-exec there) between fork and exec.
+        unsafe {
+            command.pre_exec(move || {
+                if libc::dup2(descriptor, 3) == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = command.spawn().unwrap();
+        drop(anchor_end);
+        host.set_read_timeout(Some(Duration::from_secs(10)))
+            .unwrap();
+        Self {
+            child,
+            host: BufReader::new(host),
+        }
+    }
+
+    fn message(&mut self) -> Value {
+        let mut line = String::new();
+        let read = self.host.read_line(&mut line).unwrap();
+        assert!(read > 0, "anchor closed its control socket early");
+        serde_json::from_str(&line).unwrap()
+    }
+
+    fn expect(&mut self, kind: &str) -> Value {
+        let message = self.message();
+        assert_eq!(message["type"], kind, "unexpected message {message}");
+        message
+    }
+
+    fn terminate(&mut self, grace_ms: u64) {
+        let stream = self.host.get_mut();
+        writeln!(stream, r#"{{"op":"terminate","graceMs":{grace_ms}}}"#).unwrap();
+    }
+
+    fn wait(&mut self) -> ExitStatus {
+        let deadline = Instant::now() + Duration::from_secs(15);
+        loop {
+            if let Some(status) = self.child.try_wait().unwrap() {
+                return status;
+            }
+            assert!(Instant::now() < deadline, "anchor did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+
+impl Drop for Anchored {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+fn pid_file(name: &str) -> PathBuf {
+    let path = std::env::temp_dir().join(format!(
+        "codexhost-anchor-{name}-{}-{}",
+        std::process::id(),
+        Instant::now().elapsed().as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    path
+}
+
+/// Waits for a fixture to publish a pid, then returns it.
+fn read_pid(path: &PathBuf) -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && let Ok(pid) = text.trim().parse()
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "fixture never wrote {path:?}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+fn alive(pid: i32) -> bool {
+    // A zombie reports as present to kill(2); only its state says it is dead.
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let state = String::from_utf8_lossy(&output.stdout);
+    let state = state.trim();
+    !state.is_empty() && !state.starts_with('Z')
+}
+
+fn zombie(pid: i32) -> bool {
+    let output = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .starts_with('Z')
+}
+
+#[cfg(target_os = "linux")]
+fn wait_until(condition: impl Fn() -> bool) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !condition() {
+        assert!(Instant::now() < deadline, "condition not reached in time");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn reports_ready_and_mirrors_the_harness_exit_code() {
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", "exit 7"]);
+    let ready = anchor.expect("ready");
+    assert_eq!(ready["pid"], ready["pgid"]);
+    assert_eq!(anchor.expect("exit")["code"], 7);
+    anchor.expect("released");
+    assert_eq!(anchor.wait().code(), Some(7));
+}
+
+#[test]
+fn mirrors_a_harness_that_died_from_a_signal() {
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", "kill -TERM $$"]);
+    anchor.expect("ready");
+    assert_eq!(anchor.expect("exit")["signal"], "SIGTERM");
+    anchor.expect("released");
+    assert_eq!(anchor.wait().signal(), Some(libc::SIGTERM));
+}
+
+#[test]
+fn reports_a_harness_that_cannot_be_created() {
+    let mut anchor = Anchored::start(&[], &["/nonexistent/codexhost-harness"]);
+    let failure = anchor.expect("spawnError");
+    assert_eq!(failure["code"], "ENOENT");
+    assert_eq!(anchor.wait().code(), Some(127));
+}
+
+#[test]
+fn reclaims_descendants_after_the_leader_exits_and_keeps_it_unreaped_until_then() {
+    let file = pid_file("orphan");
+    let script = format!(
+        "trap '' TERM; (trap '' TERM; exec sleep 60) & echo $! > {}; exit 0",
+        file.display()
+    );
+    let mut anchor = Anchored::start(&["--exit-grace-ms", "300"], &["/bin/sh", "-c", &script]);
+    let leader = anchor.expect("ready")["pid"].as_i64().unwrap() as i32;
+    let descendant = read_pid(&file);
+    assert_eq!(anchor.expect("exit")["code"], 0);
+    // The descendant ignores TERM, so the group outlives the leader for the
+    // grace period. Until the group is empty the leader stays a zombie: its
+    // pid, and with it the group id, cannot be handed to anyone else.
+    assert!(alive(descendant));
+    assert!(zombie(leader), "the exited leader must stay unreaped");
+    anchor.expect("released");
+    assert_eq!(anchor.wait().code(), Some(0));
+    assert!(!alive(descendant));
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn terminate_escalates_to_kill_for_descendants_that_ignore_term() {
+    let file = pid_file("stubborn");
+    let script = format!(
+        "trap '' TERM; (trap '' TERM; exec sleep 60) & echo $! > {}; wait",
+        file.display()
+    );
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", &script]);
+    anchor.expect("ready");
+    let descendant = read_pid(&file);
+    anchor.terminate(150);
+    assert_eq!(anchor.expect("exit")["signal"], "SIGKILL");
+    anchor.expect("released");
+    assert_eq!(anchor.wait().signal(), Some(libc::SIGKILL));
+    assert!(!alive(descendant));
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn a_lost_lifeline_ends_the_whole_group() {
+    let file = pid_file("lifeline");
+    let script = format!("sleep 60 & echo $! > {}; wait", file.display());
+    let mut anchor = Anchored::start(&["--lifeline-grace-ms", "200"], &["/bin/sh", "-c", &script]);
+    anchor.expect("ready");
+    let descendant = read_pid(&file);
+    // The Host dying closes its socket end; nothing else is sent.
+    let _ = anchor.host.get_ref().shutdown(std::net::Shutdown::Both);
+    let status = anchor.wait();
+    assert_eq!(status.signal(), Some(libc::SIGTERM));
+    assert!(!alive(descendant));
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn a_termination_signal_to_the_anchor_ends_the_group() {
+    let file = pid_file("signalled");
+    let script = format!("sleep 60 & echo $! > {}; wait", file.display());
+    let mut anchor = Anchored::start(&["--lifeline-grace-ms", "200"], &["/bin/sh", "-c", &script]);
+    anchor.expect("ready");
+    let descendant = read_pid(&file);
+    let anchor_pid = nix::unistd::Pid::from_raw(anchor.child.id() as i32);
+    nix::sys::signal::kill(anchor_pid, nix::sys::signal::Signal::SIGTERM).unwrap();
+    assert_eq!(anchor.expect("exit")["signal"], "SIGTERM");
+    anchor.expect("released");
+    anchor.wait();
+    assert!(!alive(descendant));
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn a_zero_grace_terminate_kills_at_once() {
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", "trap '' TERM; sleep 60"]);
+    anchor.expect("ready");
+    let started = Instant::now();
+    anchor.terminate(0);
+    assert_eq!(anchor.expect("exit")["signal"], "SIGKILL");
+    anchor.expect("released");
+    anchor.wait();
+    assert!(started.elapsed() < Duration::from_secs(5));
+}
+
+#[test]
+fn the_harness_never_inherits_the_control_socket() {
+    // fd 3 is the Host's lifeline; a Harness holding it would keep the anchor
+    // from ever seeing the Host die.
+    let mut anchor = Anchored::start(
+        &[],
+        &[
+            "/bin/sh",
+            "-c",
+            "if [ -e /dev/fd/3 ]; then exit 3; fi; exit 0",
+        ],
+    );
+    anchor.expect("ready");
+    assert_eq!(anchor.expect("exit")["code"], 0);
+    anchor.expect("released");
+    anchor.wait();
+}
+
+#[test]
+fn ignores_malformed_control_lines() {
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", "sleep 60"]);
+    anchor.expect("ready");
+    writeln!(anchor.host.get_mut(), "not json\n{{\"op\":\"reboot\"}}").unwrap();
+    anchor.terminate(100);
+    assert_eq!(anchor.expect("exit")["signal"], "SIGTERM");
+    anchor.expect("released");
+    anchor.wait();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn adopts_and_reclaims_descendants_that_escape_the_group() {
+    let file = pid_file("escaped");
+    // setsid leaves the group; once its parent exits, the subreaper adopts it.
+    let script = format!(
+        "setsid sh -c 'echo $$ > {}; exec sleep 60' & sleep 0.3; exit 0",
+        file.display()
+    );
+    let mut anchor = Anchored::start(&["--exit-grace-ms", "300"], &["/bin/sh", "-c", &script]);
+    anchor.expect("ready");
+    let escaped = read_pid(&file);
+    anchor.expect("exit");
+    anchor.expect("released");
+    anchor.wait();
+    wait_until(|| !alive(escaped));
+    let _ = std::fs::remove_file(file);
+}
+
+#[test]
+fn the_socket_peer_end_reads_eof_when_the_anchor_exits() {
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", "exit 0"]);
+    anchor.expect("ready");
+    anchor.expect("exit");
+    anchor.expect("released");
+    anchor.wait();
+    let mut line = String::new();
+    match anchor.host.read_line(&mut line) {
+        Ok(read) => assert_eq!(read, 0),
+        Err(error) => assert_ne!(error.kind(), ErrorKind::WouldBlock),
+    }
+}
