@@ -36,7 +36,9 @@ Adapter 只通过 `harness-discovery` 的 `spawnOwnedProcess` 创建自己拥有
 - Host 以任何方式退出（包括被 SIGKILL）时，anchor 的控制通道断开，它独立结束整组，Shim 是否存活都不影响。
 - Linux 上 anchor 是 subreaper，`setsid` / double fork 逃出组的后代会被收养并一并回收；macOS 没有对应原语，这类后代仍依赖 Shim 的全局账本兜底。
 
-Windows、或找不到 anchor 的开发环境回退到 Host 侧 tracker：leader 退出即开始回收，失败后不重放（它只持有 pid），按未确认失败处理。丢失所有权或无法验证退出时返回失败，不能报告成功。
+Adapter 看到的仍是 Harness 本身：`child.exit` 报告 Harness 自己的退出码或信号，但在整组清空之后才到达；`spawn` 只在 Harness 实际创建后发出，创建失败时与原生 `spawn` 一样只有 `error` 与 `close`；`child.kill()` 是对 anchor 的受管终止（SIGKILL 为立即终止，其他信号带宽限期），作用于整组而不是只有 leader。
+
+Windows、或找不到 anchor 的开发环境回退到 Host 侧 tracker：leader 退出即开始回收（Windows 除外，root 退出后无法再定位进程树）；失败后只在 leader 尚未被回收时允许重试，回收后保持失败（它只持有 pid），按未确认失败处理。丢失所有权或无法验证退出时返回失败，不能报告成功。
 
 不同 Session 的环境、执行策略和 cwd 仍保持隔离；资源回收不是把所有 Session 合并到一个共享 Server。
 

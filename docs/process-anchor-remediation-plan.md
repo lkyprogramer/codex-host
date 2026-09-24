@@ -92,7 +92,7 @@ spawnOwnedProcess(command, args, {
 ### 3.6 已知限制
 
 - macOS 上自行 `setsid` 并在父进程存活时逃出组的后代，anchor 无法跟踪；仍由 Shim 账本兜底。
-- anchor 自身被 SIGKILL：Linux 上 leader 随 pdeathsig 退出；macOS 上组 G 失去看护，只能靠 Shim 账本。anchor 只做进程机制，出现这种情况的概率远低于 Host。
+- anchor 自身被 SIGKILL：Linux 上只有 leader 随 pdeathsig 退出，组内其余成员会存活；macOS 上整组失去看护。两者都只能靠 Shim 账本兜底。因此任何代码都不得直接杀死 anchor：`spawnOwnedProcess` 返回的 `child.kill()` 被改写为向 anchor 发 terminate（SIGKILL 即立即终止，其他信号走宽限期），SDK 的关闭强杀、Node 的 `signal` 选项和 Adapter 自己的 kill 都经过这条路径。
 - Windows 首版不启用 anchor，保持现状，Job Object 版本见第 5 节阶段 D。
 - 每个存活 Harness 多一个很小的原生进程。
 
@@ -170,6 +170,23 @@ spawnOwnedProcess(command, args, {
 - Antigravity 历史孤儿子任务判定依赖“每个 Turn 进程等待自己的子任务”这一前提。
 
 ### 4.6 阶段 A 完成情况（分支 `feat/process-anchor`）
+
+阶段 A 首轮实现后经两路独立评审（Rust anchor、TS 集成），以下问题已在同一分支修复并补回归测试：
+
+| 问题 | 修复 |
+| --- | --- |
+| Claude SDK 关闭时对 anchor 发 SIGKILL，早于 anchor 自己的 KILL，TERM 免疫的组员逃逸（已复现 4/4） | `child.kill()` 改写为受管 terminate；abort 信号同样走 terminate |
+| 缺失可执行文件时 `spawn` / `exit 127` 多发，OMP 启动挂满超时、Grok / Kiro 报错类别变化，无监听器时可能崩溃 Host | anchor 报告 `ready` 前扣住 `spawn` / `exit` / `close`；`spawnError` 只发 `error` 与 `close`；无监听器改为 warning；OMP `#ready` 在故障时立即失败 |
+| Linux：leader 存活期间被收养的后代退出后成为僵尸不被回收 | SIGCHLD 唤醒时回收 |
+| Linux：KILL 之后才被收养的逃逸后代存活到下一轮 | Forced 阶段每个 tick 对组与收养子进程补发 KILL |
+| 进行中的长宽限期不能被更紧急的 terminate / lifeline 丢失提前 | 更早的截止或 grace 0 立即前移 |
+| macOS：其他 uid 的组员（sudo / su）被误判为已退出 | 改用不受 uid 限制的 `PROC_PIDT_SHORTBSDINFO`，读取失败按存活 |
+| Linux 终止期间每 20ms 扫描整个 `/proc` | 扫描间隔 20ms 起指数退避至 250ms |
+| 回退 tracker 失败后永不重试（Windows 上 Grok 退化） | leader 未被回收前允许重试，回收后保持失败 |
+| Windows 回退：每次短命令正常退出都报清理失败；taskkill 同步阻塞事件循环 | Windows 不在 leader 退出时自动清理；taskkill 改为异步 |
+| DeepSeek 探测清理预算与 anchor 窗口错位 | TERM / KILL 各占预算一半 |
+| 其余：多线程主线程退出误判、重复计数、不可读 `/proc` 无诊断、控制写阻塞、Shim 符号链接路径与继承环境、Host 请求的回合被误报为退出清理失败、anchor 路径永久缓存、非法 `closeTimeoutMs` | 均已修复；anchor 诊断经 `diagnostic` 消息转为 Host warning |
+
 
 | ID | 状态 | 说明 |
 | --- | --- | --- |
