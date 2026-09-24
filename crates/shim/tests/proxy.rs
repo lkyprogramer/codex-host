@@ -2699,3 +2699,92 @@ fn job_terminates_the_official_cli_tree_when_shim_is_killed() {
         "kill-on-close Job left child PID {child_id} running"
     );
 }
+
+/// Launches the fake Host Runtime through `shim` and returns the anchor path
+/// the Host received (empty when none).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_anchor_path_through(shim: &std::path::Path, environment: &[(&str, &str)]) -> String {
+    let directory = temporary_directory();
+    let ready = directory.join("ready");
+    let mut command = Command::new(shim);
+    command
+        .args(["app-server", "--stdio"])
+        .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
+        .env(HOST_NODE_PATH_ENV, fake_codex_path())
+        .env(HOST_RUNTIME_PATH_ENV, fake_codex_path())
+        .env("CODEXHOST_DATA_DIR", &directory)
+        .env("FAKE_CODEX_HOST_RUNTIME_READY", &ready)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    let mut shim = command.spawn().expect("spawn fake Host Runtime Shim");
+    let stdin = shim.stdin.take().expect("Host Runtime stdin");
+    let identity = wait_for_file(&ready, Duration::from_secs(5));
+    drop(stdin);
+    if !wait_for_process_exit(&mut shim, Duration::from_secs(5)) {
+        force_stop_test_process(shim.id());
+        force_stop_test_process(process_id_from_ready(&identity, "root="));
+        let _ = shim.wait();
+    }
+    let _ = fs::remove_dir_all(&directory);
+    identity
+        .lines()
+        .find_map(|line| line.strip_prefix("process_anchor_path="))
+        .expect("ready process anchor field")
+        .to_string()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn drops_an_inherited_anchor_path_when_no_anchor_sits_beside_the_shim() {
+    let directory = temporary_directory();
+    let copied = directory.join("codexhost-shim");
+    fs::copy(shim_path(), &copied).expect("copy the Shim away from its anchor");
+    let received = host_anchor_path_through(
+        &copied,
+        &[("CODEXHOST_PROCESS_ANCHOR_PATH", "/stale/codexhost-anchor")],
+    );
+    // An inherited value is not this installation's anchor.
+    assert_eq!(received, "");
+    fs::remove_dir_all(directory).expect("remove copied Shim");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn keeps_the_profile_anchor_path_for_a_remote_ssh_wrapper() {
+    let directory = temporary_directory();
+    let copied = directory.join("codexhost-shim");
+    fs::copy(shim_path(), &copied).expect("copy the Shim away from its anchor");
+    // A remote wrapper is a copy of the Shim; its profile names the anchor.
+    let received = host_anchor_path_through(
+        &copied,
+        &[
+            ("CODEXHOST_PROCESS_ANCHOR_PATH", "/profile/codexhost-anchor"),
+            (REMOTE_SSH_MANAGED_ENV, "1"),
+        ],
+    );
+    assert_eq!(received, "/profile/codexhost-anchor");
+    fs::remove_dir_all(directory).expect("remove copied Shim");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn finds_the_anchor_beside_the_real_shim_through_a_symlink() {
+    let anchor = shim_path()
+        .canonicalize()
+        .expect("canonical Shim path")
+        .with_file_name("codexhost-anchor");
+    if !anchor.is_file() {
+        // `cargo test --workspace` builds the anchor; a lone Shim run may not.
+        return;
+    }
+    let directory = temporary_directory();
+    let link = directory.join("codexhost-shim");
+    std::os::unix::fs::symlink(shim_path(), &link).expect("link the Shim");
+    let received = host_anchor_path_through(&link, &[]);
+    assert_eq!(received, anchor.display().to_string());
+    fs::remove_dir_all(directory).expect("remove Shim link");
+}
