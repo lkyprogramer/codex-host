@@ -73,6 +73,7 @@ README 提供使用概览；架构与运行时文档随当前源码维护；评�
 
 | 文档 | 主题 |
 | --- | --- |
+| [进程 Anchor 与整改计划](process-anchor-remediation-plan.md) | Rust 进程 anchor 方案、2026-09-24 全项目评审问题清单与修复顺序。 |
 | [Codex 原生账号切换设计](codex-native-account-switching-design.md) | 原生账号与凭据事务的候选设计。 |
 | [Reasoning 预览与持久 Transcript](<Reasoning 实时预览与持久 Transcript 的后续方案.md>) | 后续展示与持久化方案。 |
 | [回合文件变更汇总调查](<外部 Harness 回合文件变更汇总问题与后续方案.md>) | 净 Diff 与文件变化的调查及候选方案。 |
