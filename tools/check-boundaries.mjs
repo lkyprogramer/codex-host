@@ -85,6 +85,35 @@ function isForbiddenLocalRuntimeImport(specifier) {
   return /(^|\/)pi-(agent|ai|coding-agent)(\/|$)/u.test(specifier);
 }
 
+/**
+ * The only production code allowed to signal a process group directly: the
+ * Host-side fallback of the owned-process API. Everything else goes through
+ * `spawnOwnedProcess`, whose native anchor owns the group.
+ */
+const PROCESS_GROUP_SIGNAL_OWNER = ["harness-discovery", "src", "owned-process-tree.ts"];
+
+function processGroupSignals(sourceText, filePath) {
+  const sourceFile = ts.createSourceFile(filePath, sourceText, ts.ScriptTarget.Latest, true);
+  const lines = [];
+  function visit(node) {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ts.isIdentifier(node.expression.expression) &&
+      node.expression.expression.text === "process" &&
+      node.expression.name.text === "kill" &&
+      node.arguments[0] &&
+      ts.isPrefixUnaryExpression(node.arguments[0]) &&
+      node.arguments[0].operator === ts.SyntaxKind.MinusToken
+    ) {
+      lines.push(sourceFile.getLineAndCharacterOfPosition(node.getStart()).line + 1);
+    }
+    ts.forEachChild(node, visit);
+  }
+  visit(sourceFile);
+  return lines;
+}
+
 export function findSourceBoundaryViolations({
   filePath,
   packageRoot,
@@ -94,6 +123,17 @@ export function findSourceBoundaryViolations({
   sharedContractsDirectory = sharedContractsRoot,
 }) {
   const violations = [];
+
+  if (
+    isInside(filePath, resolve(packageRoot, "src")) &&
+    filePath !== resolve(packagesDirectory, ...PROCESS_GROUP_SIGNAL_OWNER)
+  ) {
+    for (const line of processGroupSignals(sourceText, filePath)) {
+      violations.push(
+        `${filePath}:${line}: signal owned processes through spawnOwnedProcess, not process.kill(-pid)`,
+      );
+    }
+  }
 
   for (const specifier of moduleSpecifiers(sourceText, filePath)) {
     if (

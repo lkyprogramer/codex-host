@@ -212,4 +212,33 @@ describe("source boundary checks", () => {
 
     expect(violations).toEqual([]);
   });
+
+  it("keeps process-group signalling inside the owned-process fallback", () => {
+    const sourceText = "export function stop(pid: number) { process.kill(-pid, 'SIGTERM'); }";
+    const at = (owner, file) =>
+      findSourceBoundaryViolations({
+        filePath: `${packagesDirectory}/${owner}/${file}`,
+        packageRoot: `${packagesDirectory}/${owner}`,
+        packagesDirectory,
+        rendererDirectory,
+        sharedContractsDirectory,
+        sourceText,
+      });
+    expect(at("adapters/grok", "src/transport.ts")).toEqual([
+      expect.stringContaining(":1: signal owned processes through spawnOwnedProcess"),
+    ]);
+    expect(at("harness-discovery", "src/owned-process-tree.ts")).toEqual([]);
+    // Test fixtures may still clean up the groups they created themselves.
+    expect(at("adapters/grok", "test/transport.test.ts")).toEqual([]);
+    expect(
+      findSourceBoundaryViolations({
+        filePath: `${packagesDirectory}/adapters/grok/src/probe.ts`,
+        packageRoot: `${packagesDirectory}/adapters/grok`,
+        packagesDirectory,
+        rendererDirectory,
+        sharedContractsDirectory,
+        sourceText: "process.kill(pid, 0);",
+      }),
+    ).toEqual([]);
+  });
 });
