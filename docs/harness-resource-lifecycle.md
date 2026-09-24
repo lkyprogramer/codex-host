@@ -44,8 +44,9 @@ Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关�
 
 2026-09-23 补齐 Claude Code 的同类缺口：
 
-- 原生后台任务（包括 `run_in_background` Shell，不只是子代理）未结束时拒绝挂起。判断只依据 Claude 的 `background_tasks_changed` 电平集合，不依据可能乱序或遗漏的 task 边沿事件。
-- 释放失败返回 `unknown` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback，Turn 以明确的「上一进程未确认停止」错误失败。已拆除的 Transport 不再向 Session 投递迟到输出。
+- 原生后台任务（包括 `run_in_background` Shell，不只是子代理）未结束时拒绝挂起。判断只依据 Claude 的 `background_tasks_changed` 电平集合，不依据可能乱序或遗漏的 task 边沿事件；关闭时也只等待电平集合中的任务结束，仅见于边沿的 id（例如前台 Task）只尽力请求停止，不等待其终态。
+- 释放失败返回 `unknown` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback：`turn.start` 直接以可重试的 `unavailable`（「上一进程未确认停止」）拒绝，不会开始 Turn。已拆除的 Transport 不再向 Session 投递迟到输出，重试时也不再等待这些输出排空，只重新确认受管进程组。
+- 释放未确认期间，若旧进程仍在运行并写入原生历史，这部分输出不会投影到 Host；Session 重新可用后，Host 视图可能落后于原生历史，直到下一次完整读取。准入已排除活动 Turn 与后台任务，此时进程应无原生工作，因此只是残余风险。
 - 重试时若 leader 已被回收且其 pid 已被其他进程占用，即判定受管组已空，不再发信号；EPERM 按组仍存在继续等待。
 
 剩余边界：两次尝试之间若受管组已自然清空，而其 pid 恰被新进程复用为另一个组的 leader、且该 leader 随后退出只留下组员，仅凭 pid 无法区分，重试的组信号会落到那个组上。这与 Grok 的所有权模型相同，概率低但不可排除；彻底消除需要为组成员记录独立的身份证据。

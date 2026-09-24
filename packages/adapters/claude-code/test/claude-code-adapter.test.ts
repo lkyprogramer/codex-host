@@ -724,6 +724,37 @@ describe("Claude Code HarnessAdapter", () => {
     await expect(adapter.close()).rejects.toThrow("could not stop safely");
   });
 
+  it("never reopens a Session that closed during a failing Claude release", async () => {
+    const { adapter, dependencies, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute(textTurn("racing-close"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.finish({ status: "succeeded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let failRelease: (error: Error) => void = () => undefined;
+    transport.close
+      .mockImplementationOnce(
+        () =>
+          new Promise<undefined>((_resolve, reject) => {
+            failRelease = reject;
+          }),
+      )
+      .mockRejectedValueOnce(new Error("process group is still alive"));
+
+    const suspending = lifecycle.suspend(new AbortController().signal);
+    const closing = session.close();
+    failRelease(new Error("process group is still alive"));
+    await expect(suspending).resolves.toMatchObject({ status: "unknown" });
+    await expect(closing).rejects.toThrow("could not stop safely");
+    // The failed release must not hand a closed Session back to new work.
+    await expect(session.execute(textTurn("after-close"))).resolves.toMatchObject({ ok: false });
+    expect(dependencies.createTransport).toHaveBeenCalledOnce();
+    await adapter.close().catch(() => undefined);
+  });
+
   it("refuses Claude idle suspension while native background tasks run", async () => {
     const { adapter, transports } = fixture();
     const session = await openSession(adapter);

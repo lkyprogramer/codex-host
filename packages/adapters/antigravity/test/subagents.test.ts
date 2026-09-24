@@ -264,34 +264,70 @@ describe("Antigravity Subagents", () => {
       ok: false,
       error: { code: "protocolError", message: "Not ready", retryable: true },
     });
-    const stale = "40dce1a0-bc56-4c5d-a50d-264f235f09a9";
-    const running = (id: string): HostSubagentState => ({
+    const silent = "40dce1a0-bc56-4c5d-a50d-264f235f09a9";
+    const { observer } = fixture({ unobservedLimitMs: 0 });
+    const spawned = step("DONE");
+    const [first] = spawned.subagent_info.subagents;
+    if (!first) throw new Error("Missing spawned Subagent");
+    spawned.subagent_info.subagents.push({ ...first, conversation_id: silent });
+    observer.handle(spawned);
+    // Both children belong to this Turn; only the one that answers vouches for itself.
+    vi.mocked(subagentRpc).mockImplementation(async (_port, id) => {
+      if (id === child) return native("RUNNING");
+      throw new Error("unknown conversation");
+    });
+    try {
+      observer.finish({ status: "succeeded" });
+      await observer.refresh();
+      expect(observer.state(silent)).toMatchObject({
+        status: "interrupted",
+        resultSummary: expect.stringContaining("could not be confirmed"),
+      });
+      expect(observer.state(child)?.status).toBe("running");
+      vi.mocked(subagentRpc).mockImplementation(async () => native("IDLE"));
+      await observer.refresh();
+      await observer.settled;
+      expect(observer.state(child)?.status).toBe("completed");
+    } finally {
+      observer.stop();
+    }
+  });
+
+  it("never lets a history orphan hold the Turn's process, answering or not", async () => {
+    vi.mocked(readSubagentTranscript).mockResolvedValue({
+      ok: false,
+      error: { code: "protocolError", message: "Not ready", retryable: true },
+    });
+    const orphan = "40dce1a0-bc56-4c5d-a50d-264f235f09a9";
+    const history = (id: string, status: HostSubagentState["status"]): HostSubagentState => ({
       subagentId: id,
       nativeSubagentId: id,
       description: id,
       background: true,
-      status: "running",
+      status,
     });
-    // History can carry a child a previous process left "running"; a finished
-    // sibling that still answers must not keep that one's process alive.
+    // The orphan was already "running" before this Turn; the other child was
+    // idle and is seen to start again, so this Turn's process runs it.
     const { observer } = fixture({
-      unobservedLimitMs: 0,
-      initialStates: [running(stale), running(child)],
+      initialStates: [history(orphan, "running"), history(child, "completed")],
     });
-    vi.mocked(subagentRpc).mockImplementation(async (_port, id) => {
-      if (id === child) return native("IDLE");
-      throw new Error("unknown conversation");
-    });
-    observer.finish({ status: "succeeded" });
-    await observer.refresh();
-    await observer.settled;
-    expect(observer.state(child)?.status).toBe("completed");
-    expect(observer.state(stale)).toMatchObject({
-      status: "interrupted",
-      resultSummary: expect.stringContaining("could not be confirmed"),
-    });
-    // It is never signalled: without an answer it cannot be shown to be ours.
-    expect(subagentRpc).not.toHaveBeenCalledWith(1, stale, "CancelCascadeInvocation");
+    vi.mocked(subagentRpc).mockResolvedValue(native("RUNNING"));
+    try {
+      await observer.refresh();
+      observer.finish({ status: "succeeded" });
+      await observer.refresh();
+      expect(observer.state(orphan)).toMatchObject({
+        status: "interrupted",
+        resultSummary: expect.stringContaining("could not be confirmed"),
+      });
+      expect(observer.state(child)?.status).toBe("running");
+      expect(observer.running).toBe(true);
+      vi.mocked(subagentRpc).mockResolvedValue(native("IDLE"));
+      await observer.refresh();
+      await observer.settled;
+    } finally {
+      observer.stop();
+    }
   });
 
   it("keeps an unobservable Subagent for the whole observation window", async () => {

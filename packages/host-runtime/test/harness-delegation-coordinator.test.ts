@@ -1295,6 +1295,35 @@ describe("HarnessDelegationCoordinator", () => {
     }
   });
 
+  it("does not blame an owned-job outcome on the idle suspension's reason", async () => {
+    const adapter = new IdleUnknownFakeAdapter(harnessIdSchema.parse("pi"));
+    const stopOwnedJobs = vi.fn(async () => ({ quiescence: "unknown" as const }));
+    Object.assign(adapter, { stopOwnedJobs });
+    const value = await fixture(adapter);
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      const session = value.adapter.sessions[0];
+      if (!session) throw new Error("Missing session");
+      session.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      const released = await value.coordinator.release({ threadId: started.threadId });
+      expect(released).toMatchObject({ released: false, busy: false, quiescence: "unknown" });
+      // The owned-job path decided this release; the suspension's reason is about something else.
+      expect(released).not.toHaveProperty("reason");
+      expect(stopOwnedJobs).toHaveBeenCalledOnce();
+    } finally {
+      await value.close();
+    }
+  });
+
   it("answers with a quiescence when the owned-job lease is refused", async () => {
     const adapter = new IdleFaultingFakeAdapter(harnessIdSchema.parse("pi"));
     const stopOwnedJobs = vi.fn(async () => ({ quiescence: "confirmed" as const }));

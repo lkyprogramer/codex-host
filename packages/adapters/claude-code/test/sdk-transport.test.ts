@@ -1120,6 +1120,53 @@ describe("ClaudeSdkTransport Model control", () => {
     },
   );
 
+  it.skipIf(process.platform === "win32")(
+    "still reclaims the inspector's group and warns when the SDK close throws",
+    async () => {
+      const value = fixture();
+      const inspector = new ClaudeSdkModelInspector({
+        command: process.execPath,
+        cwd: process.cwd(),
+        closeTimeoutMs: 100,
+        queryFactory: value.queryFactory,
+      });
+      const warn = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+      const close = vi.spyOn(value.fakeQuery, "close").mockImplementation(() => {
+        throw new Error("SDK close failed");
+      });
+      const inspection = inspector.inspect();
+      const spawnProcess = options(value).spawnClaudeCodeProcess;
+      if (!spawnProcess) throw new Error("Missing native process ownership hook");
+      const child = spawnProcess({
+        command: process.execPath,
+        args: [
+          "-e",
+          "const c=require('child_process').spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:'ignore'}); process.stdout.write(String(c.pid)); setInterval(()=>{},1000);",
+        ],
+        signal: new AbortController().signal,
+        cwd: process.cwd(),
+        env: process.env,
+      }) as ChildProcessWithoutNullStreams;
+      let pid = 0;
+      try {
+        const [chunk] = await once(child.stdout, "data");
+        pid = Number(String(chunk));
+        await inspection;
+        expect(() => process.kill(pid, 0)).toThrow();
+        expect(warn).toHaveBeenCalledWith(expect.stringContaining("query close failed"));
+      } finally {
+        close.mockRestore();
+        warn.mockRestore();
+        value.fakeQuery.close();
+        for (const target of [pid, child.pid ?? 0]) {
+          try {
+            if (target) process.kill(target, "SIGKILL");
+          } catch {}
+        }
+      }
+    },
+  );
+
   it("uses the SDK default filesystem sources for execution queries", async () => {
     const value = fixture();
 
@@ -2017,8 +2064,8 @@ describe("Claude history replacement fence", () => {
     value.fakeQuery.stopTask.mockImplementation(async () => undefined);
     value.fakeQuery.push({
       type: "system",
-      subtype: "task_started",
-      task_id: "still-running",
+      subtype: "background_tasks_changed",
+      tasks: [{ task_id: "still-running", task_type: "local_bash", description: "watch" }],
     } as unknown as SDKMessage);
     await new Promise((resolve) => setTimeout(resolve, 0));
     await expect(value.transport.close()).rejects.toThrow("shutdown could not be confirmed");
@@ -2035,11 +2082,29 @@ describe("Claude history replacement fence", () => {
     const close = vi.spyOn(value.fakeQuery, "close").mockImplementation(() => undefined);
     try {
       await expect(value.transport.close()).rejects.toThrow("shutdown could not be confirmed");
+      // The iterator still never ends. Its output can no longer reach anyone, so
+      // the retry confirms the release on the owned groups alone.
+      await expect(value.transport.close()).resolves.toBeUndefined();
     } finally {
       close.mockRestore();
       value.fakeQuery.close();
     }
+  });
+
+  it("asks an edge-only task to stop without waiting for a terminal that never comes", async () => {
+    const value = fixture();
+    await value.transport.start();
+    value.fakeQuery.stopTask.mockImplementation(async () => undefined);
+    // A foreground Task reports task_started, but never joins the live level.
+    value.fakeQuery.push({
+      type: "system",
+      subtype: "task_started",
+      task_id: "foreground-task",
+    } as unknown as SDKMessage);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(value.transport.hasBackgroundTasks).toBe(false);
     await expect(value.transport.close()).resolves.toBeUndefined();
+    expect(value.fakeQuery.stopTask).toHaveBeenCalledWith("foreground-task");
   });
 
   it("drops output a torn-down Query yields after a failed shutdown", async () => {

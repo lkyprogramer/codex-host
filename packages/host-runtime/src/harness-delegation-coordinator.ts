@@ -1188,6 +1188,9 @@ export class HarnessDelegationCoordinator {
     let quiescence: JobQuiescence = releasable ? "unknown" : (lifecycleQuiescence ?? "unsupported");
     let proof: ThreadReleaseResult["proof"];
     if (releasable) {
+      // The owned-job path now decides this release; its own outcome, not the
+      // idle suspension's, is what a reason must describe.
+      reason = undefined;
       try {
         const stopped = await this.#stopLegacyOwnedJobs(releasable, thread.session);
         quiescence = stopped.quiescence;

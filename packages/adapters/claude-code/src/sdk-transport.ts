@@ -866,16 +866,21 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     } finally {
       exitTimeout.cancel();
     }
-    const drainTimeout = rejectAfter(this.#closeTimeoutMs, "Claude SDK output did not drain");
-    try {
-      await Promise.race([
-        this.#consumeTask?.catch(() => undefined) ?? Promise.resolve(),
-        drainTimeout.promise,
-      ]);
-    } catch (error) {
-      failures.push(error);
-    } finally {
-      drainTimeout.cancel();
+    // A retry only re-confirms the owned groups. Once torn down, whatever the
+    // Query still yields is dropped, so an iterator that never ends cannot
+    // hold the release hostage.
+    if (!this.#tornDown) {
+      const drainTimeout = rejectAfter(this.#closeTimeoutMs, "Claude SDK output did not drain");
+      try {
+        await Promise.race([
+          this.#consumeTask?.catch(() => undefined) ?? Promise.resolve(),
+          drainTimeout.promise,
+        ]);
+      } catch (error) {
+        failures.push(error);
+      } finally {
+        drainTimeout.cancel();
+      }
     }
     this.#query = null;
     const active = this.#active;
@@ -897,19 +902,30 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
     }
   }
 
+  /**
+   * Waits only on Claude's live level, the same set that admits a release. An
+   * id known from task edges alone may be a foreground Task whose terminal never
+   * comes; it is asked to stop, but its missing terminal proves nothing.
+   */
   async #stopBackgroundTasks(): Promise<void> {
+    const query = this.#query;
+    if (query) {
+      for (const id of this.#backgroundTasks) {
+        if (!this.#liveBackgroundTasks.has(id)) void query.stopTask(id).catch(() => undefined);
+      }
+    }
     const requested = new Set<string>();
     const deadline = Date.now() + this.#closeTimeoutMs;
-    while (this.#backgroundTasks.size > 0) {
+    while (this.#liveBackgroundTasks.size > 0) {
       if (Date.now() >= deadline || !this.#query)
         throw new Error("Claude background tasks remain active");
-      for (const id of this.#backgroundTasks) {
+      for (const id of this.#liveBackgroundTasks) {
         if (requested.has(id)) continue;
         requested.add(id);
         await this.#query.stopTask(id);
       }
-      // A control receipt alone is not a task terminal; consume its native stopped notification.
-      if (this.#backgroundTasks.size > 0) await delay(10);
+      // A control receipt alone is not a task terminal; consume the level that drops it.
+      if (this.#liveBackgroundTasks.size > 0) await delay(10);
     }
   }
 
@@ -1164,13 +1180,21 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
     // leave on stdin EOF before any signal is sent.
     this.#input.end();
     await awaitNaturalExit(this.#children, this.#closeTimeoutMs);
-    this.#query?.close();
+    try {
+      this.#query?.close();
+    } catch (error) {
+      // A failing SDK close must not skip the group reclaim below.
+      process.emitWarning(`Claude SDK Model inspector query close failed: ${String(error)}`);
+    }
     if (process.platform !== "win32") {
       // Reclaim the whole owned group: MCP servers from user settings outlive a
       // CLI that had to be killed. Inspection stays best effort, so a group that
       // cannot be confirmed must not replace the inspection result.
+      // TERM and KILL each get half the budget, so a stuck group costs inspect()
+      // no more than the single signal window it had before group reclaim.
+      const phaseMs = Math.max(1, Math.ceil(this.#closeTimeoutMs / 2));
       const stopped = await Promise.allSettled(
-        this.#children.map((child) => closeClaudeProcessGroup(child, this.#closeTimeoutMs)),
+        this.#children.map((child) => closeClaudeProcessGroup(child, phaseMs)),
       );
       for (const result of stopped) {
         if (result.status === "rejected") {

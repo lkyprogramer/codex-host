@@ -54,11 +54,16 @@ claiming successful native cancellation.
   CLI stay alive until they settle or the Session closes. New parent input is
   rejected as busy during that interval. Each running child is judged on its
   own: one that answers is kept for as long as it runs, and a sibling that
-  answers does not vouch for one that does not. A child that gives no owned
-  native state for 60 seconds after the parent result (no Language Server port,
-  a failed read, or a state that is not this parent's) is reported as
-  interrupted observation without being signalled, and once none remain
-  running the CLI is released.
+  answers does not vouch for one that does not. After the parent result, a
+  child that gives no owned native state (no Language Server port, a failed
+  read, or a state that is not this parent's) is reported as interrupted
+  observation without being signalled. The 60-second clock starts at the first
+  observation tick that finds it silent, so the actual wait is 60 seconds plus
+  up to one tick and its reads. A child history already recorded as running
+  when the Turn began is an orphan of an earlier process, since every Turn
+  waits for its own children before its CLI leaves; it never holds this Turn's
+  CLI, even if it answers. A history child seen to start running again during
+  the Turn belongs to it. Once none remain running the CLI is released.
 - Native Language Server methods and log shapes are compatibility-sensitive.
   Missing or invalid child history returns a typed error, never fabricated
   successful history. Logs above 8 MiB are explicitly unsupported.

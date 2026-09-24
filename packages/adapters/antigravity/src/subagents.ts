@@ -70,6 +70,13 @@ export class AntigravitySubagents {
   #stopped = false;
   /** Per running Subagent: when it stopped answering after the Turn ended. */
   readonly #unobservedSince = new Map<string, number>();
+  /**
+   * Subagents this Turn's process runs: spawned here, or seen to start running
+   * again during this Turn. A history child already "running" when the Turn
+   * began is an orphan: every earlier Turn waited for its own children before
+   * its process left, so whatever still says running died with that process.
+   */
+  readonly #owned = new Set<string>();
   #cancellation: Promise<void> | undefined;
   #settled: (() => void) | undefined;
   readonly settled = new Promise<void>((resolve) => {
@@ -126,6 +133,7 @@ export class AntigravitySubagents {
           status: "running",
         };
         this.#states.set(child.conversation_id, state);
+        this.#owned.add(child.conversation_id);
         return state;
       });
       delegation = {
@@ -179,21 +187,23 @@ export class AntigravitySubagents {
    * The Turn's process stays alive until its Subagents settle. Once the Turn has
    * ended, a running Subagent that never answers would hold it forever, so each
    * one is given up on its own clock; a sibling that answers does not vouch for
-   * it. It is reported like an unconfirmed cancellation and never signalled:
-   * without an answer, it cannot be shown to belong to this parent.
+   * it. An orphan carried in from history holds nothing, answering or not. Both
+   * are reported like an unconfirmed cancellation and never signalled: neither
+   * can be shown to be work this process is running.
    */
   #abandonUnobservable(answered: ReadonlySet<string>): void {
     const limit = this.#options.unobservedLimitMs ?? UNOBSERVED_SUBAGENT_LIMIT_MS;
     const now = Date.now();
     for (const [id, state] of this.#states) {
       const running = state.status === "running" || state.status === "pending";
-      if (!this.#ended || !running || answered.has(id)) {
+      const orphan = !this.#owned.has(id);
+      if (!this.#ended || !running || (answered.has(id) && !orphan)) {
         this.#unobservedSince.delete(id);
         continue;
       }
       const since = this.#unobservedSince.get(id) ?? now;
       this.#unobservedSince.set(id, since);
-      if (now - since < limit) continue;
+      if (!orphan && now - since < limit) continue;
       this.#unobservedSince.delete(id);
       const resultSummary = UNCONFIRMED_CANCELLATION;
       this.#states.set(id, { ...state, status: "interrupted", resultSummary });
@@ -217,6 +227,8 @@ export class AntigravitySubagents {
         const value = await subagentRpc(port, id, "GetCascadeTrajectory");
         const observed = subagentRunStatus(value, parentId);
         if (observed !== null) answered.add(id);
+        const wasRunning = previous.status === "running" || previous.status === "pending";
+        if (observed === "running" && !wasRunning) this.#owned.add(id);
         // Idle is also the state of a cancelled child. Only a new running observation
         // can reactivate it; do not turn yesterday's cancellation into today's success.
         if (observed !== "completed" || (status !== "interrupted" && status !== "failed")) {
