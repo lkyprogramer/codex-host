@@ -43,6 +43,7 @@ import {
   type RemoteOfficialAppServerExit,
 } from "./remote-official-app-server.js";
 import { createRemoteOfficialAppServerConnection } from "./remote-official-connection.js";
+import { onFatalShutdown } from "./process-guard.js";
 import { createHostUpdateCoordinator, type HostUpdateCoordinator } from "./update-coordinator.js";
 
 const STOCK_CODEX_PATH_ENV = "CODEXHOST_STOCK_CODEX_PATH";
@@ -107,6 +108,16 @@ export function delegationCliPath(environment: NodeJS.ProcessEnv): string | unde
     environment.CODEXHOST_NPM_LAUNCHER_PATH ??
     environment.CODEXHOST_LAUNCHER_EXECUTABLE
   );
+}
+
+/** Runs `host` so an uncaught exception elsewhere closes it in order. */
+async function runClosingOnFatal(host: AppServerHost): Promise<number> {
+  const release = onFatalShutdown(() => host.close());
+  try {
+    return await host.run();
+  } finally {
+    release();
+  }
 }
 
 async function prepareDelegationRuntime(input: {
@@ -184,7 +195,7 @@ export async function runHostRuntime(input: {
             onDelegationApi,
             ...(updateCoordinator ? { updateCoordinator } : {}),
           });
-          return host.run();
+          return runClosingOnFatal(host);
         },
       });
     }
@@ -249,7 +260,14 @@ export async function runHostRuntime(input: {
           });
           await listener.listen();
           await publishRemoteControlAppServerDescriptor(remoteControlPlan);
-          return await host.run();
+          // Each listener session is its own Host; closing the listener
+          // closes them.
+          const releaseListener = onFatalShutdown(() => void listener.close());
+          try {
+            return await runClosingOnFatal(host);
+          } finally {
+            releaseListener();
+          }
         } finally {
           try {
             await listener.close();
@@ -327,7 +345,12 @@ export async function runHostRuntime(input: {
         process.title = MANAGED_REMOTE_APP_SERVER_PROCESS_TITLE;
         process.once("SIGINT", stop);
         process.once("SIGTERM", stop);
-        await listener.closed;
+        const releaseFatalShutdown = onFatalShutdown(stop);
+        try {
+          await listener.closed;
+        } finally {
+          releaseFatalShutdown();
+        }
         return officialState.unexpectedExit ? 1 : 0;
       } finally {
         stopping = true;

@@ -3,9 +3,12 @@ import { runHostRuntime } from "./run-host-runtime.js";
 import { runRemoteControlAppServerBridge } from "./remote-control-app-server.js";
 import { runRemoteHostCli } from "./remote-host-cli.js";
 import { runClaudeAquaHarnessBroker } from "./aqua-harness-broker.js";
+import { exitAfterRun, installProcessGuard } from "./process-guard.js";
+
+installProcessGuard({ write: (line) => process.stderr.write(line) });
 
 const arguments_ = process.argv.slice(2);
-process.exitCode =
+const exitCode =
   arguments_[0] === "--codexhost-delegation-cli"
     ? await runDelegationCli({ arguments: arguments_.slice(1), environment: process.env })
     : arguments_[0] === "--codexhost-harness-broker"
@@ -19,3 +22,4 @@ process.exitCode =
               environment: process.env,
               hostRuntimeUrl: import.meta.url,
             });
+exitAfterRun(exitCode);

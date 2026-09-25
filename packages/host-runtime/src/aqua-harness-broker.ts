@@ -6,6 +6,7 @@ import {
 } from "@codexhost/harness-broker";
 
 import { loadHarnessPlugins } from "./harness-plugin-loader.js";
+import { onFatalShutdown } from "./process-guard.js";
 import { installedHarnessPluginOptions } from "./installed-harness-plugins.js";
 import { harnessPluginIdSchema } from "@codexhost/shared-contracts";
 
@@ -52,14 +53,17 @@ export async function runClaudeAquaHarnessBroker(
     })}\n`,
   );
   let stop: (() => void) | undefined;
+  let releaseFatalShutdown: (() => void) | undefined;
   try {
     await new Promise<void>((resolve) => {
       stop = resolve;
       process.once("SIGINT", resolve);
       process.once("SIGTERM", resolve);
+      releaseFatalShutdown = onFatalShutdown(resolve);
     });
     return 0;
   } finally {
+    releaseFatalShutdown?.();
     if (stop) {
       process.removeListener("SIGINT", stop);
       process.removeListener("SIGTERM", stop);
