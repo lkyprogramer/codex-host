@@ -237,6 +237,18 @@ spawnOwnedProcess(command, args, {
 
 阶段 A 顺带去掉了测试中的一类隐患：Pi、OMP、OpenCode 的 fake 进程带固定 pid（42000、45001、91337），以前被真实 tracker 接管，close 时会对同号的真实进程组发信号；现在 fake 只返回不接触系统进程的 fake tree。
 
+### 4.7 阶段 B 完成情况（分支 `feat/process-anchor`）
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| HC-1 | 已修 | `process-guard.ts`：`unhandledRejection` 只报告，Host 继续运行；`uncaughtException` 让已注册的 Host（含 remote listener 与 Aqua broker）有序关闭，并以失败码退出，最长等待 30 秒；`run()` 结束后若仍有泄漏的句柄，5 秒后退出 |
+| HC-2 | 已修 | `ManagedHarnessSession` 每个排队操作默认 120 秒期限，超时即判故障并释放队列；超时后才完成的 resume 会关闭它新开的原生 Session，而不是挂到已关闭的 Session 上；Host 退出时关闭 Session 与 Adapter 受 20 秒总预算约束，超出后由 anchor / Shim 回收剩余进程 |
+| HC-3 | 已修 | `ExternalThreadRuntime.retire()`：故障的 Thread 在旧 Session 真正关闭前不会被恢复，同一原生会话不会同时存在两个进程 |
+| HC-4 | 已修 | 合同新增 `releaseFailed`（向后兼容的新增状态）：`unknown` 只表示“这次没有尝试释放”；Claude Code、Grok、OpenCode、Cursor、Kiro 释放失败时统一返回 `releaseFailed`，Host 每次都报告并按退避重试 |
+| HC-5 | 已修 | conformance 增加四个资源场景：中止的挂起不释放资源、活动 Turn 期间的挂起不释放资源、空闲挂起要么拒绝要么结束输出、关闭后的 Session 再次 close 正常且拒绝新 Turn、不挂起；计划中的“8 个资源场景”落地为这四项加上既有的 cleanup 与残留回读 |
+| AD-16 | 已修 | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次 |
+| RS-1 | 已修 | Shim 每轮只读取所有进程的 pid / ppid / pgid / 启动时间，可执行文件路径只对 root 与自己拥有的进程读取；实测单轮从约 1.8ms 降到约 0.6ms（debug 构建） |
+
 ## 5. 修复顺序
 
 | 阶段 | 内容 | 覆盖条目 |
