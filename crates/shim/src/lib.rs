@@ -244,6 +244,11 @@ fn wait_for_child(
         if self_release_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             child.force_terminate()?;
             self_release_deadline = None;
+        } else if self_release_deadline.is_some() && refresh_process_tree {
+            // Anchors are still finishing; anything else forked since the
+            // forced round (outside their groups) is killed as it appears,
+            // not only when their budget runs out.
+            child.force_terminate_sparing_self_releasing()?;
         }
         thread::sleep(POLL_INTERVAL);
     }

@@ -75,11 +75,18 @@ impl ChildProcessGuard {
             }
             if spare_self_releasing && let Some(executable) = &self.self_releasing {
                 let before = owned.len();
-                owned.retain(|process| &process.executable != executable);
+                owned.retain(|process| !runs_executable(&process.executable, executable));
                 if owned.len() != before {
                     // The spared processes share the root group, so a group
                     // signal would reach them too; signal the rest one by one.
-                    tree.signal_processes(&owned, signal)?;
+                    // A pid reused since the snapshot names a process that
+                    // is already gone, not a reason to abandon the round.
+                    for process in &owned {
+                        match tree.signal_processes(std::slice::from_ref(process), signal) {
+                            Ok(()) | Err(PlatformError::Invalid(_)) => {}
+                            Err(error) => return Err(error),
+                        }
+                    }
                     return Ok(true);
                 }
             }
@@ -112,6 +119,19 @@ impl ChildProcessGuard {
             Ok(false)
         })
     }
+}
+
+/// Whether `observed` is `expected`. Linux reports a running binary that was
+/// replaced on disk (an in-place update) as `<path> (deleted)`; the process
+/// is still that executable.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn runs_executable(observed: &Path, expected: &Path) -> bool {
+    if observed == expected {
+        return true;
+    }
+    let mut replaced = expected.as_os_str().to_owned();
+    replaced.push(" (deleted)");
+    observed.as_os_str() == replaced
 }
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -421,6 +441,20 @@ mod tests {
             .expect("terminate supervised script");
         child.wait().expect("wait for supervised script");
         fs::remove_dir_all(directory).expect("remove temporary directory");
+    }
+
+    #[test]
+    fn a_replaced_self_releasing_binary_is_still_recognised() {
+        let anchor = std::path::Path::new("/opt/codexhost/libexec/codexhost-anchor");
+        assert!(super::runs_executable(anchor, anchor));
+        assert!(super::runs_executable(
+            std::path::Path::new("/opt/codexhost/libexec/codexhost-anchor (deleted)"),
+            anchor
+        ));
+        assert!(!super::runs_executable(
+            std::path::Path::new("/opt/codexhost/libexec/codexhost-anchor-old"),
+            anchor
+        ));
     }
 
     #[test]
