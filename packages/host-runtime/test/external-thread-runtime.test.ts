@@ -1034,6 +1034,49 @@ describe("idle native resource lifecycle", () => {
     }
   });
 
+  it("reports every failed idle release and retries it", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok || !(opened.value instanceof FakeHarnessSession)) {
+      throw new Error("Missing fake Session");
+    }
+    const session = opened.value;
+    const suspend = vi.fn(async () => ({
+      status: "releaseFailed" as const,
+      reason: "process group is still alive",
+    }));
+    Object.defineProperty(session, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend },
+    });
+    const diagnostics: string[] = [];
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: {} as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: (error) => diagnostics.push(String(error)),
+      idleSuspendTimeoutMs: 5,
+    });
+    try {
+      runtime.register({
+        record: record(),
+        session,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId },
+        turns: [],
+      });
+      await vi.waitFor(() => expect(suspend.mock.calls.length).toBeGreaterThanOrEqual(2));
+      const reported = diagnostics.filter((line) =>
+        line.includes("idle release failed: process group is still alive"),
+      );
+      expect(reported.length).toBeGreaterThanOrEqual(2);
+      expect(session.closed).toBe(false);
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
   it("does not suspend when Host-owned activity makes the Thread ineligible", async () => {
     const adapter = new FakeHarnessAdapter(harnessId);
     const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });

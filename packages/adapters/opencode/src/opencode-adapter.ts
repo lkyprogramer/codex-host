@@ -1666,7 +1666,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     } catch (error) {
       this.#fault(error);
       return {
-        status: "unknown",
+        status: "releaseFailed",
         reason: "OpenCode managed resource cleanup could not be confirmed",
       };
     }

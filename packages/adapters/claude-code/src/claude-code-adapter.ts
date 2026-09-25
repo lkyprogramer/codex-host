@@ -1089,7 +1089,7 @@ class ClaudeHarnessSession implements HarnessSession {
       // release on its next idle tick, and every start retries it first.
       if (!this.#closePromise) this.#phase = "open";
       return {
-        status: "unknown" as const,
+        status: "releaseFailed" as const,
         reason: `Claude Code native process release failed: ${error instanceof Error ? error.message : String(error)}`,
       };
     }

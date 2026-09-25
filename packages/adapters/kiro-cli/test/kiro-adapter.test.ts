@@ -349,9 +349,10 @@ describe("Kiro regression lifecycle", () => {
     await session.refreshUsage?.();
     fake.closeError = new Error("ACP process group is still alive");
 
-    await expect(lifecycle.suspend(new AbortController().signal)).rejects.toThrow(
-      "ACP process group is still alive",
-    );
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "releaseFailed",
+      reason: "Kiro native process release failed: ACP process group is still alive",
+    });
     delete fake.closeError;
     await expect(adapter.close()).rejects.toThrow("ACP process group is still alive");
   });

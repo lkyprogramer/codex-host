@@ -1024,7 +1024,7 @@ describe("Cursor idle suspension", () => {
     vi.spyOn(f.transport, "close").mockRejectedValue(new Error("owned group remains"));
     await expect(
       f.session.resourceLifecycle.suspend(new AbortController().signal),
-    ).rejects.toBeInstanceOf(AggregateError);
+    ).resolves.toMatchObject({ status: "releaseFailed" });
     await f.done;
   });
 });

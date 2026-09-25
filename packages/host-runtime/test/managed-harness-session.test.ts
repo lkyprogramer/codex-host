@@ -474,4 +474,51 @@ describe("ManagedHarnessSession", () => {
     // Attached to nothing, the late native Session would never be closed.
     await vi.waitFor(() => expect(late.closed).toBe(true));
   });
+
+  it("keeps a Session whose release failed but stayed open, and faults one that closed", async () => {
+    const open = session();
+    Object.defineProperty(open, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend: async () => ({ status: "releaseFailed", reason: "group remains" }) },
+    });
+    const keptFault = vi.fn();
+    const kept = new ManagedHarnessSession({
+      session: open,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: keptFault,
+    });
+    await expect(kept.resourceLifecycle?.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "releaseFailed",
+      reason: "group remains",
+    });
+    // Still usable: the Host retries the release on its idle backoff.
+    await expect(kept.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(keptFault).not.toHaveBeenCalled();
+    await kept.close();
+
+    const closed = session();
+    Object.defineProperty(closed, "resourceLifecycle", {
+      configurable: true,
+      value: {
+        suspend: async () => {
+          // Like Cursor and Kiro: the adapter closed itself before the
+          // release failed, which ends its outputs.
+          await closed.close();
+          return { status: "releaseFailed", reason: "group remains" };
+        },
+      },
+    });
+    const lostFault = vi.fn();
+    const lost = new ManagedHarnessSession({
+      session: closed,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: lostFault,
+    });
+    await expect(
+      lost.resourceLifecycle?.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "releaseFailed" });
+    await vi.waitFor(() => expect(lostFault).toHaveBeenCalledOnce());
+  });
 });

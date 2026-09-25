@@ -714,7 +714,15 @@ export class CursorSession implements HarnessSession {
     }
     // close() marks the Session closed before awaiting the ACP process, so no
     // late callback can publish work after this admission check.
-    await this.close();
+    try {
+      await this.close();
+    } catch (error) {
+      // Already closed: its outputs have ended, so the Host faults it.
+      return {
+        status: "releaseFailed",
+        reason: `Cursor native process release failed: ${error instanceof Error ? error.message : String(error)}`,
+      };
+    }
     return { status: "suspended", scope: "cursor-acp-session" };
   }
   close(): Promise<void> {

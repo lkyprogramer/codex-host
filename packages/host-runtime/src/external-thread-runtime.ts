@@ -492,8 +492,17 @@ export class ExternalThreadRuntime {
     } finally {
       if (this.#idleTimers.get(thread) === idle) this.#idleTimers.delete(thread);
     }
+    if (result?.status === "releaseFailed") {
+      // Unlike an undecided attempt, a failed release can leave native
+      // processes running: report every one.
+      this.#diagnose(
+        `External Thread '${thread.id}' idle release failed${result.reason ? `: ${result.reason}` : ""}`,
+      );
+    }
     if (
-      (result?.status === "busy" || result?.status === "unknown") &&
+      (result?.status === "busy" ||
+        result?.status === "unknown" ||
+        result?.status === "releaseFailed") &&
       !abort.signal.aborted &&
       this.#threads.get(thread.id) === thread &&
       this.#canSuspend(thread)
@@ -504,7 +513,7 @@ export class ExternalThreadRuntime {
           `External Thread '${thread.id}' idle resource suspension is unknown; retrying`,
         );
       }
-      this.#armIdleTimer(thread, result.status === "unknown" ? idle.attempts + 1 : 0);
+      this.#armIdleTimer(thread, result.status === "busy" ? 0 : idle.attempts + 1);
     }
   }
 

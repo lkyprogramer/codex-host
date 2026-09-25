@@ -79,6 +79,7 @@ function validSuspendResult(value: unknown): value is HarnessIdleSuspendResult {
     result.status !== "suspended" &&
     result.status !== "busy" &&
     result.status !== "unknown" &&
+    result.status !== "releaseFailed" &&
     result.status !== "unsupported"
   ) {
     return false;

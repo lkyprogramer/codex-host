@@ -527,9 +527,19 @@ export type HarnessOutput =
   { kind: "event"; event: HostEvent } | { kind: "interaction"; interaction: HostInteraction };
 
 /** Outcome of an atomic, non-destructive idle suspension attempt. */
+/**
+ * - `suspended`: native resources were released; the Session resumes later.
+ * - `busy`: native work or an interaction is in progress; nothing was touched.
+ * - `unknown`: suspension was not attempted because the Session cannot decide
+ *   now (not yet persisted, closing, aborted); nothing was released.
+ * - `releaseFailed`: a release was attempted and could not be confirmed.
+ *   Whatever remains is still owned by the adapter. A Session that stays open
+ *   is retried later; one the adapter had to close ends its outputs.
+ * - `unsupported`: this Session never suspends.
+ */
 export type HarnessIdleSuspendResult =
   | { status: "suspended"; scope: string }
-  | { status: "busy" | "unknown" | "unsupported"; reason?: string };
+  | { status: "busy" | "unknown" | "releaseFailed" | "unsupported"; reason?: string };
 
 /** Structural cancellation view: usable without Node.js or DOM library dependencies. */
 export interface HarnessIdleSuspendSignal {

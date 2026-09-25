@@ -6,7 +6,7 @@ Host Thread 的持久化身份与原生进程的存活期不同。Thread 可以�
 
 公共入口是 [`HarnessSession.resourceLifecycle`](../packages/harness-adapter/src/text-session.ts)，Host 通过 [`ManagedHarnessSession`](../packages/host-runtime/src/managed-harness-session.ts) 管理可挂起实例。它不依赖具体 Harness 名称，也不把所有 CLI 假定成 ACP。
 
-Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `suspend(signal)` 必须在自身原生生命周期内完成检查和关闭；分别返回 `suspended`、`busy`、`unknown` 或 `unsupported`。Host 不把一次 idle 查询当作随后强制关闭的授权。
+Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `suspend(signal)` 必须在自身原生生命周期内完成检查和关闭；分别返回 `suspended`、`busy`、`unknown`、`releaseFailed` 或 `unsupported`。`unknown` 表示这次没有尝试释放（尚未持久化、正在关闭或被中止），`releaseFailed` 表示尝试过释放但没能确认完成、剩余资源仍归 Adapter 所有。Host 对 `unknown` 只报告一次，对 `releaseFailed` 每次都报告，两者都按退避重试；Adapter 若已关闭自身（Cursor、Kiro），其输出结束，Host 将 Session 判为故障。Host 不把一次 idle 查询当作随后强制关闭的授权。
 
 - 有活动 Turn、配置、待回答交互、后台子代理或自主任务时不能挂起。
 - 成功挂起保留原生 Session 身份、历史及配置；后续操作通过同一原生身份恢复。
@@ -20,7 +20,7 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 
 `thread release` 的 `resourcesReleased=true` 只证明返回 `proof.scope` 范围内的原生资源已释放。它可以与 `released=false`、`quiescence=unknown` 同时出现：Thread 保留可恢复状态，但不能据此删除工作树或业务资源。
 
-挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown` 或 `unsupported` 时，具备显式 owned-job 接口的 Harness 仍走原有的停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
+挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown`、`releaseFailed` 或 `unsupported` 时，具备显式 owned-job 接口的 Harness 仍走原有的停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
 
 `quiescence=confirmed` 与资源挂起是不同的证明。受管进程组退出不覆盖工具自行创建的独立进程组、远端任务、容器任务或外部业务处理。取消请求成功、父 Turn 结束和进程内存下降，都不能替代这些任务的静默证明。
 
@@ -53,7 +53,7 @@ Windows、或找不到 anchor 的开发环境回退到 Host 侧 tracker：leader
 2026-09-23 补齐 Claude Code 的同类缺口：
 
 - 原生后台任务（包括 `run_in_background` Shell，不只是子代理）未结束时拒绝挂起。判断只依据 Claude 的 `background_tasks_changed` 电平集合，不依据可能乱序或遗漏的 task 边沿事件；关闭时也只等待电平集合中的任务结束，仅见于边沿的 id（例如前台 Task）只尽力请求停止，不等待其终态。
-- 释放失败返回 `unknown` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback：`turn.start` 直接以可重试的 `unavailable`（「上一进程未确认停止」）拒绝，不会开始 Turn。已拆除的 Transport 不再向 Session 投递迟到输出，重试时也不再等待这些输出排空，只重新确认受管进程组。
+- 释放失败返回 `releaseFailed` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback：`turn.start` 直接以可重试的 `unavailable`（「上一进程未确认停止」）拒绝，不会开始 Turn。已拆除的 Transport 不再向 Session 投递迟到输出，重试时也不再等待这些输出排空，只重新确认受管进程组。
 - 释放未确认期间，若旧进程仍在运行并写入原生历史，这部分输出不会投影到 Host；Session 重新可用后，Host 视图可能落后于原生历史，直到下一次完整读取。准入已排除活动 Turn 与后台任务，此时进程应无原生工作，因此只是残余风险。
 - 重试时若 leader 已被回收且其 pid 已被其他进程占用，即判定受管组已空，不再发信号；EPERM 按组仍存在继续等待。
 

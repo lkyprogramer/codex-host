@@ -3352,7 +3352,7 @@ describe("Grok idle suspension", () => {
     if (!lifecycle) throw new Error("Missing idle lifecycle");
     transport.releaseError = new Error("Owned process group did not exit within cleanup bounds");
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
-      status: "unknown",
+      status: "releaseFailed",
       reason: "Owned process group did not exit within cleanup bounds",
     });
     expect(transport.close).not.toHaveBeenCalled();
@@ -3373,7 +3373,7 @@ describe("Grok idle suspension", () => {
       throw new Error("Grok ACP ownership handle is unavailable");
     });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
-      status: "unknown",
+      status: "releaseFailed",
       reason: "Grok ACP ownership handle is unavailable",
     });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({

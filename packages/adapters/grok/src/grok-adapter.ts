@@ -1641,7 +1641,7 @@ class GrokHarnessSession implements HarnessSession {
       // Session returns to open and the Host retries on its own backoff.
       this.#phase = "open";
       return {
-        status: "unknown",
+        status: "releaseFailed",
         reason: error instanceof Error ? error.message : "Grok idle release failed",
       };
     }

@@ -643,7 +643,7 @@ describe("Claude Code HarnessAdapter", () => {
     transport.close.mockRejectedValueOnce(new Error("process group is still alive"));
 
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
-      status: "unknown",
+      status: "releaseFailed",
       reason: "Claude Code native process release failed: process group is still alive",
     });
     // The Host retries on its next idle tick, and that retry reaches the same process.
@@ -670,7 +670,7 @@ describe("Claude Code HarnessAdapter", () => {
       .mockRejectedValueOnce(new Error("process group is still alive"))
       .mockRejectedValueOnce(new Error("process group is still alive"));
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
-      status: "unknown",
+      status: "releaseFailed",
     });
 
     // The old process may still write this native history: no new one may start,
@@ -715,7 +715,7 @@ describe("Claude Code HarnessAdapter", () => {
       .mockRejectedValueOnce(new Error("process group is still alive"))
       .mockRejectedValueOnce(new Error("process group is still alive"));
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
-      status: "unknown",
+      status: "releaseFailed",
     });
 
     // Close owns the retained process too, and never reports what it could not confirm.
@@ -747,7 +747,7 @@ describe("Claude Code HarnessAdapter", () => {
     const suspending = lifecycle.suspend(new AbortController().signal);
     const closing = session.close();
     failRelease(new Error("process group is still alive"));
-    await expect(suspending).resolves.toMatchObject({ status: "unknown" });
+    await expect(suspending).resolves.toMatchObject({ status: "releaseFailed" });
     await expect(closing).rejects.toThrow("could not stop safely");
     // The failed release must not hand a closed Session back to new work.
     await expect(session.execute(textTurn("after-close"))).resolves.toMatchObject({ ok: false });
