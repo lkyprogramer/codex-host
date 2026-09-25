@@ -97,7 +97,18 @@ spawnOwnedProcess(command, args, {
   - Linux（回退模式）：leader 随 pdeathsig 退出，其余进程由 3.7 的记录文件兜底回收。
   - macOS：同样由记录文件兜底，在下一次 Shim 启动或退出时回收。
   因此任何代码都不得直接杀死 anchor：`spawnOwnedProcess` 返回的 `child.kill()` 被改写为向 anchor 发 terminate（SIGKILL 表示立即终止，其他信号走宽限期）。Shim 的强制阶段也会跳过 anchor（3.7）。
-- Linux 的 PID namespace 模式下，Harness 运行在单独的 user namespace 里，`sudo` 等 setuid 程序会失效。设置 `CODEXHOST_PROCESS_ISOLATION=group` 可关闭该模式。
+- Linux 的 PID namespace 模式下，Harness 运行在单独的 user namespace 里，与宿主有以下可见差异：
+  - `sudo` 等 setuid 程序会失效；
+  - `ps` / `kill` 看不到宿主进程；
+  - 无法 ptrace 附着到宿主进程；
+  - 对端在 namespace 外时，`SO_PEERCRED` 取到的 pid 为 0；
+  - 会话开始后宿主新挂载的文件系统（外置盘、sshfs）仍然可见，因为挂载传播设为 `MS_SLAVE`，已在容器中实测。
+
+  设置 `CODEXHOST_PROCESS_ISOLATION=group` 可关闭该模式；无法创建 namespace 时，anchor 会发一条诊断说明回退原因。
+- 逃逸追踪默认会随 Harness 一起结束那些 `setsid` 离组的常驻进程（tmux server、gpg-agent、ssh ControlMaster、构建守护进程）。设置 `CODEXHOST_PROCESS_ESCAPEES=keep` 可保留它们：这些进程既不计入进程组的释放条件，也不写入记录。但以下两种情况下仍会被结束：
+  - 离组前它们已作为组员写入记录，而写入有节流，最长约 2 秒；若 anchor 恰好在这段时间内被杀，之后的回收仍会结束它们；
+  - Linux 的 namespace 模式和 subreaper 模式下，它们仍随 Harness 一起结束。
+- macOS 上每个 anchor 平时每秒扫描一次进程表，被追踪的进程 fork 时立即扫描（两次扫描至少间隔 20ms）。实测：Harness 每秒 fork 约 300 次时，anchor 约占 5% 单核（release 构建）。
 - Windows 首版不启用 anchor，保持现状，Job Object 版本见第 5 节阶段 D。
 - 每个存活 Harness 多一个很小的原生进程。
 
@@ -112,10 +123,11 @@ spawnOwnedProcess(command, args, {
 
   沿父子关系遍历时，不满足条件的进程既不会被加入，也不会被当作跳板继续往下找。
 - **逃逸追踪**：只沿“父进程仍存活”的父子关系发现新进程；发现过的进程按身份（pid + 实例 id）持续追踪，直到退出。macOS 上，被追踪进程每次 fork 都会触发一次立即扫描（kqueue `NOTE_FORK`，两次扫描至少间隔 20ms），平时每 1 秒扫描一次；Linux 每 2 秒扫描一次。终止时，逃逸进程与组内进程同样经历 TERM → KILL。
-- **记录文件**：每个 anchor 把自己的实例 id、首进程和逃逸进程写进每用户私有目录，只有确认进程组已清空后才删除。私有目录为：macOS `confstr(_CS_DARWIN_USER_TEMP_DIR)`，Linux `/run/user/<uid>` 或 `/tmp`；目录名为 `codexhost-process-ledger-<uid>`，权限 0700，并校验属主。`codexhost-anchor --reclaim` 只处理 anchor 已不在的记录，处理方式如下：
-  - 若首进程 pid 已被其他实例占用，视为进程组 id 已复用，整组跳过；
-  - 其余情况下，逐个向满足边界的进程发 TERM，2 秒后发 KILL；
-  - 进程全部结束后才删除该记录。
+- **记录文件**（格式版本 2）：每个 anchor 把自己的实例 id，以及它拥有的全部进程的身份（pid + 实例 id，包括组内成员）写进每用户私有目录。进程变化时最多每秒写一次；只有确认进程组已清空后才删除；因超时放弃时，先写入最新状态再退出。私有目录为：macOS `confstr(_CS_DARWIN_USER_TEMP_DIR)`，Linux `/run/user/<uid>` 或 `/tmp`；目录名为 `codexhost-process-ledger-<uid>`，权限 0700，并校验属主。`codexhost-anchor --reclaim` 只处理 anchor 已不在的记录，处理方式如下：
+  - 只认领记录中仍持有原 pid 的进程，以及它们此后经存活父进程链派生的后代。**不按进程组 id 认领**：anchor 不在后，组 id 可能已被复用成别人的进程组，哪怕那个新组的组长已经退出；
+  - 逐个向满足边界的进程发 TERM，2 秒后发 KILL；
+  - 进程全部结束后才删除该记录；
+  - 属于其他开机周期的记录直接删除；版本不认识或无法解析的记录跳过、不删除，因为可能是更新版本的 anchor 正在使用的。
 
   Shim 在 Host 启动时于后台执行一次回收，Host 退出后再同步执行一次（最多 5 秒）。PID namespace 模式下不写记录（内核已保证清理）。
 - **Linux PID namespace**：外层 anchor 用 `clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS)` 启动内层 anchor，内层作为新 namespace 的 init（1 号进程），挂载独立的 `/proc`，并设置父进程死亡信号 `PDEATHSIG=SIGKILL` 与外层绑定。外层 anchor 被 SIGKILL 时，内层随之死亡，内核结束 namespace 内的全部进程。外层只负责转发 TERM/INT/HUP 并镜像退出状态；Harness 死于信号时，由内层经管道把信号号告诉外层。不允许非特权 user namespace，或 `/proc` 被遮蔽的容器里，会自动回退到进程组模式。
@@ -247,7 +259,33 @@ spawnOwnedProcess(command, args, {
 | HC-4 | 已修 | 合同新增 `releaseFailed`（向后兼容的新增状态）：`unknown` 只表示“这次没有尝试释放”；Claude Code、Grok、OpenCode、Cursor、Kiro 释放失败时统一返回 `releaseFailed`，Host 每次都报告并按退避重试 |
 | HC-5 | 已修 | conformance 增加四个资源场景：中止的挂起不释放资源、活动 Turn 期间的挂起不释放资源、空闲挂起要么拒绝要么结束输出、关闭后的 Session 再次 close 正常且拒绝新 Turn、不挂起；计划中的“8 个资源场景”落地为这四项加上既有的 cleanup 与残留回读 |
 | AD-16 | 已修 | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次 |
+| 关闭预算 | 说明 | 超出关闭预算后，Host 仍继续关闭 repository；尚未关完的 Session 如果之后才写入状态，这些最后的更新会丢失（只记诊断）。这是预算的代价：进程由 anchor / Shim 保证结束，状态以原生历史为准，下次恢复时会重新对齐 |
 | RS-1 | 已修 | Shim 每轮只读取所有进程的 pid / ppid / pgid / 启动时间，可执行文件路径只对 root 与自己拥有的进程读取；实测单轮从约 1.8ms 降到约 0.6ms（debug 构建） |
+
+### 4.8 兜底机制与阶段 B 的评审修复
+
+| 评审项 | 修复 |
+| --- | --- |
+| H1 回收时可能误杀陌生进程组 | 记录格式升到 v2，保存全部已拥有进程的身份；回收只认领记录中的身份及其存活后代，不再按进程组 id 认领；补了组 id 被复用场景的单元测试 |
+| M1 dry run 下进程组无法释放 | dry run 与 `keep` 模式都不把逃逸进程计入释放条件 |
+| M2 namespace 挂载设为完全私有 | 改为 `MS_SLAVE`，已在容器中验证后挂载的文件系统可见；文档补充 namespace 模式的其他可见差异 |
+| M3 旧 Host 不认识 `releaseFailed` | Host 把不认识的挂起状态按 `unknown` 处理，今后合同再新增状态也不会让 Session 故障；插件 API 版本号不变 |
+| M4 常驻守护进程被一并结束 | 新增 `CODEXHOST_PROCESS_ESCAPEES=keep`，文档写明默认行为与这个开关的限制 |
+| L1 回退时丢失原因 | namespace 回退时发一条诊断；TS 侧对相同的诊断只警告一次 |
+| L2 回收器删除不认识版本的记录 | 不认识或无法解析的记录一律跳过，只删除属于其他开机周期的记录 |
+| L3 更新后 `(deleted)` 后缀 | Shim 把 `<path> (deleted)` 也识别为 anchor |
+| L4 dry run 报告不可见 | TS 侧把 `dryRun` 消息转为 warning |
+| L5 扫描开销 | 已实测（见 3.6），扫描参数不变 |
+| L6 强制退出截断输出 | 标准输出 / 标准错误仍有未写完的内容时，最多再多等 6 个宽限期 |
+| L7 Shim 豁免分支 | 逐个进程发信号，遇到 pid 复用视为目标已消失；anchor 收尾期间每轮都对非 anchor 进程补发 KILL |
+| L8 超预算后状态可能不落盘 | 文档说明（4.7） |
+| L9 outcome fd 设置 CLOEXEC 失败 | 检查返回值，失败按参数错误退出 |
+| 操作期限与释放时长冲突 | 挂起与 `withCurrentSession` 改用 25 分钟的释放期限；读取、命令、恢复仍为 120 秒 |
+| 退役屏障 | 恢复被旧 Session 阻塞时，返回“previous native Session is still closing”；其余先移除后关闭的路径，要么对应记录已删除（无法恢复），要么先关后删，不需要屏障 |
+| 进程身份读取失败时静默 | anchor 读不到自身身份时发诊断 |
+| Turn 语法与 AD-1 冲突 | Turn 完成后才到的 `interaction.closed` 视为合法，开始前出现仍判违规 |
+| Linux 同一 tick 边界 | 补单元测试 |
+| 测试隔离 | Shim 测试的回收只作用于测试自己的临时记录目录 |
 
 ## 5. 修复顺序
 
