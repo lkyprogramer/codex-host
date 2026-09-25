@@ -90,16 +90,34 @@ export function installProcessGuard(options: ProcessGuardOptions): () => void {
   };
 }
 
-/** Sets the exit code and ends the process if a leaked handle keeps it alive. */
+/** How many further graces a forced exit waits for unwritten output. */
+const OUTPUT_DRAIN_GRACES = 6;
+
+interface PendingOutput {
+  readonly writableLength: number;
+}
+
+/**
+ * Sets the exit code and ends the process if a leaked handle keeps it alive.
+ * Output still queued for a slow reader (a large delegation CLI result on a
+ * pipe) is given more time first: exiting would truncate it.
+ */
 export function exitAfterRun(
   code: number,
   target: Pick<GuardedProcess, "exit" | "exitCode"> = process as unknown as GuardedProcess,
   graceMs = EXIT_AFTER_RUN_GRACE_MS,
+  outputs: readonly PendingOutput[] = [process.stdout, process.stderr],
 ): void {
   // A fatal failure during the run keeps its failing code.
   if (target.exitCode !== 1) target.exitCode = code;
-  setTimeout(
-    () => target.exit(typeof target.exitCode === "number" ? target.exitCode : code),
-    graceMs,
-  ).unref();
+  let graces = 0;
+  const exitWhenWritten = (): void => {
+    if (outputs.some((output) => output.writableLength > 0) && graces < OUTPUT_DRAIN_GRACES) {
+      graces += 1;
+      setTimeout(exitWhenWritten, graceMs).unref();
+      return;
+    }
+    target.exit(typeof target.exitCode === "number" ? target.exitCode : code);
+  };
+  setTimeout(exitWhenWritten, graceMs).unref();
 }

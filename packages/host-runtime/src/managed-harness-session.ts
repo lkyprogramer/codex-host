@@ -39,6 +39,30 @@ type SessionOperation<T> = (session: HarnessSession) => Promise<T>;
  * never answers would otherwise block every later operation, close included.
  */
 export const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+/**
+ * An idle suspension or an owned-job stop releases native processes, which
+ * may legitimately wait out a Harness's own cleanup grace (anchors allow up
+ * to twice a 10-minute grace). It is still bounded, just not by the
+ * interactive deadline.
+ */
+export const DEFAULT_RELEASE_TIMEOUT_MS = 25 * 60_000;
+
+const SUSPEND_STATUSES = new Set(["suspended", "busy", "unknown", "releaseFailed", "unsupported"]);
+
+/**
+ * A plugin built against a newer contract may report a status this Host does
+ * not know. Treating it as `unknown` (nothing decided, retry later) keeps the
+ * Session instead of faulting it over a vocabulary mismatch.
+ */
+function knownSuspendResult(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const status = (value as { status?: unknown }).status;
+  if (typeof status !== "string" || SUSPEND_STATUSES.has(status)) return value;
+  return {
+    status: "unknown",
+    reason: `Harness reported an unrecognised suspension status '${status}'`,
+  };
+}
 
 interface PumpCompletion {
   promise: Promise<Error | null>;
@@ -111,6 +135,7 @@ export class ManagedHarnessSession {
   readonly #onFault: (error: Error) => void;
   readonly #outputEndTimeoutMs: number;
   readonly #operationTimeoutMs: number;
+  readonly #releaseTimeoutMs: number;
   readonly #initialCapabilities: HarnessSessionCapabilities;
   readonly #requiresResourceLifecycle: boolean;
   #admissionClosed = false;
@@ -133,6 +158,7 @@ export class ManagedHarnessSession {
     onFault(error: Error): void;
     outputEndTimeoutMs?: number;
     operationTimeoutMs?: number;
+    releaseTimeoutMs?: number;
   }) {
     this.harnessId = input.session.harnessId;
     this.initialUsage = input.session.initialUsage;
@@ -145,6 +171,7 @@ export class ManagedHarnessSession {
     this.#onFault = input.onFault;
     this.#outputEndTimeoutMs = input.outputEndTimeoutMs ?? 5_000;
     this.#operationTimeoutMs = input.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
+    this.#releaseTimeoutMs = input.releaseTimeoutMs ?? DEFAULT_RELEASE_TIMEOUT_MS;
     this.#deferredLive = input.session.executionReady === false;
     this.outputs = this.#channel.outputs;
     this.#attach(input.session);
@@ -271,7 +298,7 @@ export class ManagedHarnessSession {
       this.#assertOpen();
       if (this.#suspended) throw new Error("Managed Harness Session is suspended");
       return operation(this.#current);
-    });
+    }, this.#releaseTimeoutMs);
   }
 
   /** Checks a candidate before Host persistence observes a resumed native Session. */
@@ -342,7 +369,7 @@ export class ManagedHarnessSession {
       try {
         // Do not race this call with the AbortSignal. The adapter sees cancellation
         // and the following wake remains queued until native cleanup settles.
-        result = await lifecycle.suspend(signal);
+        result = knownSuspendResult(await lifecycle.suspend(signal)) as HarnessIdleSuspendResult;
       } catch (error) {
         this.#suspendingGeneration = null;
         this.#flushSuspendedOutputs(generation);
@@ -403,7 +430,7 @@ export class ManagedHarnessSession {
         this.#fail(ended ?? new Error("External Harness output ended during rejected suspension"));
       }
       return result;
-    });
+    }, this.#releaseTimeoutMs);
   }
 
   async #resumeIfNeeded(options?: { historyOnly?: boolean }): Promise<HarnessSession> {

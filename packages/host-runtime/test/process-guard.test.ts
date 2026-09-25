@@ -65,15 +65,32 @@ describe("process guard", () => {
   it("ends a finished run that a leaked handle keeps alive, keeping a fatal code", () => {
     vi.useFakeTimers();
     const target = new FakeProcess();
-    exitAfterRun(0, target, 100);
+    exitAfterRun(0, target, 100, []);
     expect(target.exitCode).toBe(0);
     vi.advanceTimersByTime(100);
     expect(target.exit).toHaveBeenCalledWith(0);
 
     const failed = new FakeProcess();
     failed.exitCode = 1;
-    exitAfterRun(0, failed, 100);
+    exitAfterRun(0, failed, 100, []);
     vi.advanceTimersByTime(100);
     expect(failed.exit).toHaveBeenCalledWith(1);
+  });
+
+  it("waits for queued output before a forced exit, but not forever", () => {
+    vi.useFakeTimers();
+    const target = new FakeProcess();
+    const output = { writableLength: 4096 };
+    exitAfterRun(0, target, 100, [output]);
+    vi.advanceTimersByTime(300);
+    expect(target.exit).not.toHaveBeenCalled();
+    output.writableLength = 0;
+    vi.advanceTimersByTime(100);
+    expect(target.exit).toHaveBeenCalledWith(0);
+
+    const stuck = new FakeProcess();
+    exitAfterRun(0, stuck, 100, [{ writableLength: 1 }]);
+    vi.advanceTimersByTime(100 * 8);
+    expect(stuck.exit).toHaveBeenCalledWith(0);
   });
 });

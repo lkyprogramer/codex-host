@@ -42,6 +42,19 @@ const warnedAnchors = new Set<string>();
  * It is checked on every spawn, so an anchor removed or replaced by an update
  * is never started as if it were the Harness.
  */
+const warnedDiagnostics = new Set<string>();
+
+/**
+ * Anchor diagnostics describe the platform (no pid namespace here, an
+ * unreadable process table), so every spawn would repeat them: report each
+ * distinct one once per Host.
+ */
+function warnOnce(message: string): void {
+  if (warnedDiagnostics.has(message)) return;
+  warnedDiagnostics.add(message);
+  process.emitWarning(message);
+}
+
 export function processAnchorPath(): string | null {
   if (process.platform === "win32") return null;
   const configured = process.env[PROCESS_ANCHOR_PATH_ENV];
@@ -367,7 +380,15 @@ class AnchoredProcessTree implements OwnedProcessTree {
       );
     } else if (type === "diagnostic") {
       const detail = Reflect.get(message, "message");
-      process.emitWarning(`Process anchor: ${typeof detail === "string" ? detail : "unknown"}`);
+      warnOnce(`Process anchor: ${typeof detail === "string" ? detail : "unknown"}`);
+    } else if (type === "dryRun") {
+      // CODEXHOST_PROCESS_ANCHOR_DRY_RUN=1: what the anchor would have ended.
+      warnOnce(
+        `Process anchor dry run: ${JSON.stringify({
+          escapees: Reflect.get(message, "escapees"),
+          rejected: Reflect.get(message, "rejected"),
+        })}`,
+      );
     }
   }
 

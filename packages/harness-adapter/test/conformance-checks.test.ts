@@ -44,7 +44,26 @@ describe("Turn grammar", () => {
     });
   });
 
+  it("accepts an interaction closed after its Turn completed", async () => {
+    const closed = event({
+      type: "interaction.closed",
+      turnId,
+      interactionId: "i-1",
+      reason: "cancelled",
+    });
+    await expect(terminalOf([started, completed, closed])).resolves.toBeDefined();
+  });
+
   it.each([
+    [
+      "an interaction closed before its Turn started",
+      [
+        event({ type: "interaction.closed", turnId, interactionId: "i-1", reason: "cancelled" }),
+        started,
+        completed,
+      ],
+      "interaction closed outside its Turn",
+    ],
     ["an item before its Turn started", [item, started, completed], "item outside its Turn"],
     ["an item after its Turn completed", [started, completed, item], "item outside its Turn"],
     ["a terminal without a start", [completed], "terminal event before its Turn started"],

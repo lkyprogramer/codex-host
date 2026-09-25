@@ -610,6 +610,7 @@ export class ExternalThreadRuntime {
       };
     }
     let restoring = this.#restores.get(threadId);
+    const blockedByRetiring = this.#retiring.has(threadId);
     if (!restoring) {
       const restored = this.#threads.get(threadId);
       if (restored) return { kind: "external", thread: restored, historyFresh: false };
@@ -637,7 +638,12 @@ export class ExternalThreadRuntime {
           error instanceof ExternalThreadOpenError
             ? error.rpcError
             : error instanceof Error && error.name === "TimeoutError"
-              ? { code: -32081, message: "External Thread history read timed out" }
+              ? blockedByRetiring && this.#retiring.has(threadId)
+                ? {
+                    code: -32081,
+                    message: "External Thread's previous native Session is still closing",
+                  }
+                : { code: -32081, message: "External Thread history read timed out" }
               : { code: -32076, message: "External Thread recovery failed" },
       };
     }

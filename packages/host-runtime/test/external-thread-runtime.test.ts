@@ -727,6 +727,70 @@ describe("retiring a faulted Thread", () => {
       await adapter.close();
     }
   });
+
+  it("says a restore waits on the previous Session rather than on history", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    let finishClose!: () => void;
+    const sessions: FakeHarnessSession[] = [];
+    const open = vi.fn(async () => {
+      const opened = new FakeHarnessSession(
+        harnessId,
+        undefined,
+        undefined,
+        stored.nativeSessionRef,
+      );
+      if (sessions.length === 0) {
+        // The first native Session is slow to release.
+        vi.spyOn(opened, "close").mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finishClose = resolve;
+            }),
+        );
+      }
+      sessions.push(opened);
+      return { ok: true as const, value: opened };
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([
+        [
+          "pi",
+          {
+            harnessId: adapter.harnessId,
+            inspect: (input) => adapter.inspect(input),
+            open,
+            close: () => adapter.close(),
+          } satisfies HarnessAdapter,
+        ],
+      ]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      historyRestoreTimeoutMs: 30,
+    });
+    try {
+      const first = await runtime.resolve(hostThreadId);
+      if (first.kind !== "external") throw new Error("Thread did not restore");
+      const closing = runtime.retire(first.thread);
+      expect(runtime.get(hostThreadId)).toBeUndefined();
+
+      await expect(runtime.resolve(hostThreadId)).resolves.toMatchObject({
+        kind: "error",
+        error: { message: "External Thread's previous native Session is still closing" },
+      });
+      expect(open).toHaveBeenCalledTimes(1);
+      finishClose();
+      await closing;
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
 });
 
 describe("bounded native history", () => {

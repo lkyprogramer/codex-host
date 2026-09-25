@@ -71,8 +71,11 @@ export class OutputCollector {
       case "item.started":
       case "item.updated":
       case "item.completed":
-      case "interaction.closed":
         return this.#turns.get(event.turnId) === "started" ? undefined : "item outside its Turn";
+      case "interaction.closed":
+        // Closing an interaction may be reported after its Turn ended (an
+        // approval cancelled with the Turn), but never before it started.
+        return this.#turns.has(event.turnId) ? undefined : "interaction closed outside its Turn";
       case "turn.completed": {
         const state = this.#turns.get(event.turnId);
         this.#turns.set(event.turnId, "completed");
