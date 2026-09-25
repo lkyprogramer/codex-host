@@ -230,6 +230,8 @@ export class ExternalThreadRuntime {
   readonly #environment: NodeJS.ProcessEnv;
   readonly #repository: ExternalThreadRepository;
   readonly #restores = new Map<string, Promise<ExternalThread>>();
+  /** Threads whose previous Session is still closing; see `retire`. */
+  readonly #retiring = new Map<string, Promise<void>>();
   readonly #threads = new Map<string, ExternalThread>();
   readonly #idleTimers = new Map<ExternalThread, IdleSuspendTimer>();
   readonly #idleUnknownReported = new Set<ExternalThread>();
@@ -285,6 +287,29 @@ export class ExternalThreadRuntime {
       this.#idleUnknownReported.delete(thread);
     }
     this.#threads.delete(threadId);
+  }
+
+  /**
+   * Removes `thread` and closes its Session. Until that close settles, a
+   * restore of the same Thread waits for it: starting a second native process
+   * for a Session whose first one may still run would let both write to it.
+   * The returned promise is the close itself, for callers that report it.
+   */
+  retire(thread: ExternalThread): Promise<void> {
+    if (this.#threads.get(thread.id) === thread) this.remove(thread.id);
+    const closing = Promise.resolve().then(() => thread.session.close());
+    const settled = closing.then(
+      () => undefined,
+      () => undefined,
+    );
+    const previous = this.#retiring.get(thread.id);
+    const barrier: Promise<void> = (
+      previous ? Promise.all([previous, settled]).then(() => undefined) : settled
+    ).finally(() => {
+      if (this.#retiring.get(thread.id) === barrier) this.#retiring.delete(thread.id);
+    });
+    this.#retiring.set(thread.id, barrier);
+    return closing;
   }
 
   clear(): void {
@@ -579,7 +604,10 @@ export class ExternalThreadRuntime {
     if (!restoring) {
       const restored = this.#threads.get(threadId);
       if (restored) return { kind: "external", thread: restored, historyFresh: false };
-      restoring = this.#restore(record).finally(() => {
+      const retiring = this.#retiring.get(threadId);
+      restoring = (
+        retiring ? retiring.then(() => this.#restore(record)) : this.#restore(record)
+      ).finally(() => {
         this.#restores.delete(threadId);
       });
       this.#restores.set(threadId, restoring);

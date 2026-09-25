@@ -663,6 +663,72 @@ describe("deferred live resume", () => {
   });
 });
 
+describe("retiring a faulted Thread", () => {
+  it("does not start a second native Session until the retired one closed", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    let finishClose!: () => void;
+    const sessions: FakeHarnessSession[] = [];
+    const open = vi.fn(async () => {
+      const opened = new FakeHarnessSession(
+        harnessId,
+        undefined,
+        undefined,
+        stored.nativeSessionRef,
+      );
+      if (sessions.length === 0) {
+        // The first native Session is slow to release.
+        vi.spyOn(opened, "close").mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finishClose = resolve;
+            }),
+        );
+      }
+      sessions.push(opened);
+      return { ok: true as const, value: opened };
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([
+        [
+          "pi",
+          {
+            harnessId: adapter.harnessId,
+            inspect: (input) => adapter.inspect(input),
+            open,
+            close: () => adapter.close(),
+          } satisfies HarnessAdapter,
+        ],
+      ]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    try {
+      const first = await runtime.resolve(hostThreadId);
+      if (first.kind !== "external") throw new Error("Thread did not restore");
+      const closing = runtime.retire(first.thread);
+      expect(runtime.get(hostThreadId)).toBeUndefined();
+
+      const second = runtime.resolve(hostThreadId);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(open).toHaveBeenCalledTimes(1);
+
+      finishClose();
+      await closing;
+      await expect(second).resolves.toMatchObject({ kind: "external" });
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+});
+
 describe("bounded native history", () => {
   function delay(ms: number): Promise<void> {
     return new Promise((resolve) => {

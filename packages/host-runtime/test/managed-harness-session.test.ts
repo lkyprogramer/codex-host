@@ -420,4 +420,58 @@ describe("ManagedHarnessSession", () => {
     expect(onFault).toHaveBeenCalledOnce();
     await managed.close().catch(() => undefined);
   });
+
+  it("faults and frees the queue when an adapter never answers an operation", async () => {
+    const initial = session();
+    Object.defineProperty(initial, "readSnapshot", {
+      configurable: true,
+      value: () => new Promise(() => undefined),
+    });
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: initial,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault,
+      operationTimeoutMs: 20,
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+
+    await expect(managed.readSnapshot()).rejects.toThrow("did not answer within 20 ms");
+    await expect(outputs.next()).resolves.toMatchObject({
+      value: { kind: "event", event: { type: "session.faulted" } },
+    });
+    // The close queued behind the stuck read still runs.
+    await managed.close();
+    expect(initial.closed).toBe(true);
+    expect(onFault).toHaveBeenCalledOnce();
+  });
+
+  it("closes a native Session whose resume finished after the deadline", async () => {
+    const initial = session();
+    lifecycle(initial);
+    let finishResume!: (value: FakeHarnessSession) => void;
+    const late = session();
+    // Fully compatible, so only the closed-Session check can refuse it.
+    lifecycle(late);
+    const managed = new ManagedHarnessSession({
+      session: initial,
+      resume: () =>
+        new Promise<FakeHarnessSession>((resolve) => {
+          finishResume = resolve;
+        }),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+      operationTimeoutMs: 20,
+    });
+    await expect(
+      managed.resourceLifecycle?.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "suspended" });
+
+    await expect(managed.readSnapshot()).rejects.toThrow("did not answer within 20 ms");
+    await managed.close();
+    finishResume(late);
+    // Attached to nothing, the late native Session would never be closed.
+    await vi.waitFor(() => expect(late.closed).toBe(true));
+  });
 });

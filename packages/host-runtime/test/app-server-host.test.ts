@@ -311,6 +311,7 @@ function createFixture(
     threadAccountStore?: ThreadAccountStore;
     updateCoordinator?: HostUpdateCoordinator;
     onDelegationApi?: (api: DelegationControlRegistration) => (() => void) | undefined;
+    shutdownBudgetMs?: number;
   } = {},
 ) {
   const adapter =
@@ -375,6 +376,9 @@ function createFixture(
     threadAccountStore,
     ...(options.updateCoordinator ? { updateCoordinator: options.updateCoordinator } : {}),
     ...(options.onDelegationApi ? { onDelegationApi: options.onDelegationApi } : {}),
+    ...(options.shutdownBudgetMs !== undefined
+      ? { shutdownBudgetMs: options.shutdownBudgetMs }
+      : {}),
   });
   const running = host.run();
   void running.then(
@@ -8632,4 +8636,24 @@ it("keeps Desktop models and Thread queries responsive during CLI observe and na
     await cli;
     await stopFixture(fixture);
   }
+});
+
+describe("Host shutdown budget", () => {
+  it("exits when a Harness Session never finishes closing", async () => {
+    const fixture = createFixture({ shutdownBudgetMs: 100 });
+    const diagnostics: string[] = [];
+    fixture.diagnosticOutput.on("data", (chunk: Buffer) => diagnostics.push(chunk.toString()));
+    await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    vi.spyOn(session, "close").mockImplementation(() => new Promise<void>(() => undefined));
+
+    const started = Date.now();
+    await closeFixture(fixture);
+    expect(Date.now() - started).toBeLessThan(5_000);
+    expect(diagnostics.join("")).toContain(
+      "closing Harness Sessions did not finish within the shutdown budget",
+    );
+    rmSync(fixture.mappingStoreDirectory, { recursive: true, force: true });
+  });
 });

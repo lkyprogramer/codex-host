@@ -33,6 +33,13 @@ import type { HarnessId } from "@codexhost/shared-contracts";
 
 type SessionOperation<T> = (session: HarnessSession) => Promise<T>;
 
+/**
+ * How long one queued Harness operation (a read, a command, a resume, an idle
+ * suspension) may take. Every operation shares one queue, so an adapter that
+ * never answers would otherwise block every later operation, close included.
+ */
+export const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+
 interface PumpCompletion {
   promise: Promise<Error | null>;
   resolve(error: Error | null): void;
@@ -102,6 +109,7 @@ export class ManagedHarnessSession {
   readonly #onActivity: () => void;
   readonly #onFault: (error: Error) => void;
   readonly #outputEndTimeoutMs: number;
+  readonly #operationTimeoutMs: number;
   readonly #initialCapabilities: HarnessSessionCapabilities;
   readonly #requiresResourceLifecycle: boolean;
   #admissionClosed = false;
@@ -123,6 +131,7 @@ export class ManagedHarnessSession {
     onActivity(): void;
     onFault(error: Error): void;
     outputEndTimeoutMs?: number;
+    operationTimeoutMs?: number;
   }) {
     this.harnessId = input.session.harnessId;
     this.initialUsage = input.session.initialUsage;
@@ -134,6 +143,7 @@ export class ManagedHarnessSession {
     this.#onActivity = input.onActivity;
     this.#onFault = input.onFault;
     this.#outputEndTimeoutMs = input.outputEndTimeoutMs ?? 5_000;
+    this.#operationTimeoutMs = input.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
     this.#deferredLive = input.session.executionReady === false;
     this.outputs = this.#channel.outputs;
     this.#attach(input.session);
@@ -233,6 +243,11 @@ export class ManagedHarnessSession {
     return this.#use((session) => session.execute(command as TurnStartCommand));
   }
 
+  /**
+   * Resolves once the native Session confirmed its release, however long that
+   * takes: callers that must not start a second native process for the same
+   * Session wait on it. Callers with a budget bound their own wait.
+   */
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     this.#admissionClosed = true;
@@ -245,7 +260,7 @@ export class ManagedHarnessSession {
         this.#suspendedOutputs.clear();
         this.#channel.end();
       }
-    });
+    }, null);
     return this.#closePromise;
   }
 
@@ -410,6 +425,7 @@ export class ManagedHarnessSession {
       let resumed: HarnessSession | undefined;
       try {
         resumed = await this.#resume({ skipSnapshot: true });
+        this.#assertStillOpenAfterResume();
         this.#validateResume(resumed);
       } catch (error) {
         await resumed?.close().catch(() => undefined);
@@ -424,6 +440,7 @@ export class ManagedHarnessSession {
     let resumed: HarnessSession | undefined;
     try {
       resumed = await this.#resume(options?.historyOnly ? { historyOnly: true } : undefined);
+      this.#assertStillOpenAfterResume();
       this.#validateResume(resumed);
     } catch (error) {
       await resumed?.close().catch(() => undefined);
@@ -435,6 +452,17 @@ export class ManagedHarnessSession {
     this.#deferredLive = resumed.executionReady === false;
     this.#attach(resumed);
     return resumed;
+  }
+
+  /**
+   * A resume that outlived its deadline finishes after the Session faulted
+   * and closed. Its new native Session must be closed, not attached: nothing
+   * would ever close it otherwise.
+   */
+  #assertStillOpenAfterResume(): void {
+    if (this.#admissionClosed) {
+      throw new Error("Managed Harness Session closed while the native Session was resuming");
+    }
   }
 
   #validateResume(session: HarnessSession): void {
@@ -579,12 +607,49 @@ export class ManagedHarnessSession {
     if (this.#admissionClosed) throw new Error("Managed Harness Session is closed");
   }
 
-  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.#operationTail.then(operation, operation);
+  /**
+   * Runs `operation` after every earlier one. With a timeout, an operation
+   * that does not settle in time faults the Session and frees the queue; its
+   * late result is ignored, and the fault's close runs next.
+   */
+  #enqueue<T>(
+    operation: () => Promise<T>,
+    timeoutMs: number | null = this.#operationTimeoutMs,
+  ): Promise<T> {
+    const run = () => (timeoutMs === null ? operation() : this.#bounded(operation, timeoutMs));
+    const pending = this.#operationTail.then(run, run);
     this.#operationTail = pending.then(
       () => undefined,
       () => undefined,
     );
     return pending;
+  }
+
+  #bounded<T>(operation: () => Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const error = new Error(`External Harness did not answer within ${timeoutMs} ms`);
+        reject(error);
+        this.#fail(error);
+      }, timeoutMs);
+      // Started synchronously, like an unbounded operation: callers that
+      // fire and forget observe the adapter call at the same point.
+      let started: Promise<T>;
+      try {
+        started = operation();
+      } catch (error) {
+        started = Promise.reject(error as Error);
+      }
+      started.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 }

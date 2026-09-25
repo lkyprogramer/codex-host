@@ -155,6 +155,25 @@ import type { HostUpdateCoordinator } from "./update-coordinator.js";
 
 const SUBAGENT_TERMINAL_REFRESH_DELAYS_MS = [0, 50, 100, 150] as const;
 const THREAD_USAGE_UPDATED_METHOD = "codexhost/thread/usage/updated";
+/**
+ * How long closing every Harness Session and adapter may take when the Host
+ * exits. Past it the Host exits anyway: process anchors (or the Shim, where
+ * there is no anchor) end whatever a Session did not release.
+ */
+export const DEFAULT_SHUTDOWN_BUDGET_MS = 20_000;
+
+/** Waits for `work` to settle, but not past `deadline`. Returns whether it settled. */
+async function settleBefore(deadline: number, work: readonly Promise<unknown>[]): Promise<boolean> {
+  let timer: NodeJS.Timeout | undefined;
+  const expired = new Promise<false>((resolve) => {
+    timer = setTimeout(() => resolve(false), Math.max(0, deadline - Date.now()));
+  });
+  try {
+    return await Promise.race([Promise.allSettled(work).then(() => true as const), expired]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 // Native Codex account quota is still pulled through its official API; keep
 // that reading briefly cached so concurrent Composer inspections coalesce.
 
@@ -216,6 +235,8 @@ import {
 
 export interface AppServerHostOptions {
   stockCodexPath: string;
+  /** Overrides DEFAULT_SHUTDOWN_BUDGET_MS. */
+  shutdownBudgetMs?: number;
   arguments: string[];
   defaultAgent: "codex" | "pi";
   environment?: NodeJS.ProcessEnv;
@@ -767,10 +788,23 @@ export class AppServerHost {
       return this.#closeRequested ? 0 : 1;
     } finally {
       this.#externalSteering.close();
+      const deadline = Date.now() + (this.#options.shutdownBudgetMs ?? DEFAULT_SHUTDOWN_BUDGET_MS);
+      const within = async (what: string, work: readonly Promise<unknown>[]) => {
+        if (!(await settleBefore(deadline, work))) {
+          this.#diagnose(`Host shutdown: ${what} did not finish within the shutdown budget`);
+        }
+      };
       const threads = this.#externalRuntime.values();
-      await Promise.allSettled(threads.map(({ session }) => session.close()));
-      await Promise.allSettled(threads.map(({ outputTask }) => outputTask));
-      await Promise.allSettled(
+      await within(
+        "closing Harness Sessions",
+        threads.map(({ session }) => session.close()),
+      );
+      await within(
+        "draining Harness output",
+        threads.map(({ outputTask }) => outputTask),
+      );
+      await within(
+        "closing Harness adapters",
         [...new Set(this.#externalAdapters.values())].map((adapter) =>
           Promise.resolve().then(() => adapter.close()),
         ),
@@ -4190,9 +4224,11 @@ export class AppServerHost {
       thread.attentionChanges.close();
       this.#externalSteering.fault(thread.id, cause);
       thread.stateObserver.fault(cause);
-      this.#externalRuntime.remove(thread.id);
+      // Retired, not just removed: a request for this Thread now waits for
+      // the old Session to close before a new one can start.
+      const closing = this.#externalRuntime.retire(thread);
       this.#signalActiveWorkChanged();
-      await thread.session.close().catch((error) => this.#diagnose(error));
+      await closing.catch((error) => this.#diagnose(error));
     }
   }
 
