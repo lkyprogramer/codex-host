@@ -91,10 +91,43 @@ spawnOwnedProcess(command, args, {
 
 ### 3.6 已知限制
 
-- macOS 上自行 `setsid` 并在父进程存活时逃出组的后代，anchor 无法跟踪；仍由 Shim 账本兜底。
-- anchor 自身被 SIGKILL：Linux 上只有 leader 随 pdeathsig 退出，组内其余成员会存活；macOS 上整组失去看护。两者都只能靠 Shim 账本兜底。因此任何代码都不得直接杀死 anchor：`spawnOwnedProcess` 返回的 `child.kill()` 被改写为向 anchor 发 terminate（SIGKILL 即立即终止，其他信号走宽限期），SDK 的关闭强杀、Node 的 `signal` 选项和 Adapter 自己的 kill 都经过这条路径。
+- macOS 上的逃逸进程：anchor 会追踪逃出进程组的后代（见 3.7）。但如果一个进程在两次扫描之间完成“创建、`setsid`、父进程退出”，仍会漏掉：被 launchd 收养后，内核会把它记录的父进程 id 改写为 launchd，它与原进程树之间不再有任何可用的关联。只有 Endpoint Security 能完全覆盖这一情形。
+- anchor 自身被 SIGKILL：
+  - Linux（PID namespace 模式）：内核会结束整棵进程树。
+  - Linux（回退模式）：leader 随 pdeathsig 退出，其余进程由 3.7 的记录文件兜底回收。
+  - macOS：同样由记录文件兜底，在下一次 Shim 启动或退出时回收。
+  因此任何代码都不得直接杀死 anchor：`spawnOwnedProcess` 返回的 `child.kill()` 被改写为向 anchor 发 terminate（SIGKILL 表示立即终止，其他信号走宽限期）。Shim 的强制阶段也会跳过 anchor（3.7）。
+- Linux 的 PID namespace 模式下，Harness 运行在单独的 user namespace 里，`sudo` 等 setuid 程序会失效。设置 `CODEXHOST_PROCESS_ISOLATION=group` 可关闭该模式。
 - Windows 首版不启用 anchor，保持现状，Job Object 版本见第 5 节阶段 D。
 - 每个存活 Harness 多一个很小的原生进程。
+
+### 3.7 兜底机制：协调关闭、逃逸追踪、记录文件与 PID namespace
+
+- **Shim 协调关闭**：Shim 的强制阶段会 KILL Host 进程树里除 anchor 之外的所有进程。anchor 已收到 TERM，正在回收自己的进程组，因此另给 5 秒期限，超时才 KILL。broker 的 LaunchAgent 通过 `CODEXHOST_PROCESS_ANCHOR_PATH` 使用 anchor，这些 anchor 的 lifeline 是 broker 进程本身（PL-11）。
+- **所有权边界**：追踪和回收只认领同时满足以下条件的进程：
+  - 创建时间晚于 Harness 首进程（macOS 比较单调递增的 `p_uniqueid`，Linux 比较启动时间）；
+  - 属于当前用户；
+  - pid > 1；
+  - 不是 anchor 自身、它的祖先进程或回收器自身。
+
+  沿父子关系遍历时，不满足条件的进程既不会被加入，也不会被当作跳板继续往下找。
+- **逃逸追踪**：只沿“父进程仍存活”的父子关系发现新进程；发现过的进程按身份（pid + 实例 id）持续追踪，直到退出。macOS 上，被追踪进程每次 fork 都会触发一次立即扫描（kqueue `NOTE_FORK`，两次扫描至少间隔 20ms），平时每 1 秒扫描一次；Linux 每 2 秒扫描一次。终止时，逃逸进程与组内进程同样经历 TERM → KILL。
+- **记录文件**：每个 anchor 把自己的实例 id、首进程和逃逸进程写进每用户私有目录，只有确认进程组已清空后才删除。私有目录为：macOS `confstr(_CS_DARWIN_USER_TEMP_DIR)`，Linux `/run/user/<uid>` 或 `/tmp`；目录名为 `codexhost-process-ledger-<uid>`，权限 0700，并校验属主。`codexhost-anchor --reclaim` 只处理 anchor 已不在的记录，处理方式如下：
+  - 若首进程 pid 已被其他实例占用，视为进程组 id 已复用，整组跳过；
+  - 其余情况下，逐个向满足边界的进程发 TERM，2 秒后发 KILL；
+  - 进程全部结束后才删除该记录。
+
+  Shim 在 Host 启动时于后台执行一次回收，Host 退出后再同步执行一次（最多 5 秒）。PID namespace 模式下不写记录（内核已保证清理）。
+- **Linux PID namespace**：外层 anchor 用 `clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS)` 启动内层 anchor，内层作为新 namespace 的 init（1 号进程），挂载独立的 `/proc`，并设置父进程死亡信号 `PDEATHSIG=SIGKILL` 与外层绑定。外层 anchor 被 SIGKILL 时，内层随之死亡，内核结束 namespace 内的全部进程。外层只负责转发 TERM/INT/HUP 并镜像退出状态；Harness 死于信号时，由内层经管道把信号号告诉外层。不允许非特权 user namespace，或 `/proc` 被遮蔽的容器里，会自动回退到进程组模式。
+- **dry run**：
+  - 设 `CODEXHOST_PROCESS_ANCHOR_DRY_RUN=1` 时，anchor 只上报 `dryRun` 消息（会认领的逃逸进程、被边界拦下的进程），不向它们发信号，也不写记录；
+  - `codexhost-anchor --reclaim --dry-run` 只打印会结束哪些进程，不发信号，也不删记录。
+- **OOM**：原计划调高 Harness 的 `oom_score_adj`，现在取消。两者 `oom_score_adj` 相同，而内核按“内存占用 + 调整值”选择被杀进程，anchor 的内存占用远小于 Harness，本来就不会先于 Harness 被选中；调高只会让 Harness 更容易被系统杀掉。
+- **事故记录（2026-09-25）**：初版追踪依赖一个错误假设——“进程被收养后 `puniqueid` 保持不变”。实际上 macOS 会把它改写为 launchd，导致在本机运行测试时，launchd 的全部子进程被认领并收到 TERM/KILL。用户自己的进程（包括终端）被结束；root 进程因权限不足未受影响。后续修正：
+  - 删除按 `puniqueid` 认领的逻辑；
+  - 引入上面的所有权边界；
+  - 提供 dry run：在同一场景下，不加边界时原逻辑会认领 741 个进程，加边界后为 0；
+  - 会发信号的测试先在 Linux 容器里验证，本机运行时对比前后进程列表。
 
 ## 4. 问题清单
 
@@ -114,7 +147,7 @@ spawnOwnedProcess(command, args, {
 | PL-8 | 低 | 4 份 TS 组回收实现、Claude 两份相同的 `#spawn` | 见第 1 节 | 收敛到 harness-discovery | A |
 | PL-9 | 低 | owner pid 存活检查无身份校验（仅影响可用性）；mapping-store 在 Windows 上同步 powershell 无超时 | `harness-broker/src/server.ts:117-140`、`mapping-store.ts:117-134` | 记录启动时间做身份；异步 + 超时 | D |
 | PL-10 | 低（Windows） | Grok taskkill 用裸名、无超时、忽略返回码；tracker 用 `spawnSync` 阻塞事件循环；leader 自然退出即报清理失败 | `owned-group.ts:58-64`、`owned-process-tree.ts:54-61` | Windows anchor（Job Object） | D |
-| PL-11 | 低 | Aqua broker 崩溃时其 Claude 子进程组无人回收 | `harness-broker` | broker 内也使用 anchor | D |
+| PL-11 | 低 | Aqua broker 崩溃时其 Claude 子进程组无人回收 | `harness-broker` | broker 内也使用 anchor（已完成，见 3.7） | D |
 
 ### 4.2 Host 核心（HC）
 
