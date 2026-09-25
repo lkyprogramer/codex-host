@@ -756,6 +756,38 @@ fn child_command(
     Ok(command)
 }
 
+/// A reclaim ends within about three seconds; the Shim waits no longer.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const RECLAIM_BUDGET: Duration = Duration::from_secs(5);
+
+/// Ends Harness groups whose anchor is gone, from the records anchors keep
+/// (`codexhost-anchor --reclaim`). Without `wait` it runs in the background;
+/// with it the Shim waits up to that long and then leaves it to finish.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reclaim_abandoned_groups(anchor: &Path, wait: Option<Duration>) {
+    let Ok(mut reclaim) = Command::new(anchor)
+        .arg("--reclaim")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = wait.map(|wait| Instant::now() + wait);
+    while let Some(deadline) = deadline
+        && Instant::now() < deadline
+    {
+        if !matches!(reclaim.try_wait(), Ok(None)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::spawn(move || {
+        let _ = reclaim.wait();
+    });
+}
+
 /// The anchor the Host's Harness processes run under: the installed one, or
 /// for a remote SSH wrapper (a copy of the Shim) the one its profile names.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
@@ -853,10 +885,20 @@ pub fn run_proxy_with_observer(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Only a Host runs Harnesses under anchors; the stock CLI never does.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let host_anchor = (command.get_program() != stock_codex_path.as_os_str())
+        .then(|| host_process_anchor(&current_executable))
+        .flatten();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(anchor) = &host_anchor {
+        // Groups whose anchor an earlier session lost (killed, crashed).
+        reclaim_abandoned_groups(anchor, None);
+    }
     let mut child = spawn_supervised(&mut command)?;
     #[cfg(any(target_os = "macos", target_os = "linux"))]
-    if let Some(anchor) = host_process_anchor(&current_executable) {
-        child.set_self_releasing_executable(&anchor);
+    if let Some(anchor) = &host_anchor {
+        child.set_self_releasing_executable(anchor);
     }
     let child_id = child.id();
     if let Some(lease) = &mut local_runtime_lease
@@ -889,6 +931,11 @@ pub fn run_proxy_with_observer(
         &shutdown_signals,
         local_host_runtime.then_some(&stdin_receiver),
     )?;
+    // An anchor this session had to kill left its group to a reclaim.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(anchor) = &host_anchor {
+        reclaim_abandoned_groups(anchor, Some(RECLAIM_BUDGET));
+    }
     stdout_pump
         .join()
         .map_err(|_| "official CLI stdout pump panicked")??;
