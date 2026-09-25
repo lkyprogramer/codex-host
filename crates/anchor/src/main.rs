@@ -14,6 +14,16 @@ mod anchor;
 mod control;
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 mod group;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod ledger;
+#[cfg(target_os = "linux")]
+mod namespace;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod process_table;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod reclaim;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod tracking;
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn main() {

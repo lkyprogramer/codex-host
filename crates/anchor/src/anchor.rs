@@ -18,10 +18,15 @@ use serde_json::{Value, json};
 
 use crate::control::{Command as ControlCommand, Control, Received};
 use crate::group::{self, LeaderExit};
+use crate::ledger::Ledger;
+use crate::process_table::{self, Identity};
+use crate::tracking::Tracker;
 
 /// The Host passes the control socket as this descriptor.
 const CONTROL_FD: i32 = 3;
 const DEFAULT_GRACE: Duration = Duration::from_secs(2);
+/// `1`: track and report escapees but never signal them or write a ledger.
+const DRY_RUN_ENV: &str = "CODEXHOST_PROCESS_ANCHOR_DRY_RUN";
 /// A KILL is never followed by a shorter wait than this.
 const MIN_KILL_WAIT: Duration = Duration::from_millis(500);
 /// Without a Host there is nobody to retry for; keep trying this long.
@@ -32,11 +37,20 @@ const IDLE_TICK: Duration = Duration::from_secs(1);
 /// empties fast is released at once, a lingering one does not cost a core.
 const FIRST_SCAN_INTERVAL: Duration = Duration::from_millis(20);
 const MAX_SCAN_INTERVAL: Duration = Duration::from_millis(250);
+/// How often a running tree is rescanned for escapees. On macOS a fork
+/// triggers a scan at once, at most every FORK_SCAN_GAP; Linux adopts
+/// orphans as a subreaper and scans only to keep the ledger current.
+#[cfg(target_os = "macos")]
+const TRACK_INTERVAL: Duration = Duration::from_secs(1);
+#[cfg(target_os = "linux")]
+const TRACK_INTERVAL: Duration = Duration::from_secs(2);
+#[cfg(target_os = "macos")]
+const FORK_SCAN_GAP: Duration = Duration::from_millis(20);
 
 // These can equal a Harness's own exit codes. The Host never reads them as
 // such: a real Harness outcome always follows `released`, a failed spawn
 // `spawnError`, on the control socket.
-const EXIT_USAGE: i32 = 2;
+pub(crate) const EXIT_USAGE: i32 = 2;
 const EXIT_SPAWN_FAILED: i32 = 127;
 /// The Host is gone and the group still has members after every retry.
 const EXIT_ABANDONED: i32 = 70;
@@ -49,26 +63,44 @@ struct Options {
 }
 
 pub fn run(arguments: Vec<OsString>) -> ! {
-    let options = match parse_options(arguments) {
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == "--reclaim")
+    {
+        let dry_run = arguments
+            .get(1)
+            .is_some_and(|argument| argument == "--dry-run");
+        std::process::exit(crate::reclaim::run(dry_run));
+    }
+    let (outcome, arguments) = match split_inner(arguments) {
+        Ok(split) => split,
+        Err(message) => usage_error(&message),
+    };
+    let options = match parse_options(arguments.clone()) {
         Ok(options) => options,
-        Err(message) => {
-            eprintln!("codexhost-anchor: {message}");
-            std::process::exit(EXIT_USAGE);
-        }
+        Err(message) => usage_error(&message),
     };
-    let control = match take_control_descriptor() {
-        Ok(control) => control,
-        Err(message) => {
-            eprintln!("codexhost-anchor: {message}");
-            std::process::exit(EXIT_USAGE);
-        }
-    };
+    if let Err(message) = check_control_descriptor() {
+        usage_error(&message);
+    }
     let wakeups = match Wakeups::register() {
         Ok(wakeups) => wakeups,
-        Err(error) => {
-            eprintln!("codexhost-anchor: cannot watch signals: {error}");
-            std::process::exit(EXIT_USAGE);
+        Err(error) => usage_error(&format!("cannot watch signals: {error}")),
+    };
+    #[cfg(target_os = "linux")]
+    if outcome.is_none() && crate::namespace::requested() {
+        // Blocked before the clone so the outer anchor misses none of them;
+        // a fallback unblocks them into the handlers registered above.
+        let relayed = crate::namespace::relayed();
+        let _ = relayed.thread_block();
+        if let Ok(inner) = crate::namespace::spawn_inner(&arguments) {
+            crate::namespace::relay(inner);
         }
+        let _ = relayed.thread_unblock();
+    }
+    let control = match take_control_descriptor() {
+        Ok(control) => control,
+        Err(message) => usage_error(&message),
     };
     #[cfg(target_os = "linux")]
     // Descendants that leave the group through setsid or a double fork come
@@ -78,14 +110,46 @@ pub fn run(arguments: Vec<OsString>) -> ! {
         .map(|error| format!("cannot become a child subreaper: {error}"));
     #[cfg(not(target_os = "linux"))]
     let subreaper: Option<String> = None;
-    let mut anchor = Anchor::new(control, &options);
+    let mut anchor = Anchor::new(control, &options, outcome);
     let leader = anchor.spawn(&options);
     silence_standard_streams();
     anchor.announce_ready(leader);
     if let Some(message) = subreaper {
         anchor.diagnose(message);
     }
+    // Inside its own pid namespace the kernel ends the tree with the anchor,
+    // and the namespace's pids would mean nothing to a reclaim outside it.
+    anchor.start_tracking(leader, outcome.is_none());
     anchor.supervise(wakeups)
+}
+
+fn usage_error(message: &str) -> ! {
+    eprintln!("codexhost-anchor: {message}");
+    std::process::exit(EXIT_USAGE);
+}
+
+/// Separates the inner anchor's outcome descriptor (Linux namespace mode)
+/// from the ordinary arguments.
+fn split_inner(arguments: Vec<OsString>) -> Result<(Option<i32>, Vec<OsString>), String> {
+    #[cfg(target_os = "linux")]
+    if arguments
+        .first()
+        .is_some_and(|argument| argument == crate::namespace::INNER_FLAG)
+    {
+        let outcome = arguments
+            .get(1)
+            .and_then(|value| value.to_str())
+            .and_then(|value| value.parse::<i32>().ok())
+            .ok_or("the inner anchor needs its outcome descriptor")?;
+        // The Harness must not inherit it: its end tells the outer anchor
+        // the inner one is gone.
+        // SAFETY: F_SETFD only changes the descriptor table entry.
+        unsafe {
+            libc::fcntl(outcome, libc::F_SETFD, libc::FD_CLOEXEC);
+        }
+        return Ok((Some(outcome), arguments.into_iter().skip(2).collect()));
+    }
+    Ok((None, arguments))
 }
 
 fn parse_options(arguments: Vec<OsString>) -> Result<Options, String> {
@@ -125,12 +189,17 @@ fn parse_millis(value: Option<OsString>, option: &OsString) -> Result<Duration, 
         .ok_or_else(|| format!("{} needs a millisecond count", option.to_string_lossy()))
 }
 
-fn take_control_descriptor() -> Result<Control, String> {
+fn check_control_descriptor() -> Result<(), String> {
     // SAFETY: F_GETFD only inspects the descriptor table entry.
     let valid = unsafe { libc::fcntl(CONTROL_FD, libc::F_GETFD) } != -1;
     if !valid {
         return Err("fd 3 must carry the Host control socket".into());
     }
+    Ok(())
+}
+
+fn take_control_descriptor() -> Result<Control, String> {
+    check_control_descriptor()?;
     // SAFETY: fd 3 is open (checked above), was inherited for this purpose,
     // and nothing else in this process owns it.
     let descriptor = unsafe { OwnedFd::from_raw_fd(CONTROL_FD) };
@@ -142,7 +211,7 @@ fn take_control_descriptor() -> Result<Control, String> {
 
 /// The Harness owns stdio now. The anchor keeps none of it open, so the
 /// Host sees EOF and EPIPE exactly when the Harness side closes.
-fn silence_standard_streams() {
+pub(crate) fn silence_standard_streams() {
     let Ok(null) = OpenOptions::new().read(true).write(true).open("/dev/null") else {
         return;
     };
@@ -212,10 +281,22 @@ struct Anchor {
     scan_interval: Duration,
     /// A diagnostic already told the Host why the group cannot be observed.
     scan_diagnosed: bool,
+    tracker: Option<Tracker>,
+    ledger: Option<Ledger>,
+    next_track: Instant,
+    #[cfg(target_os = "macos")]
+    last_track: Option<Instant>,
+    track_diagnosed: bool,
+    /// Escapees are only reported, never signalled, and nothing is recorded.
+    dry_run: bool,
+    /// Linux namespace mode: where the inner anchor reports a Harness that
+    /// died from a signal, which a namespace init cannot mirror itself.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    outcome: Option<i32>,
 }
 
 impl Anchor {
-    fn new(control: Control, options: &Options) -> Self {
+    fn new(control: Control, options: &Options, outcome: Option<i32>) -> Self {
         Self {
             control: Some(control),
             exit_grace: options.exit_grace,
@@ -227,7 +308,84 @@ impl Anchor {
             next_scan: Instant::now(),
             scan_interval: FIRST_SCAN_INTERVAL,
             scan_diagnosed: false,
+            tracker: None,
+            ledger: None,
+            next_track: Instant::now(),
+            #[cfg(target_os = "macos")]
+            last_track: None,
+            track_diagnosed: false,
+            dry_run: std::env::var_os(DRY_RUN_ENV).is_some_and(|value| value == "1"),
+            outcome,
         }
+    }
+
+    /// Starts watching for escapees and, when `record` is set, records the
+    /// group so a reclaim can end it should this anchor be killed.
+    fn start_tracking(&mut self, leader: Pid, record: bool) {
+        let anchor = nix::unistd::getpid().as_raw();
+        let identity =
+            |pid: i32| process_table::instance(pid).map(|instance| Identity { pid, instance });
+        // A leader that already exited cannot be identified, and without its
+        // instance there is no boundary to own escapees by. Its group is
+        // still reclaimed through the pinned group id, as always.
+        let (Some(anchor_identity), Some(leader)) = (identity(anchor), identity(leader.as_raw()))
+        else {
+            return;
+        };
+        match Tracker::new(anchor, leader, self.dry_run) {
+            Ok(tracker) => self.tracker = Some(tracker),
+            Err(message) => self.diagnose(message),
+        }
+        if record && !self.dry_run {
+            match Ledger::create(anchor_identity, leader) {
+                Ok(ledger) => self.ledger = Some(ledger),
+                Err(message) => self.diagnose(message),
+            }
+        }
+    }
+
+    /// Rescans for escapees and keeps the ledger in step.
+    fn track(&mut self) {
+        let now = Instant::now();
+        self.next_track = now + TRACK_INTERVAL;
+        #[cfg(target_os = "macos")]
+        {
+            self.last_track = Some(now);
+        }
+        let Some(tracker) = self.tracker.as_mut() else {
+            return;
+        };
+        let failure = match tracker.refresh() {
+            Ok(None) => None,
+            Ok(Some(report)) => {
+                let failure = self
+                    .ledger
+                    .as_mut()
+                    .and_then(|ledger| ledger.record_escapees(tracker.escapees()).err());
+                if self.dry_run {
+                    self.send(dry_run_report(&report));
+                }
+                failure
+            }
+            Err(message) => Some(message),
+        };
+        if let Some(message) = failure
+            && !self.track_diagnosed
+        {
+            self.track_diagnosed = true;
+            self.diagnose(message);
+        }
+    }
+
+    /// A tracked process forked: scan now, so a child that leaves the group
+    /// is seen before its parent can exit and hide the link.
+    #[cfg(target_os = "macos")]
+    fn schedule_fork_scan(&mut self) {
+        let now = Instant::now();
+        let earliest = self
+            .last_track
+            .map_or(now, |last| (last + FORK_SCAN_GAP).max(now));
+        self.next_track = self.next_track.min(earliest);
     }
 
     fn send(&mut self, message: Value) {
@@ -298,6 +456,11 @@ impl Anchor {
     }
 
     fn announce_ready(&mut self, leader: Pid) {
+        if self.outcome.is_some() {
+            // Inside the namespace the leader's pid means nothing outside it.
+            self.send(json!({ "type": "ready", "namespace": true }));
+            return;
+        }
         self.send(json!({ "type": "ready", "pid": leader.as_raw(), "pgid": leader.as_raw() }));
     }
 
@@ -308,35 +471,58 @@ impl Anchor {
             } else {
                 IDLE_TICK
             };
-            let (control_ready, control_writable, child_ready, termination_ready) = {
+            let tick = tick.min(
+                self.next_track
+                    .saturating_duration_since(Instant::now())
+                    .max(Duration::from_millis(1)),
+            );
+            let (control_ready, control_writable, child_ready, termination_ready, forked) = {
                 let mut descriptors = vec![
                     PollFd::new(wakeups.child.as_fd(), PollFlags::POLLIN),
                     PollFd::new(wakeups.termination.as_fd(), PollFlags::POLLIN),
                 ];
-                if let Some(control) = self.control.as_ref() {
+                let control_index = self.control.as_ref().map(|control| {
                     let interest = if control.wants_write() {
                         PollFlags::POLLIN | PollFlags::POLLOUT
                     } else {
                         PollFlags::POLLIN
                     };
                     descriptors.push(PollFd::new(control.fd(), interest));
-                }
+                    descriptors.len() - 1
+                });
+                #[cfg(target_os = "macos")]
+                let fork_index = self.tracker.as_ref().map(|tracker| {
+                    descriptors.push(PollFd::new(tracker.fork_events(), PollFlags::POLLIN));
+                    descriptors.len() - 1
+                });
+                #[cfg(not(target_os = "macos"))]
+                let fork_index: Option<usize> = None;
                 let timeout = PollTimeout::try_from(tick).unwrap_or(PollTimeout::MAX);
                 let _ = poll(&mut descriptors, timeout);
-                let events = |index: usize, wanted: PollFlags| {
-                    descriptors
-                        .get(index)
+                let events = |index: Option<usize>, wanted: PollFlags| {
+                    index
+                        .and_then(|index| descriptors.get(index))
                         .and_then(PollFd::revents)
                         .is_some_and(|events| events.intersects(wanted))
                 };
                 let readable = PollFlags::POLLIN | PollFlags::POLLHUP | PollFlags::POLLERR;
                 (
-                    events(2, readable),
-                    events(2, PollFlags::POLLOUT),
-                    events(0, readable),
-                    events(1, readable),
+                    events(control_index, readable),
+                    events(control_index, PollFlags::POLLOUT),
+                    events(Some(0), readable),
+                    events(Some(1), readable),
+                    events(fork_index, readable),
                 )
             };
+            #[cfg(target_os = "macos")]
+            if forked
+                && let Some(tracker) = self.tracker.as_mut()
+                && tracker.drain_fork_events()
+            {
+                self.schedule_fork_scan();
+            }
+            #[cfg(not(target_os = "macos"))]
+            let _ = forked;
             if control_writable && let Some(control) = self.control.as_mut() {
                 control.flush();
             }
@@ -425,13 +611,18 @@ impl Anchor {
         group::signal_group(leader, signal);
         #[cfg(target_os = "linux")]
         group::linux::signal_adopted(leader, signal);
+        if let Some(tracker) = self.tracker.as_ref() {
+            tracker.signal(signal);
+        }
     }
 
     fn live_members(&mut self) -> usize {
         let Some(leader) = self.leader else {
             return 0;
         };
-        let leader_live = usize::from(self.exit.is_none());
+        self.track();
+        let escapees = self.tracker.as_ref().map_or(0, Tracker::foreign_escapees);
+        let leader_live = usize::from(self.exit.is_none()) + escapees;
         let others = match group::live_members(leader, leader) {
             Ok(others) => others,
             Err(message) => {
@@ -449,6 +640,9 @@ impl Anchor {
         let Some(leader) = self.leader else {
             return;
         };
+        if Instant::now() >= self.next_track {
+            self.track();
+        }
         if self.exit.is_none()
             && let Ok(Some(exit)) = group::peek_leader_exit(leader)
         {
@@ -507,6 +701,9 @@ impl Anchor {
     /// Every member is gone: reap the leader and end with its outcome, so the
     /// Host's `exit` event reports the Harness, not the anchor.
     fn finish(&mut self, leader: Pid, exit: LeaderExit) -> ! {
+        if let Some(ledger) = self.ledger.take() {
+            ledger.remove();
+        }
         self.send(json!({ "type": "released" }));
         if let Some(control) = self.control.as_mut() {
             control.flush_before_exit();
@@ -514,9 +711,39 @@ impl Anchor {
         let _ = waitpid(leader, None);
         match exit {
             LeaderExit::Code(code) => std::process::exit(code),
-            LeaderExit::Signal(signal) => end_with_signal(signal),
+            LeaderExit::Signal(signal) => {
+                #[cfg(target_os = "linux")]
+                if let Some(outcome) = self.outcome {
+                    crate::namespace::report_signal(outcome, signal);
+                }
+                end_with_signal(signal)
+            }
         }
     }
+}
+
+/// Tells the Host which processes would be treated as escapees, and which
+/// the walk reached but the ownership boundary refused.
+fn dry_run_report(report: &crate::tracking::Report) -> Value {
+    let describe = |entries: &[process_table::Entry]| {
+        entries
+            .iter()
+            .map(|entry| {
+                json!({
+                    "pid": entry.pid,
+                    "parent": entry.parent,
+                    "group": entry.group,
+                    "uid": entry.uid,
+                    "instance": entry.instance,
+                })
+            })
+            .collect::<Vec<_>>()
+    };
+    json!({
+        "type": "dryRun",
+        "escapees": describe(&report.escapees),
+        "rejected": describe(&report.rejected),
+    })
 }
 
 fn exit_message(exit: LeaderExit) -> Value {
@@ -529,7 +756,7 @@ fn exit_message(exit: LeaderExit) -> Value {
     }
 }
 
-fn end_with_signal(signal: i32) -> ! {
+pub(crate) fn end_with_signal(signal: i32) -> ! {
     use nix::sys::resource::{Resource, setrlimit};
     // Mirror the signal without writing a core file for the anchor itself.
     let _ = setrlimit(Resource::RLIMIT_CORE, 0, 0);

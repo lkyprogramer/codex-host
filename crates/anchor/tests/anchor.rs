@@ -19,7 +19,17 @@ struct Anchored {
 }
 
 impl Anchored {
+    /// An anchor in plain process-group mode: these tests follow the
+    /// Harness by its pid, which a pid namespace would renumber.
     fn start(options: &[&str], program: &[&str]) -> Self {
+        Self::start_with_env(
+            options,
+            program,
+            &[("CODEXHOST_PROCESS_ISOLATION", Some("group"))],
+        )
+    }
+
+    fn start_with_env(options: &[&str], program: &[&str], env: &[(&str, Option<&str>)]) -> Self {
         let (host, anchor_end) = UnixStream::pair().unwrap();
         // Before spawning: macOS rejects the option once a fast anchor has
         // already exited and closed its end.
@@ -33,7 +43,16 @@ impl Anchored {
             .args(program)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
-            .stderr(Stdio::inherit());
+            .stderr(Stdio::inherit())
+            // Never the user's own records: a reclaim there is not a test's.
+            .env("CODEXHOST_PROCESS_LEDGER_DIR", ledger_directory())
+            .env_remove("CODEXHOST_PROCESS_ANCHOR_DRY_RUN");
+        for (name, value) in env {
+            match value {
+                Some(value) => command.env(name, value),
+                None => command.env_remove(name),
+            };
+        }
         // SAFETY: dup2 is async-signal-safe; it only places the socket on fd 3
         // (and clears close-on-exec there) between fork and exec.
         unsafe {
@@ -97,6 +116,19 @@ impl Drop for Anchored {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// One private ledger directory for this test process.
+fn ledger_directory() -> PathBuf {
+    let directory =
+        std::env::temp_dir().join(format!("codexhost-anchor-ledger-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    std::fs::set_permissions(
+        &directory,
+        std::os::unix::fs::PermissionsExt::from_mode(0o700),
+    )
+    .unwrap();
+    directory
 }
 
 fn pid_file(name: &str) -> PathBuf {
@@ -443,4 +475,171 @@ fn kills_a_descendant_adopted_after_the_kill_was_sent() {
     anchor.wait();
     assert!(!alive(escaped));
     let _ = std::fs::remove_file(file);
+}
+
+/// A process that leaves the group with setsid and then sleeps, writing its
+/// pid first. perl ships with both macOS and Debian; macOS has no setsid(1).
+fn escapee(file: &std::path::Path, seconds: &str) -> String {
+    format!(
+        "perl -MPOSIX -e 'POSIX::setsid(); open(F, \">\", $ARGV[0]) or die; print F $$; close F; exec \"sleep\", $ARGV[1]' {} {seconds}",
+        file.display()
+    )
+}
+
+/// The record a live anchor keeps for its group, once it names `pid`.
+fn record_naming(anchor: u32, pid: i32) -> PathBuf {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        for entry in std::fs::read_dir(ledger_directory()).unwrap().flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(&format!("{anchor}-"))
+                && name.ends_with(".json")
+                && let Ok(text) = std::fs::read_to_string(entry.path())
+                && let Ok(record) = serde_json::from_str::<Value>(&text)
+                && record["escapees"]
+                    .as_array()
+                    .is_some_and(|escapees| escapees.iter().any(|e| e["pid"] == pid))
+            {
+                return entry.path();
+            }
+        }
+        assert!(Instant::now() < deadline, "no record named escapee {pid}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn reclaim(arguments: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_codexhost-anchor"))
+        .arg("--reclaim")
+        .args(arguments)
+        .env("CODEXHOST_PROCESS_LEDGER_DIR", ledger_directory())
+        .output()
+        .unwrap()
+}
+
+#[test]
+fn a_killed_anchor_leaves_a_record_that_a_reclaim_ends_exactly() {
+    let escaped = pid_file("record-escapee");
+    let member = pid_file("record-member");
+    // The escapee's parent (the leader) stays up, so the tracker finds it
+    // while it is still linked to the group.
+    let script = format!(
+        "{} & sleep 60 & echo $! > {}; exec sleep 60",
+        escapee(&escaped, "60"),
+        member.display()
+    );
+    let mut anchor = Anchored::start(&[], &["/bin/sh", "-c", &script]);
+    anchor.expect("ready");
+    let escaped_pid = read_pid(&escaped);
+    let member_pid = read_pid(&member);
+    let record = record_naming(anchor.child.id(), escaped_pid);
+
+    // Killed outright, the anchor ends nothing itself.
+    anchor.child.kill().unwrap();
+    anchor.child.wait().unwrap();
+    assert!(alive(escaped_pid) && alive(member_pid));
+
+    // A dry run names exactly what it would end and changes nothing.
+    let dry = reclaim(&["--dry-run"]);
+    assert!(dry.status.success());
+    let listed = String::from_utf8_lossy(&dry.stdout);
+    assert!(listed.contains(&escaped_pid.to_string()), "{listed}");
+    assert!(listed.contains(&member_pid.to_string()), "{listed}");
+    assert!(alive(escaped_pid) && alive(member_pid) && record.exists());
+
+    let reclaimed = reclaim(&[]);
+    assert_eq!(reclaimed.status.code(), Some(0), "{reclaimed:?}");
+    wait_until(|| !alive(escaped_pid) && !alive(member_pid));
+    assert!(!record.exists());
+    let _ = std::fs::remove_file(escaped);
+    let _ = std::fs::remove_file(member);
+}
+
+#[test]
+fn a_dry_run_reports_escapees_and_never_signals_them() {
+    let escaped = pid_file("dry-escapee");
+    let script = format!("{} & exec sleep 60", escapee(&escaped, "60"));
+    let mut anchor = Anchored::start_with_env(
+        &[],
+        &["/bin/sh", "-c", &script],
+        &[
+            ("CODEXHOST_PROCESS_ISOLATION", Some("group")),
+            ("CODEXHOST_PROCESS_ANCHOR_DRY_RUN", Some("1")),
+        ],
+    );
+    anchor.expect("ready");
+    let escaped_pid = read_pid(&escaped);
+    let report = loop {
+        let message = anchor.message();
+        if message["type"] == "dryRun"
+            && message["escapees"]
+                .as_array()
+                .is_some_and(|e| !e.is_empty())
+        {
+            break message;
+        }
+    };
+    let reported: Vec<i64> = report["escapees"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|escapee| escapee["pid"].as_i64())
+        .collect();
+    assert_eq!(reported, [i64::from(escaped_pid)]);
+    assert_eq!(report["rejected"], serde_json::json!([]));
+    anchor.terminate(100);
+    std::thread::sleep(Duration::from_millis(800));
+    // On Linux the escapee is adopted by the subreaper anchor once the
+    // leader dies and is then ended as its own child, which a dry run does
+    // not change; only the tracker's signals to processes it does not
+    // parent are withheld.
+    #[cfg(target_os = "macos")]
+    assert!(alive(escaped_pid), "a dry run signalled an escapee");
+    let _ = nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(escaped_pid),
+        nix::sys::signal::Signal::SIGKILL,
+    );
+    anchor.wait();
+    let _ = std::fs::remove_file(escaped);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn in_a_pid_namespace_killing_the_anchor_ends_the_whole_tree() {
+    // A marker only this test's processes carry, found from outside.
+    let marker = format!("61.{}", std::process::id() % 1000);
+    let marked = |marker: &str| {
+        std::fs::read_dir("/proc")
+            .unwrap()
+            .flatten()
+            .filter(|entry| {
+                std::fs::read(entry.path().join("cmdline")).is_ok_and(|command| {
+                    String::from_utf8_lossy(&command).contains(&format!("sleep\0{marker}"))
+                })
+            })
+            .count()
+    };
+    let escaped = pid_file("namespace-escapee");
+    let script = format!(
+        "{} & sleep {marker} & exec sleep {marker}",
+        escapee(&escaped, &marker)
+    );
+    let mut anchor = Anchored::start_with_env(
+        &[],
+        &["/bin/sh", "-c", &script],
+        &[("CODEXHOST_PROCESS_ISOLATION", None)],
+    );
+    let ready = anchor.expect("ready");
+    if ready["namespace"] != true {
+        eprintln!("skipped: this system does not allow an unprivileged pid namespace");
+        anchor.terminate(0);
+        anchor.wait();
+        return;
+    }
+    wait_until(|| marked(&marker) == 3);
+    // SIGKILL leaves the anchor no chance to act; the kernel ends the tree.
+    anchor.child.kill().unwrap();
+    anchor.child.wait().unwrap();
+    wait_until(|| marked(&marker) == 0);
+    let _ = std::fs::remove_file(escaped);
 }
