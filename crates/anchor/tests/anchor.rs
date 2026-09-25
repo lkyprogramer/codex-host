@@ -496,9 +496,9 @@ fn record_naming(anchor: u32, pid: i32) -> PathBuf {
                 && name.ends_with(".json")
                 && let Ok(text) = std::fs::read_to_string(entry.path())
                 && let Ok(record) = serde_json::from_str::<Value>(&text)
-                && record["escapees"]
+                && record["owned"]
                     .as_array()
-                    .is_some_and(|escapees| escapees.iter().any(|e| e["pid"] == pid))
+                    .is_some_and(|owned| owned.iter().any(|e| e["pid"] == pid))
             {
                 return entry.path();
             }
@@ -588,7 +588,14 @@ fn a_dry_run_reports_escapees_and_never_signals_them() {
     assert_eq!(reported, [i64::from(escaped_pid)]);
     assert_eq!(report["rejected"], serde_json::json!([]));
     anchor.terminate(100);
-    std::thread::sleep(Duration::from_millis(800));
+    // A dry run changes nothing about release: the group ends and the
+    // anchor exits without waiting for an escapee it would not signal.
+    loop {
+        if anchor.message()["type"] == "released" {
+            break;
+        }
+    }
+    anchor.wait();
     // On Linux the escapee is adopted by the subreaper anchor once the
     // leader dies and is then ended as its own child, which a dry run does
     // not change; only the tracker's signals to processes it does not
@@ -599,7 +606,6 @@ fn a_dry_run_reports_escapees_and_never_signals_them() {
         nix::unistd::Pid::from_raw(escaped_pid),
         nix::sys::signal::Signal::SIGKILL,
     );
-    anchor.wait();
     let _ = std::fs::remove_file(escaped);
 }
 
@@ -641,5 +647,53 @@ fn in_a_pid_namespace_killing_the_anchor_ends_the_whole_tree() {
     anchor.child.kill().unwrap();
     anchor.child.wait().unwrap();
     wait_until(|| marked(&marker) == 0);
+    let _ = std::fs::remove_file(escaped);
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn kept_escapees_outlive_the_group_and_leave_the_record() {
+    let escaped = pid_file("kept-escapee");
+    let script = format!("{} & exec sleep 60", escapee(&escaped, "60"));
+    let mut anchor = Anchored::start_with_env(
+        &[],
+        &["/bin/sh", "-c", &script],
+        &[
+            ("CODEXHOST_PROCESS_ISOLATION", Some("group")),
+            ("CODEXHOST_PROCESS_ESCAPEES", Some("keep")),
+        ],
+    );
+    anchor.expect("ready");
+    let escaped_pid = read_pid(&escaped);
+    // While it was still a group member it was recorded; once it leaves the
+    // group, the next scan and throttled write drop it from the record.
+    let recorded = || {
+        std::fs::read_dir(ledger_directory())
+            .unwrap()
+            .flatten()
+            .filter_map(|entry| {
+                serde_json::from_str::<Value>(&std::fs::read_to_string(entry.path()).ok()?).ok()
+            })
+            .any(|record| {
+                record["owned"]
+                    .as_array()
+                    .is_some_and(|owned| owned.iter().any(|e| e["pid"] == escaped_pid))
+            })
+    };
+    std::thread::sleep(Duration::from_millis(1_500));
+    wait_until(|| !recorded());
+    anchor.terminate(100);
+    anchor.expect("exit");
+    anchor.expect("released");
+    anchor.wait();
+    assert!(
+        alive(escaped_pid),
+        "a kept escapee was ended with the group"
+    );
+    nix::sys::signal::kill(
+        nix::unistd::Pid::from_raw(escaped_pid),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
     let _ = std::fs::remove_file(escaped);
 }

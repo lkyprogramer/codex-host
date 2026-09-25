@@ -2,17 +2,19 @@
 //!
 //! An anchor that is itself killed cannot end its group, and on macOS no
 //! kernel mechanism ends it for it. Each anchor therefore keeps one file
-//! naming its own instance, its group and the escapees it tracks, and
-//! removes it only after confirming the group released. A file whose anchor
-//! is gone is reclaimed later (`codexhost-anchor --reclaim`, which the Shim
-//! runs). Instances make that exact: a recorded pid now held by another
-//! process is never signalled.
+//! naming its own instance and every process it owns by identity (pid plus
+//! instance), and removes it only after confirming the group released. A
+//! file whose anchor is gone is reclaimed later (`codexhost-anchor
+//! --reclaim`, which the Shim runs): the recorded processes that still run
+//! and what they spawned since. Nothing is claimed by process-group id: once
+//! the anchor is gone that id may name a stranger's group.
 
 use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use serde_json::{Value, json};
 
@@ -20,22 +22,35 @@ use crate::process_table::{self, Identity};
 
 /// Overrides where records live; tests use it to stay isolated.
 pub const DIRECTORY_ENV: &str = "CODEXHOST_PROCESS_LEDGER_DIR";
-const VERSION: u64 = 1;
+/// Version 1 claimed the leader's process group; version 2 names every
+/// owned process instead.
+const VERSION: u64 = 2;
+/// Owned processes change on every fork; the record follows them at most
+/// this often. A process younger than the last write is still found as a
+/// descendant of a recorded one.
+const MIN_WRITE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Record {
     pub boot: String,
     pub anchor: Identity,
     pub leader: Identity,
-    pub escapees: Vec<Identity>,
+    /// Every owned process as of the last write, the leader included.
+    pub owned: Vec<Identity>,
+}
+
+/// What a reader can tell about a file it found in the directory.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Parsed {
+    Current(Record),
+    /// Written in an earlier boot: it names nothing that exists any more.
+    OtherBoot,
+    /// Another version, or not a record: never this reader's to act on or
+    /// remove, since a newer anchor may still be using it.
+    Unknown,
 }
 
 impl Record {
-    /// The group id is the leader's pid.
-    pub fn group(&self) -> i32 {
-        self.leader.pid
-    }
-
     fn to_json(&self) -> Value {
         let identity =
             |identity: &Identity| json!({ "pid": identity.pid, "instance": identity.instance });
@@ -44,15 +59,28 @@ impl Record {
             "boot": self.boot,
             "anchor": identity(&self.anchor),
             "leader": identity(&self.leader),
-            "escapees": self.escapees.iter().map(identity).collect::<Vec<_>>(),
+            "owned": self.owned.iter().map(identity).collect::<Vec<_>>(),
         })
     }
 
-    pub fn parse(text: &str) -> Option<Self> {
-        let value: Value = serde_json::from_str(text).ok()?;
-        if value.get("version")?.as_u64()? != VERSION {
-            return None;
+    pub fn parse(text: &str, boot: &str) -> Parsed {
+        let Ok(value) = serde_json::from_str::<Value>(text) else {
+            return Parsed::Unknown;
+        };
+        // The boot is checked first: a record from an earlier boot is stale
+        // whatever version wrote it.
+        match value.get("boot").and_then(Value::as_str) {
+            Some(recorded) if recorded != boot => return Parsed::OtherBoot,
+            Some(_) => {}
+            None => return Parsed::Unknown,
         }
+        if value.get("version").and_then(Value::as_u64) != Some(VERSION) {
+            return Parsed::Unknown;
+        }
+        Self::parse_current(&value).map_or(Parsed::Unknown, Parsed::Current)
+    }
+
+    fn parse_current(value: &Value) -> Option<Self> {
         let identity = |value: &Value| {
             Some(Identity {
                 pid: i32::try_from(value.get("pid")?.as_i64()?).ok()?,
@@ -63,8 +91,8 @@ impl Record {
             boot: value.get("boot")?.as_str()?.to_owned(),
             anchor: identity(value.get("anchor")?)?,
             leader: identity(value.get("leader")?)?,
-            escapees: value
-                .get("escapees")?
+            owned: value
+                .get("owned")?
                 .as_array()?
                 .iter()
                 .map(identity)
@@ -76,33 +104,60 @@ impl Record {
 pub struct Ledger {
     path: PathBuf,
     record: Record,
+    /// The in-memory record changed since the last write.
+    dirty: bool,
+    last_write: Instant,
 }
 
 impl Ledger {
     /// Records a new group before anything else can happen to it.
     pub fn create(anchor: Identity, leader: Identity) -> Result<Self, String> {
         let directory = directory()?;
-        let ledger = Self {
+        let mut ledger = Self {
             path: directory.join(format!("{}-{}.json", anchor.pid, anchor.instance)),
             record: Record {
                 boot: process_table::boot_id()?,
                 anchor,
                 leader,
-                escapees: Vec::new(),
+                owned: vec![leader],
             },
+            dirty: true,
+            last_write: Instant::now(),
         };
         ledger.write()?;
         Ok(ledger)
     }
 
-    pub fn record_escapees(&mut self, escapees: &HashSet<Identity>) -> Result<(), String> {
-        let mut escapees: Vec<Identity> = escapees.iter().copied().collect();
-        escapees.sort_by_key(|identity| (identity.pid, identity.instance));
-        if escapees == self.record.escapees {
-            return Ok(());
+    /// Follows the owned set; writes when it changed and the last write is
+    /// old enough, or later through `flush_if_due`.
+    pub fn record_owned(&mut self, owned: &HashSet<Identity>) -> Result<(), String> {
+        let mut owned: Vec<Identity> = owned.iter().copied().collect();
+        // The leader stays recorded until the group is released: it is the
+        // root its unrecorded descendants are found from.
+        if !owned.contains(&self.record.leader) {
+            owned.push(self.record.leader);
         }
-        self.record.escapees = escapees;
-        self.write()
+        owned.sort_by_key(|identity| (identity.pid, identity.instance));
+        if owned != self.record.owned {
+            self.record.owned = owned;
+            self.dirty = true;
+        }
+        self.flush_if_due()
+    }
+
+    /// Writes a pending change now, whatever the interval.
+    pub fn flush(&mut self) -> Result<(), String> {
+        if self.dirty {
+            self.write()?;
+        }
+        Ok(())
+    }
+
+    pub fn flush_if_due(&mut self) -> Result<(), String> {
+        if self.dirty && self.last_write.elapsed() >= MIN_WRITE_INTERVAL {
+            self.write()?;
+        }
+        Ok(())
     }
 
     /// The group is confirmed released: nothing is left to reclaim.
@@ -111,7 +166,7 @@ impl Ledger {
     }
 
     /// Replaces the record atomically, so a reader never sees half of one.
-    fn write(&self) -> Result<(), String> {
+    fn write(&mut self) -> Result<(), String> {
         let temporary = self
             .path
             .with_extension(format!("{}.tmp", std::process::id()));
@@ -125,13 +180,20 @@ impl Ledger {
             file.write_all(self.record.to_json().to_string().as_bytes())?;
             fs::rename(&temporary, &self.path)
         })();
-        result.map_err(|error| {
-            let _ = fs::remove_file(&temporary);
-            format!(
-                "cannot record the owned group in {}: {error}",
-                self.path.display()
-            )
-        })
+        self.last_write = Instant::now();
+        match result {
+            Ok(()) => {
+                self.dirty = false;
+                Ok(())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(&temporary);
+                Err(format!(
+                    "cannot record the owned group in {}: {error}",
+                    self.path.display()
+                ))
+            }
+        }
     }
 }
 
@@ -220,9 +282,8 @@ fn ensure_private_directory(directory: &Path) -> Result<(), String> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn a_record_round_trips_and_rejects_other_versions() {
-        let record = Record {
+    fn record() -> Record {
+        Record {
             boot: "boot".into(),
             anchor: Identity {
                 pid: 7,
@@ -232,17 +293,32 @@ mod tests {
                 pid: 8,
                 instance: 80,
             },
-            escapees: vec![Identity {
-                pid: 9,
-                instance: u64::MAX,
-            }],
-        };
-        let text = record.to_json().to_string();
-        assert_eq!(Record::parse(&text), Some(record));
-        assert_eq!(
-            Record::parse(&text.replace("\"version\":1", "\"version\":2")),
-            None
-        );
-        assert_eq!(Record::parse("{"), None);
+            owned: vec![
+                Identity {
+                    pid: 8,
+                    instance: 80,
+                },
+                Identity {
+                    pid: 9,
+                    instance: u64::MAX,
+                },
+            ],
+        }
+    }
+
+    #[test]
+    fn a_record_round_trips() {
+        let text = record().to_json().to_string();
+        assert_eq!(Record::parse(&text, "boot"), Parsed::Current(record()));
+    }
+
+    #[test]
+    fn a_record_from_another_boot_or_version_is_never_this_readers() {
+        let text = record().to_json().to_string();
+        assert_eq!(Record::parse(&text, "later boot"), Parsed::OtherBoot);
+        // A newer anchor's record in this boot: neither acted on nor removed.
+        let newer = text.replace("\"version\":2", "\"version\":3");
+        assert_eq!(Record::parse(&newer, "boot"), Parsed::Unknown);
+        assert_eq!(Record::parse("{", "boot"), Parsed::Unknown);
     }
 }

@@ -27,6 +27,10 @@ const CONTROL_FD: i32 = 3;
 const DEFAULT_GRACE: Duration = Duration::from_secs(2);
 /// `1`: track and report escapees but never signal them or write a ledger.
 const DRY_RUN_ENV: &str = "CODEXHOST_PROCESS_ANCHOR_DRY_RUN";
+/// `keep`: processes that left the Harness group (a tmux server, gpg-agent,
+/// an ssh ControlMaster, a build daemon) outlive the Harness instead of
+/// ending with it. The group itself, and on Linux a pid namespace, still end.
+const ESCAPEES_ENV: &str = "CODEXHOST_PROCESS_ESCAPEES";
 /// A KILL is never followed by a shorter wait than this.
 const MIN_KILL_WAIT: Duration = Duration::from_millis(500);
 /// Without a Host there is nobody to retry for; keep trying this long.
@@ -87,14 +91,23 @@ pub fn run(arguments: Vec<OsString>) -> ! {
         Ok(wakeups) => wakeups,
         Err(error) => usage_error(&format!("cannot watch signals: {error}")),
     };
+    // Why the tree runs without its own pid namespace, told to the Host once
+    // it can be: isolation the user expects must not fail silently.
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut isolation_fallback: Option<String> = None;
     #[cfg(target_os = "linux")]
     if outcome.is_none() && crate::namespace::requested() {
         // Blocked before the clone so the outer anchor misses none of them;
         // a fallback unblocks them into the handlers registered above.
         let relayed = crate::namespace::relayed();
         let _ = relayed.thread_block();
-        if let Ok(inner) = crate::namespace::spawn_inner(&arguments) {
-            crate::namespace::relay(inner);
+        match crate::namespace::spawn_inner(&arguments) {
+            Ok(inner) => crate::namespace::relay(inner),
+            Err(reason) => {
+                isolation_fallback = Some(format!(
+                    "running without pid-namespace isolation ({reason}); a killed anchor leaves its group to a later reclaim"
+                ));
+            }
         }
         let _ = relayed.thread_unblock();
     }
@@ -115,6 +128,9 @@ pub fn run(arguments: Vec<OsString>) -> ! {
     silence_standard_streams();
     anchor.announce_ready(leader);
     if let Some(message) = subreaper {
+        anchor.diagnose(message);
+    }
+    if let Some(message) = isolation_fallback {
         anchor.diagnose(message);
     }
     // Inside its own pid namespace the kernel ends the tree with the anchor,
@@ -144,8 +160,11 @@ fn split_inner(arguments: Vec<OsString>) -> Result<(Option<i32>, Vec<OsString>),
         // The Harness must not inherit it: its end tells the outer anchor
         // the inner one is gone.
         // SAFETY: F_SETFD only changes the descriptor table entry.
-        unsafe {
-            libc::fcntl(outcome, libc::F_SETFD, libc::FD_CLOEXEC);
+        if unsafe { libc::fcntl(outcome, libc::F_SETFD, libc::FD_CLOEXEC) } == -1 {
+            return Err(format!(
+                "cannot mark the outcome descriptor close-on-exec: {}",
+                std::io::Error::last_os_error()
+            ));
         }
         return Ok((Some(outcome), arguments.into_iter().skip(2).collect()));
     }
@@ -328,11 +347,20 @@ impl Anchor {
         // A leader that already exited cannot be identified, and without its
         // instance there is no boundary to own escapees by. Its group is
         // still reclaimed through the pinned group id, as always.
-        let (Some(anchor_identity), Some(leader)) = (identity(anchor), identity(leader.as_raw()))
-        else {
+        let Some(anchor_identity) = identity(anchor) else {
+            // Its own identity is always readable; failing here means the
+            // platform layout changed, and nothing below would work either.
+            self.diagnose(
+                "cannot read process identities; escapees are not tracked and the group is not recorded"
+                    .into(),
+            );
             return;
         };
-        match Tracker::new(anchor, leader, self.dry_run) {
+        let Some(leader) = identity(leader.as_raw()) else {
+            return;
+        };
+        let keep = std::env::var_os(ESCAPEES_ENV).is_some_and(|value| value == "keep");
+        match Tracker::new(anchor, leader, self.dry_run, !self.dry_run && !keep) {
             Ok(tracker) => self.tracker = Some(tracker),
             Err(message) => self.diagnose(message),
         }
@@ -356,13 +384,15 @@ impl Anchor {
             return;
         };
         let failure = match tracker.refresh() {
-            Ok(None) => None,
-            Ok(Some(report)) => {
+            Ok(report) => {
+                let recorded = tracker.recorded();
                 let failure = self
                     .ledger
                     .as_mut()
-                    .and_then(|ledger| ledger.record_escapees(tracker.escapees()).err());
-                if self.dry_run {
+                    .and_then(|ledger| ledger.record_owned(&recorded).err());
+                if let Some(report) = report
+                    && self.dry_run
+                {
                     self.send(dry_run_report(&report));
                 }
                 failure
@@ -685,6 +715,10 @@ impl Anchor {
                     if now.duration_since(orphaned_at) >= ORPHANED_RETRY_LIMIT {
                         // Exiting releases the pinned group id, but a group
                         // that survives this many KILLs is beyond the anchor.
+                        // The record stays for a later reclaim; make it current.
+                        if let Some(ledger) = self.ledger.as_mut() {
+                            let _ = ledger.flush();
+                        }
                         self.exit(EXIT_ABANDONED);
                     }
                     self.request_termination(self.lifeline_grace);

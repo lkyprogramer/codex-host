@@ -39,7 +39,7 @@ pub struct Inner {
 /// Where setup stopped, reported by the child before it gives up.
 const STEPS: [&str; 6] = [
     "wait for the user namespace map",
-    "make mounts private",
+    "stop mount propagation back to the host",
     "mount /proc",
     "arm the parent-death signal",
     "keep the outcome descriptor",
@@ -195,11 +195,14 @@ impl ChildSetup {
             if libc::read(self.go, (&raw mut go).cast(), 1) != 1 {
                 fail(0);
             }
+            // Slave, not private: the fresh /proc must not propagate back to
+            // the host, while filesystems the host mounts later (an external
+            // disk, sshfs) must still reach the Harness.
             if libc::mount(
                 std::ptr::null(),
                 c"/".as_ptr(),
                 std::ptr::null(),
-                libc::MS_REC | libc::MS_PRIVATE,
+                libc::MS_REC | libc::MS_SLAVE,
                 std::ptr::null(),
             ) != 0
             {

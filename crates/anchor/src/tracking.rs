@@ -81,8 +81,12 @@ pub struct Tracker {
     foreign_escapees: usize,
     #[cfg(target_os = "macos")]
     forks: fork_watch::ForkWatch,
-    /// Never signal; report what was found instead.
+    /// Report what the boundary refused (a dry run).
     dry_run: bool,
+    /// End escapees with the group. Off in a dry run, and when the user
+    /// keeps processes that detached on purpose (tmux, agents, build
+    /// servers).
+    release_escapees: bool,
 }
 
 /// What one refresh found, for a dry-run report.
@@ -94,7 +98,12 @@ pub struct Report {
 }
 
 impl Tracker {
-    pub fn new(anchor: i32, leader: Identity, dry_run: bool) -> Result<Self, String> {
+    pub fn new(
+        anchor: i32,
+        leader: Identity,
+        dry_run: bool,
+        release_escapees: bool,
+    ) -> Result<Self, String> {
         let table = process_table::snapshot()?;
         Ok(Self {
             group: leader.pid,
@@ -105,6 +114,7 @@ impl Tracker {
             #[cfg(target_os = "macos")]
             forks: fork_watch::ForkWatch::new()?,
             dry_run,
+            release_escapees,
         })
     }
 
@@ -163,17 +173,28 @@ impl Tracker {
             .collect()
     }
 
-    pub fn escapees(&self) -> &HashSet<Identity> {
-        &self.escapees
+    /// Live escapees as of the last refresh that no other count includes,
+    /// when the group waits for them.
+    pub fn foreign_escapees(&self) -> usize {
+        if self.release_escapees {
+            self.foreign_escapees
+        } else {
+            0
+        }
     }
 
-    /// Live escapees as of the last refresh that no other count includes.
-    pub fn foreign_escapees(&self) -> usize {
-        self.foreign_escapees
+    /// What a reclaim may end should the anchor be killed: every owned
+    /// process, less the escapees the user keeps.
+    pub fn recorded(&self) -> HashSet<Identity> {
+        if self.release_escapees {
+            self.known.clone()
+        } else {
+            self.known.difference(&self.escapees).copied().collect()
+        }
     }
 
     pub fn signal(&self, signal: Signal) {
-        if self.dry_run {
+        if !self.release_escapees {
             return;
         }
         for escapee in &self.escapees {
@@ -374,5 +395,41 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_process_started_in_the_leaders_tick_is_owned_unless_it_is_above_the_anchor() {
+        let uid = nix::unistd::geteuid().as_raw();
+        // Linux start times are clock ticks: several processes share one.
+        let entry = |pid: i32, parent: i32, instance: u64| Entry {
+            pid,
+            parent,
+            group: pid,
+            uid,
+            instance,
+            live: true,
+        };
+        let table = [
+            entry(400, 1, 50),   // the Host, started in the leader's tick
+            entry(500, 400, 50), // the anchor
+            entry(600, 500, 50), // the leader
+            entry(610, 600, 50), // a child started in the same tick
+            entry(620, 1, 49),   // older than the leader
+        ];
+        let boundary = Boundary::new(
+            500,
+            Identity {
+                pid: 600,
+                instance: 50,
+            },
+            &table,
+        );
+        let admitted: Vec<i32> = table
+            .iter()
+            .filter(|entry| boundary.admits(entry))
+            .map(|entry| entry.pid)
+            .collect();
+        assert_eq!(admitted, [600, 610]);
     }
 }
