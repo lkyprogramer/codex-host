@@ -426,8 +426,14 @@ describe("Grok Adapter ACP projection", () => {
           expect(received).toEqual(expect.arrayContaining(["primary", "isolated"]));
           expect(received).not.toContain("primary:isolated");
         },
+        // An idle release shuts a transport down exactly as close does.
         readCleanup: async () => ({
-          residue: transports.every((transport) => transport.close.mock.calls.length === 1)
+          residue: transports.every(
+            (transport) =>
+              transport.close.mock.calls.length +
+                transport.releaseOwnedProcess.mock.calls.length ===
+              1,
+          )
             ? "none"
             : "present",
         }),
@@ -450,6 +456,10 @@ describe("Grok Adapter ACP projection", () => {
       cancel: { status: "passed" },
       resume: { status: "passed" },
       followup: { status: "passed" },
+      suspendAborted: { status: "passed" },
+      suspendWhileBusy: { status: "passed" },
+      suspendIdle: { status: "passed", detail: "suspended (grok-acp-session)" },
+      closedSessionRefusesWork: { status: "passed" },
       fork: { status: "notCovered" },
       rollback: { status: "notCovered" },
       permissionAtCreate: { status: "notCovered" },

@@ -24,6 +24,8 @@ export class OutputCollector {
   #failure: unknown;
   #protocolFailure: string | undefined;
   readonly #terminals = new Map<string, number>();
+  /** Where each Turn is in its grammar: started, then completed, once each. */
+  readonly #turns = new Map<string, "started" | "completed">();
 
   constructor(session: HarnessSession) {
     void this.#collect(session);
@@ -34,6 +36,8 @@ export class OutputCollector {
       for await (const output of session.outputs) {
         this.outputs.push(output);
         if (this.#closeRequested) this.#protocolFailure ??= "output received after close";
+        const violation = this.#turnGrammar(output);
+        if (violation) this.#protocolFailure ??= violation;
         if (output.kind === "event" && output.event.type === "turn.completed") {
           const count = (this.#terminals.get(output.event.turnId) ?? 0) + 1;
           this.#terminals.set(output.event.turnId, count);
@@ -44,6 +48,39 @@ export class OutputCollector {
       this.#failure = error;
     } finally {
       this.#ended = true;
+    }
+  }
+
+  /**
+   * A Turn starts once, carries items and interactions only while started,
+   * and completes once; nothing of it may follow its terminal event.
+   */
+  #turnGrammar(output: HarnessOutput): string | undefined {
+    if (output.kind === "interaction") {
+      return this.#turns.get(output.interaction.turnId) === "started"
+        ? undefined
+        : "interaction outside its Turn";
+    }
+    const event = output.event;
+    switch (event.type) {
+      case "turn.started":
+      case "turn.autonomous.started":
+        if (this.#turns.has(event.turnId)) return "Turn started twice";
+        this.#turns.set(event.turnId, "started");
+        return undefined;
+      case "item.started":
+      case "item.updated":
+      case "item.completed":
+      case "interaction.closed":
+        return this.#turns.get(event.turnId) === "started" ? undefined : "item outside its Turn";
+      case "turn.completed": {
+        const state = this.#turns.get(event.turnId);
+        this.#turns.set(event.turnId, "completed");
+        // A second terminal is reported as a duplicate below.
+        return state === undefined ? "terminal event before its Turn started" : undefined;
+      }
+      default:
+        return undefined;
     }
   }
 
