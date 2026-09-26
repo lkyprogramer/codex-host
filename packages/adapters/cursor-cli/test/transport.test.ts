@@ -35,6 +35,16 @@ describe("Cursor ACP process boundary", () => {
     await expect(native.cancel()).rejects.toThrow("history replay");
     expect(native.closed).toBe(false);
   });
+  it("keeps only the load's replay, not updates that arrive between Turns", async () => {
+    state.scenario = "idle-updates";
+    const native = transport();
+    await native.open("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", { historyOnly: true });
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(native.replay).toHaveLength(1);
+    expect(native.replay[0]).toMatchObject({
+      update: { content: { text: "replayed" } },
+    });
+  });
   it("rejects history replay without an existing native session before launch", async () => {
     const native = transport();
     await expect(native.open(undefined, { historyOnly: true })).rejects.toThrow(
