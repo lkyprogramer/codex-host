@@ -57,6 +57,64 @@ function record(): StoredThreadRecordV1 {
 }
 
 describe("ExternalThreadRuntime register", () => {
+  it("uses only the live child status when registering an opened Subagent Thread", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const active = new Set<string>([hostThreadId]);
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: { find: async () => null } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      subagentRunning: (id) => active.has(id),
+    });
+    try {
+      const childRecord = {
+        ...record(),
+        subagent: {
+          parentHostThreadId: hostThreadIdSchema.parse("parent"),
+          nativeSubagentId: "native-child",
+        },
+      };
+      const child = runtime.register({
+        record: childRecord,
+        session: opened.value,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId, status: { type: "idle" } },
+        turns: [],
+      });
+      expect(child.running).toBe(true);
+      expect(child.thread.status).toEqual({ type: "active", activeFlags: [] });
+
+      active.clear();
+      runtime.remove(hostThreadId);
+      const ended = runtime.register({
+        record: childRecord,
+        session: opened.value,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId, status: { type: "idle" } },
+        turns: [],
+      });
+      expect(ended.running).toBe(false);
+      expect(ended.thread.status).toEqual({ type: "idle" });
+
+      active.add(hostThreadId);
+      runtime.remove(hostThreadId);
+      const ordinary = runtime.register({
+        record: record(),
+        session: opened.value,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId, status: { type: "idle" } },
+        turns: [],
+      });
+      expect(ordinary.running).toBe(false);
+      expect(ordinary.thread.status).toEqual({ type: "idle" });
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
   it("passes restored mode before a plugin resolves persisted execution policy", async () => {
     const id = harnessIdSchema.parse("policy-fixture");
     const permissionModeId = harnessPermissionModeIdSchema.parse("plan");
@@ -859,6 +917,58 @@ describe("bounded native history", () => {
       expect(alignSnapshot).not.toHaveBeenCalled();
     } finally {
       release();
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("bounds and cancels a new generation waiting for an aborted native read", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const entered = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const original = opened.value.readSnapshot.bind(opened.value);
+    const read = vi.spyOn(opened.value, "readSnapshot").mockImplementation(async () => {
+      entered.resolve(undefined);
+      await release.promise;
+      return original();
+    });
+    const alignSnapshot = vi.fn();
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      historyReadTimeoutMs: 20,
+      repository: { alignSnapshot } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const thread = runtime.register({
+      record: record(),
+      session: opened.value,
+      sessionId: hostThreadId,
+      thread: { id: hostThreadId },
+      turns: [],
+    });
+    try {
+      const previous = new AbortController();
+      const initial = runtime.refresh(thread, previous.signal);
+      await entered.promise;
+      previous.abort();
+      await expect(initial).resolves.toMatchObject({ code: -32081 });
+      const next = new AbortController();
+      const cancelled = runtime.refresh(thread, next.signal);
+      next.abort();
+      await expect(cancelled).resolves.toMatchObject({ code: -32081 });
+      await expect(runtime.refresh(thread, new AbortController().signal)).resolves.toMatchObject({
+        code: -32081,
+        message: "External Thread history read timed out",
+      });
+      expect(read).toHaveBeenCalledTimes(1);
+      release.resolve(undefined);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(alignSnapshot).not.toHaveBeenCalled();
+    } finally {
+      release.resolve(undefined);
       runtime.clear();
       await adapter.close();
     }

@@ -2,13 +2,21 @@ import nodePath from "node:path";
 
 import type { HarnessAdapter } from "@codexhost/harness-adapter";
 import {
+  decodeExternalTransportSelection,
+  encodeExternalTransportSelection,
   mapExternalThreadHarnessError,
   type DecodedThreadForkRequest,
   type ExternalHarnessId,
   type ExternalThreadRpcError,
   type JsonObject,
 } from "@codexhost/protocol-core";
-import type { NativeCheckpointRef, NativeSessionRef } from "@codexhost/shared-contracts";
+import {
+  encodeHarnessPluginRoute,
+  harnessPluginIdSchema,
+  permissionModeFixedAtCreate,
+  type NativeCheckpointRef,
+  type NativeSessionRef,
+} from "@codexhost/shared-contracts";
 
 import {
   createExternalThreadRecordInput,
@@ -27,6 +35,8 @@ export type ExternalThreadForkResult =
       thread: JsonObject;
       responseThread: JsonObject;
     };
+
+class ForkPermissionError extends Error {}
 
 export async function executeExternalThreadFork(input: {
   source: ExternalThread;
@@ -157,6 +167,7 @@ export async function executeExternalThreadFork(input: {
     return { ok: false, error: mapExternalThreadHarnessError(validated.error, "fork") };
   }
   const session = validated.value;
+  let snapshotReadError: ExternalThreadRpcError | undefined;
   try {
     const derivedNativeRef = session.initialState.nativeRef;
     if (
@@ -165,11 +176,66 @@ export async function executeExternalThreadFork(input: {
     ) {
       throw new Error("External Fork did not create a distinct Native Session");
     }
+    const sourceModeId = source.stateObserver.state.effectivePermissionModeId;
+    if (sourceModeId && session.initialState.effectivePermissionModeId !== sourceModeId) {
+      if (
+        !session.capabilities.configuration.selectPermissionMode ||
+        permissionModeFixedAtCreate(session.capabilities.configuration)
+      ) {
+        throw new ForkPermissionError("External Fork cannot inherit the source Permission Mode");
+      }
+      let selected;
+      try {
+        selected = await session.execute({
+          type: "permissionMode.select",
+          permissionModeId: sourceModeId,
+        });
+      } catch (error) {
+        throw new ForkPermissionError(
+          `External Fork Permission Mode selection threw: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      if (!selected.ok) {
+        throw new ForkPermissionError(
+          `External Fork Permission Mode selection failed: ${selected.error.message}`,
+        );
+      }
+    }
     const snapshot = await session.readSnapshot();
     if (!snapshot.ok) {
-      await session.close().catch(() => undefined);
-      await repository.removeProvisional(provisional.hostThreadId).catch(() => undefined);
-      return { ok: false, error: mapExternalThreadHarnessError(snapshot.error, "read") };
+      snapshotReadError = mapExternalThreadHarnessError(snapshot.error, "read");
+      throw new Error(snapshotReadError.message);
+    }
+    const derivedState = snapshot.value.state ?? session.initialState;
+    if (sourceModeId && derivedState.effectivePermissionModeId !== sourceModeId) {
+      throw new ForkPermissionError("External Fork did not confirm the source Permission Mode");
+    }
+    if (sourceModeId) {
+      const sourceSelection = decodeExternalTransportSelection(
+        source.harnessId,
+        source.transportModelId,
+      );
+      const model = derivedState.effectiveModel ?? sourceSelection?.model;
+      const thinkingOptionId =
+        derivedState.effectiveThinkingOptionId ?? sourceSelection?.thinkingOptionId;
+      const selection = {
+        ...(model ? { model } : {}),
+        ...(thinkingOptionId ? { thinkingOptionId } : {}),
+        permissionModeId: sourceModeId,
+      };
+      const encoded = encodeExternalTransportSelection(source.harnessId, selection);
+      const transportModelId =
+        decodeExternalTransportSelection(source.harnessId, encoded)?.permissionModeId ===
+        sourceModeId
+          ? encoded
+          : encodeHarnessPluginRoute({
+              harnessId: harnessPluginIdSchema.parse(source.harnessId),
+              ...selection,
+            });
+      provisional = await repository.setTransportModelId(
+        provisional.hostThreadId,
+        transportModelId,
+      );
     }
     const aligned = await repository.commitDerivedSnapshot(
       provisional,
@@ -188,6 +254,7 @@ export async function executeExternalThreadFork(input: {
       thread,
       turns: aligned.turns,
       ...(snapshot.value.state ? { restoredState: snapshot.value.state } : {}),
+      ...(sourceModeId ? { requestedPermissionModeId: sourceModeId } : {}),
     });
     return {
       ok: true,
@@ -195,13 +262,38 @@ export async function executeExternalThreadFork(input: {
       thread,
       responseThread: fork.excludeTurns ? { ...thread, turns: [] } : thread,
     };
-  } catch {
+  } catch (error) {
     runtime.remove(provisional.hostThreadId);
-    await session.close().catch(() => undefined);
-    await repository.removeProvisional(provisional.hostThreadId).catch(() => undefined);
+    const cleanupFailures: string[] = [];
+    try {
+      await session.close();
+    } catch {
+      cleanupFailures.push("derived Session close");
+    }
+    try {
+      await repository.removeProvisional(provisional.hostThreadId);
+    } catch {
+      cleanupFailures.push("provisional Host Thread removal");
+    }
+    const permissionError = error instanceof ForkPermissionError;
+    const derivedNativeId = session.initialState.nativeRef?.nativeSessionId;
+    const failureMessage =
+      snapshotReadError?.message ?? (permissionError ? error.message : undefined);
+    const message = failureMessage
+      ? `${failureMessage}; derived Native Session ${derivedNativeId} history may remain (Host has no delete contract)`
+      : "External Fork could not be persisted";
     return {
       ok: false,
-      error: { code: -32081, message: "External Fork could not be persisted" },
+      error: {
+        code:
+          cleanupFailures.length > 0
+            ? -32081
+            : (snapshotReadError?.code ?? (permissionError ? -32076 : -32081)),
+        message:
+          cleanupFailures.length > 0
+            ? `${message}; cleanup failed for provisional Host Thread ${provisional.hostThreadId}: ${cleanupFailures.join(", ")}`
+            : message,
+      },
     };
   }
 }

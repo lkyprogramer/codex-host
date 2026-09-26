@@ -230,6 +230,7 @@ export class ExternalThreadRuntime {
   readonly #environment: NodeJS.ProcessEnv;
   readonly #repository: ExternalThreadRepository;
   readonly #restores = new Map<string, Promise<ExternalThread>>();
+  readonly #subagentRunning: (threadId: string) => boolean;
   /** Threads whose previous Session is still closing; see `retire`. */
   readonly #retiring = new Map<string, Promise<void>>();
   readonly #threads = new Map<string, ExternalThread>();
@@ -252,12 +253,14 @@ export class ExternalThreadRuntime {
     historyRestoreTimeoutMs?: number;
     idleSuspendTimeoutMs?: number;
     canSuspend?(thread: ExternalThread): boolean;
+    subagentRunning?(threadId: string): boolean;
   }) {
     this.#adapters = input.adapters;
     this.#environment = input.environment ?? process.env;
     this.#repository = input.repository;
     this.#consumeOutputs = input.consumeOutputs;
     this.#diagnose = input.diagnose;
+    this.#subagentRunning = input.subagentRunning ?? (() => false);
     this.#epoch = input.epoch ?? randomUUID();
     this.#historyReadTimeoutMs = input.historyReadTimeoutMs ?? EXTERNAL_READ_TIMEOUT_MS;
     this.#historyRestoreTimeoutMs = input.historyRestoreTimeoutMs ?? EXTERNAL_RESTORE_TIMEOUT_MS;
@@ -349,6 +352,9 @@ export class ExternalThreadRuntime {
       ...(effectiveThinkingOptionId ? { effectiveThinkingOptionId } : {}),
       ...(effectivePermissionModeId ? { effectivePermissionModeId } : {}),
     };
+    const running = Boolean(
+      input.record.subagent && this.#subagentRunning(input.record.hostThreadId),
+    );
     const externalThread: ExternalThread = {
       id: input.record.hostThreadId,
       cwd: input.record.cwd,
@@ -365,11 +371,13 @@ export class ExternalThreadRuntime {
       record: input.record,
       sessionId: input.sessionId,
       stateObserver: new SessionStateObserver(observerState),
-      thread: input.thread,
+      thread: running
+        ? { ...input.thread, status: { type: "active", activeFlags: [] } }
+        : input.thread,
       transportModelId: input.transportModelId ?? input.record.transportModelId,
       turns: input.turns,
       historyHydrated: true,
-      running: false,
+      running,
       activeTurnId: null,
       latestUsage: input.session.initialUsage,
       usageTurnId: null,
@@ -649,49 +657,84 @@ export class ExternalThreadRuntime {
     }
   }
 
-  async refresh(thread: ExternalThread): Promise<ExternalThreadRpcError | null> {
-    let refresh = this.#refreshes.get(thread);
-    if (!refresh) {
-      const abort = new AbortController();
-      const resumeBudget =
-        thread.session instanceof ManagedHarnessSession && thread.session.nativeSuspended
-          ? this.#historyRestoreTimeoutMs
-          : this.#historyReadTimeoutMs;
-      const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(resumeBudget)]);
-      const latestTurn = thread.turns.at(-1);
-      const activeTurn = thread.activeTurnId;
-      const current = () =>
-        this.#threads.get(thread.id) === thread &&
-        !thread.running &&
-        thread.activeTurnId === activeTurn &&
-        thread.turns.at(-1) === latestTurn;
-      const pending = Promise.resolve()
-        .then(async () => {
-          const snapshot = await thread.session.readSnapshot();
-          signal.throwIfAborted();
-          if (!snapshot.ok) return mapExternalThreadHarnessError(snapshot.error, "read");
-          if (!current()) return null;
-          const aligned = await this.#repository.alignSnapshot(thread.record, snapshot.value);
-          signal.throwIfAborted();
-          if (!current()) return null;
-          thread.record = aligned.record;
-          thread.turns = aligned.turns;
-          thread.historyHydrated = true;
-          thread.thread = externalThreadValue({
-            record: aligned.record,
-            turns: aligned.turns,
-            sessionId: thread.sessionId,
-            running: thread.running,
-          });
-          return null;
-        })
-        .finally(() => this.#refreshes.delete(thread));
-      refresh = { pending, signal, abort };
-      this.#refreshes.set(thread, refresh);
-    }
+  async refresh(
+    thread: ExternalThread,
+    callerSignal?: AbortSignal,
+  ): Promise<ExternalThreadRpcError | null> {
     try {
+      callerSignal?.throwIfAborted();
+      let refresh = this.#refreshes.get(thread);
+      if (callerSignal && refresh?.signal.aborted) {
+        const budget =
+          thread.session instanceof ManagedHarnessSession && thread.session.nativeSuspended
+            ? this.#historyRestoreTimeoutMs
+            : this.#historyReadTimeoutMs;
+        const waiting = AbortSignal.any([callerSignal, AbortSignal.timeout(budget)]);
+        // A new status generation must wait for the cancelled native operation to leave
+        // before starting its own read. Keep one native read, bounded by this caller's deadline.
+        await awaitWithSignal(
+          refresh.pending.catch(() => undefined),
+          waiting,
+        );
+        waiting.throwIfAborted();
+        return this.refresh(thread, waiting);
+      }
+      if (!refresh) {
+        const abort = new AbortController();
+        const resumeBudget =
+          thread.session instanceof ManagedHarnessSession && thread.session.nativeSuspended
+            ? this.#historyRestoreTimeoutMs
+            : this.#historyReadTimeoutMs;
+        const signal = AbortSignal.any([
+          abort.signal,
+          AbortSignal.timeout(resumeBudget),
+          ...(callerSignal ? [callerSignal] : []),
+        ]);
+        const latestTurn = thread.turns.at(-1);
+        const activeTurn = thread.activeTurnId;
+        const running = thread.running;
+        const current = () =>
+          this.#threads.get(thread.id) === thread &&
+          (!thread.running || Boolean(thread.record.subagent)) &&
+          thread.running === running &&
+          thread.activeTurnId === activeTurn &&
+          thread.turns.at(-1) === latestTurn;
+        const pending = Promise.resolve()
+          .then(async () => {
+            const snapshot = await thread.session.readSnapshot();
+            signal.throwIfAborted();
+            if (!snapshot.ok) return mapExternalThreadHarnessError(snapshot.error, "read");
+            if (!current()) return null;
+            const aligned = await this.#repository.alignSnapshot(thread.record, snapshot.value);
+            // Identity mappings are already committed. Preserve them even if cancellation
+            // invalidated this snapshot, without rolling back a newer persisted revision.
+            if (
+              this.#threads.get(thread.id) === thread &&
+              aligned.record.revision >= thread.record.revision
+            ) {
+              thread.record = aligned.record;
+            }
+            signal.throwIfAborted();
+            if (!current()) return null;
+            thread.turns = aligned.turns;
+            thread.historyHydrated = true;
+            thread.thread = externalThreadValue({
+              record: aligned.record,
+              turns: aligned.turns,
+              sessionId: thread.sessionId,
+              running: thread.running,
+            });
+            return null;
+          })
+          .finally(() => this.#refreshes.delete(thread));
+        refresh = { pending, signal, abort };
+        this.#refreshes.set(thread, refresh);
+      }
       // Keep one native read in flight even after timeout. Its late result cannot mutate history.
-      return await awaitWithSignal(refresh.pending, refresh.signal);
+      return await awaitWithSignal(
+        refresh.pending,
+        callerSignal ? AbortSignal.any([refresh.signal, callerSignal]) : refresh.signal,
+      );
     } catch (error) {
       return {
         code: -32081,

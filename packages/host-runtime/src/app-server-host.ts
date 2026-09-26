@@ -7,6 +7,7 @@ import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
 import type {
   HarnessAdapter,
@@ -154,6 +155,23 @@ import { aggregateOfficialAccountThreadListPage } from "./multi-account-thread-l
 import type { HostUpdateCoordinator } from "./update-coordinator.js";
 
 const SUBAGENT_TERMINAL_REFRESH_DELAYS_MS = [0, 50, 100, 150] as const;
+
+type SubagentThreadStatus = "active" | "idle";
+
+function beginSubagentStatusTransition(
+  statuses: Map<string, SubagentThreadStatus>,
+  tokens: Map<string, symbol>,
+  threadId: string,
+  status: SubagentThreadStatus,
+): { previousStatus: SubagentThreadStatus | undefined; isCurrent: () => boolean } {
+  const previousStatus = statuses.get(threadId);
+  if (previousStatus !== status) {
+    statuses.set(threadId, status);
+    tokens.set(threadId, Symbol());
+  }
+  const token = tokens.get(threadId);
+  return { previousStatus, isCurrent: () => tokens.get(threadId) === token };
+}
 const THREAD_USAGE_UPDATED_METHOD = "codexhost/thread/usage/updated";
 /**
  * How long closing every Harness Session and adapter may take when the Host
@@ -177,9 +195,6 @@ async function settleBefore(deadline: number, work: readonly Promise<unknown>[])
 // Native Codex account quota is still pulled through its official API; keep
 // that reading briefly cached so concurrent Composer inspections coalesce.
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 import {
   classifyThreadPurpose,
   RequestRouteObservationTracker,
@@ -520,8 +535,10 @@ class OrderedWriter {
     return this.#enqueue(() => writeFrame(this.stream, frame));
   }
 
-  json(value: JsonValue): Promise<void> {
-    return this.#enqueue(() => writeJsonFrame(this.stream, value));
+  json(value: JsonValue, isCurrent?: () => boolean): Promise<void> {
+    return this.#enqueue(() =>
+      !isCurrent || isCurrent() ? writeJsonFrame(this.stream, value) : Promise.resolve(),
+    );
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -577,6 +594,10 @@ export class AppServerHost {
   #officialLoginSessions = new Map<string, CodexLoginSession>();
   #writer: OrderedWriter;
   #subagentThreadStatuses = new Map<string, "active" | "idle">();
+  #subagentStatusTokens = new Map<string, symbol>();
+  readonly #subagentRefreshAbort = new AbortController();
+  readonly #subagentRefreshControllers = new Map<string, AbortController>();
+  readonly #subagentRefreshTasks = new Set<Promise<void>>();
   #runningSubagentsByParent = new Map<string, Set<string>>();
   #pendingExternalCommandRequests = new Set<string>();
   #closeRequested = false;
@@ -645,6 +666,7 @@ export class AppServerHost {
       repository: this.#repository,
       consumeOutputs: (thread) => this.#consumeHarnessOutputs(thread),
       diagnose: (error) => this.#diagnose(error),
+      subagentRunning: (threadId) => this.#subagentThreadStatuses.get(threadId) === "active",
       canSuspend: (thread) =>
         !thread.running &&
         thread.activeTurnId === null &&
@@ -701,6 +723,7 @@ export class AppServerHost {
     if (this.#closeRequested) return;
     this.#closeRequested = true;
     this.#pluginLoadAbort.abort();
+    this.#subagentRefreshAbort.abort();
     this.#externalSteering.close();
     this.#signalActiveWorkChanged();
     this.#options.desktopInput.destroy();
@@ -787,6 +810,7 @@ export class AppServerHost {
       await this.#codexRuntimePool.close();
       return this.#closeRequested ? 0 : 1;
     } finally {
+      this.#subagentRefreshAbort.abort();
       this.#externalSteering.close();
       const deadline = Date.now() + (this.#options.shutdownBudgetMs ?? DEFAULT_SHUTDOWN_BUDGET_MS);
       const within = async (what: string, work: readonly Promise<unknown>[]) => {
@@ -795,6 +819,7 @@ export class AppServerHost {
         }
       };
       const threads = this.#externalRuntime.values();
+      await within("draining Subagent refresh tasks", [...this.#subagentRefreshTasks]);
       await within(
         "closing Harness Sessions",
         threads.map(({ session }) => session.close()),
@@ -834,6 +859,7 @@ export class AppServerHost {
   #hasActiveWork(): boolean {
     return (
       this.#externalSteering.hasPending() ||
+      this.#subagentRefreshTasks.size > 0 ||
       this.#pendingOfficialTurnStarts.size > 0 ||
       this.#activeOfficialTurns.size > 0 ||
       this.#runningSubagentsByParent.size > 0 ||
@@ -3418,8 +3444,11 @@ export class AppServerHost {
     return true;
   }
 
-  #refreshExternalThread(thread: ExternalThread): Promise<ExternalThreadRpcError | null> {
-    return this.#externalRuntime.refresh(thread);
+  #refreshExternalThread(
+    thread: ExternalThread,
+    signal?: AbortSignal,
+  ): Promise<ExternalThreadRpcError | null> {
+    return this.#externalRuntime.refresh(thread, signal);
   }
 
   #markExternalThreadIdle(thread: ExternalThread): void {
@@ -4552,7 +4581,12 @@ export class AppServerHost {
     return { ...subagent, subagentId: record.hostThreadId };
   }
 
-  async #refreshOpenSubagentThread(threadId: string, terminal = true): Promise<void> {
+  async #refreshOpenSubagentThread(
+    threadId: string,
+    terminal = true,
+    isCurrent: () => boolean = () => true,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const child = this.#externalRuntime.get(threadId);
     if (!child) return;
     const previousItems = new Map(
@@ -4566,13 +4600,15 @@ export class AppServerHost {
           : [],
       ),
     );
-    const refreshed = await this.#refreshExternalThread(child);
+    const refreshed = await this.#refreshExternalThread(child, signal);
+    if (!isCurrent()) return;
     if (refreshed) {
       this.#diagnose(refreshed.message);
       return;
     }
     const emittedAtMs = Date.now();
     for (const turn of child.turns) {
+      if (!isCurrent()) return;
       if (typeof turn.id !== "string" || !Array.isArray(turn.items)) continue;
       const changedItems = turn.items.filter(
         (item): item is JsonObject =>
@@ -4581,48 +4617,62 @@ export class AppServerHost {
           previousItems.get(item.id) !== JSON.stringify(item),
       );
       if (changedItems.length > 0) {
-        await this.#writer.json({
-          method: "turn/started",
-          emittedAtMs,
-          params: {
-            threadId,
-            turn: {
-              ...turn,
-              status: "inProgress",
-              completedAt: null,
-              durationMs: null,
+        await this.#writer.json(
+          {
+            method: "turn/started",
+            emittedAtMs,
+            params: {
+              threadId,
+              turn: {
+                ...turn,
+                status: "inProgress",
+                completedAt: null,
+                durationMs: null,
+              },
             },
           },
-        });
+          isCurrent,
+        );
       }
       for (const item of changedItems) {
-        await this.#writer.json({
-          method: "item/started",
-          emittedAtMs,
-          params: {
-            threadId,
-            turnId: turn.id,
-            startedAtMs: emittedAtMs,
-            item,
+        if (!isCurrent()) return;
+        await this.#writer.json(
+          {
+            method: "item/started",
+            emittedAtMs,
+            params: {
+              threadId,
+              turnId: turn.id,
+              startedAtMs: emittedAtMs,
+              item,
+            },
           },
-        });
-        await this.#writer.json({
-          method: "item/completed",
-          emittedAtMs,
-          params: {
-            threadId,
-            turnId: turn.id,
-            completedAtMs: emittedAtMs,
-            item,
+          isCurrent,
+        );
+        if (!isCurrent()) return;
+        await this.#writer.json(
+          {
+            method: "item/completed",
+            emittedAtMs,
+            params: {
+              threadId,
+              turnId: turn.id,
+              completedAtMs: emittedAtMs,
+              item,
+            },
           },
-        });
+          isCurrent,
+        );
       }
-      if (terminal) {
-        await this.#writer.json({
-          method: "turn/completed",
-          emittedAtMs,
-          params: { threadId, turn },
-        });
+      if (terminal && isCurrent()) {
+        await this.#writer.json(
+          {
+            method: "turn/completed",
+            emittedAtMs,
+            params: { threadId, turn },
+          },
+          isCurrent,
+        );
       }
     }
   }
@@ -4652,7 +4702,12 @@ export class AppServerHost {
   }
 
   async #setSubagentThreadStatus(threadId: string, status: "active" | "idle"): Promise<void> {
-    const previousStatus = this.#subagentThreadStatuses.get(threadId);
+    const { previousStatus, isCurrent } = beginSubagentStatusTransition(
+      this.#subagentThreadStatuses,
+      this.#subagentStatusTokens,
+      threadId,
+      status,
+    );
     const child = this.#externalRuntime.get(threadId);
     if (child) {
       child.running = status === "active";
@@ -4664,25 +4719,66 @@ export class AppServerHost {
         running: child.running,
       });
     }
+    if (previousStatus === status || this.#subagentRefreshAbort.signal.aborted) return;
+    this.#subagentRefreshControllers.get(threadId)?.abort();
     if (status === "idle" && previousStatus === "active") {
-      for (const [index, waitMs] of SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.entries()) {
-        if (waitMs > 0) await delay(waitMs);
-        await this.#refreshOpenSubagentThread(
-          threadId,
-          index === SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.length - 1,
-        );
-      }
+      const controller = new AbortController();
+      const signal = AbortSignal.any([controller.signal, this.#subagentRefreshAbort.signal]);
+      const current = () => !signal.aborted && isCurrent();
+      this.#subagentRefreshControllers.set(threadId, controller);
+      // Native history may lag terminal state. Do not block the output queue while waiting:
+      // later running events must be able to invalidate this refresh and its native read.
+      const task = Promise.resolve()
+        .then(async () => {
+          for (const [index, waitMs] of SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.entries()) {
+            if (waitMs > 0) await delay(waitMs, undefined, { signal });
+            if (!current()) return;
+            await this.#refreshOpenSubagentThread(
+              threadId,
+              index === SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.length - 1,
+              current,
+              signal,
+            );
+          }
+          if (current()) await this.#writeSubagentThreadStatus(threadId, status, current);
+        })
+        .catch((error: unknown) => {
+          if (!signal.aborted) this.#diagnose(error);
+        })
+        .finally(() => {
+          this.#subagentRefreshTasks.delete(task);
+          if (this.#subagentRefreshControllers.get(threadId) === controller) {
+            this.#subagentRefreshControllers.delete(threadId);
+          }
+          this.#signalActiveWorkChanged();
+        });
+      this.#subagentRefreshTasks.add(task);
+      return;
     }
-    if (previousStatus === status) return;
-    this.#subagentThreadStatuses.set(threadId, status);
-    await this.#writer.json({
-      method: "thread/status/changed",
-      emittedAtMs: Date.now(),
-      params: {
+    if (isCurrent())
+      await this.#writeSubagentThreadStatus(
         threadId,
-        status: status === "active" ? { type: "active", activeFlags: [] } : { type: "idle" },
+        status,
+        () => !this.#subagentRefreshAbort.signal.aborted && isCurrent(),
+      );
+  }
+
+  #writeSubagentThreadStatus(
+    threadId: string,
+    status: SubagentThreadStatus,
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    return this.#writer.json(
+      {
+        method: "thread/status/changed",
+        emittedAtMs: Date.now(),
+        params: {
+          threadId,
+          status: status === "active" ? { type: "active", activeFlags: [] } : { type: "idle" },
+        },
       },
-    });
+      isCurrent,
+    );
   }
 
   async #projectApproval(

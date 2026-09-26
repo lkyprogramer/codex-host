@@ -20,6 +20,7 @@ import type {
   HarnessResult,
   HarnessSessionState,
   HostThreadSnapshot,
+  OpenSessionInput,
 } from "@codexhost/harness-adapter";
 import { FakeHarnessAdapter, FakeHarnessSession } from "@codexhost/harness-adapter/testing";
 import { MappingStore } from "@codexhost/mapping-store";
@@ -828,6 +829,235 @@ describe("AppServerHost installed Harness plugins", () => {
 });
 
 describe("AppServerHost HarnessAdapter projection", () => {
+  it.each([
+    "running",
+    "running-then-idle",
+    "persisting",
+    "backpressure",
+    "backpressure-shutdown",
+    "shutdown",
+  ] as const)(
+    "invalidates blocked child terminal history on %s through the output queue",
+    async (nextState) => {
+      const entered = Promise.withResolvers<undefined>();
+      const released = Promise.withResolvers<undefined>();
+      let blockNextRead = false;
+      let terminal = false;
+      let turnKey = "child-turn";
+      let blockedHostTurnId: string | undefined;
+      const writerBlocked = nextState.startsWith("backpressure");
+      const shutdown = nextState === "shutdown" || nextState === "backpressure-shutdown";
+      const aba = nextState === "running-then-idle" || nextState === "persisting";
+      let blockNextWrite = false;
+      const desktopOutput = new PassThrough({
+        highWaterMark: 1,
+        transform(chunk, _encoding, callback) {
+          this.push(chunk);
+          const message = JSON.parse(chunk.toString()) as JsonObject;
+          if (blockNextWrite && method(message, "item/started")) {
+            blockNextWrite = false;
+            entered.resolve(undefined);
+            void released.promise.then(() => callback());
+          } else callback();
+        },
+      });
+      const directory = mkdtempSync(path.join(tmpdir(), "codexhost-child-refresh-"));
+      const mappingStore = new MappingStore({
+        directory,
+        beforeReplace: async (record) => {
+          const mapping =
+            record.subagent &&
+            record.turnMappings.find((value) => value.nativeTurnRef.nativeTurnKey === "late-turn");
+          if (nextState === "persisting" && mapping && !blockedHostTurnId) {
+            blockedHostTurnId = mapping.hostTurnId;
+            entered.resolve(undefined);
+            await released.promise;
+          }
+        },
+      });
+      const base = new FakeHarnessAdapter(harnessIdSchema.parse("pi"));
+      const readSnapshot = vi.fn(async (input: { parent: { nativeSessionId: string } }) => {
+        const blocked = blockNextRead;
+        blockNextRead = false;
+        const text = blocked
+          ? "Stale terminal result"
+          : terminal
+            ? "Fresh terminal result"
+            : "Initial history";
+        if (blocked && nextState !== "persisting" && !writerBlocked) {
+          entered.resolve(undefined);
+          await released.promise;
+        }
+        return {
+          ok: true as const,
+          value: {
+            turns: [
+              {
+                nativeTurnRef: {
+                  harnessId: harnessIdSchema.parse("pi"),
+                  nativeSessionId: input.parent.nativeSessionId,
+                  nativeTurnKey: turnKey,
+                  formatVersion: 1,
+                },
+                input: [],
+                items: [
+                  {
+                    item: {
+                      type: "agentMessage" as const,
+                      itemId: hostItemIdSchema.parse("child-answer"),
+                      text,
+                    },
+                    outcome: { status: "succeeded" as const },
+                  },
+                ],
+                outcome: { status: "unknown" as const, reason: "Native history" },
+              },
+            ],
+          },
+        };
+      });
+      const adapter = Object.assign(base, { subagents: { readSnapshot } });
+      const fixture = createFixture({
+        externalAdapters: new Map([["pi", adapter]]),
+        mappingStore,
+        mappingStoreDirectory: directory,
+        desktopOutput,
+        // A native read cannot be forcibly stopped; shutdown uses its existing bounded budget.
+        shutdownBudgetMs: 100,
+      });
+      try {
+        const parentId = await startPiThread(fixture);
+        const turnId = await startPiTurn(fixture, parentId);
+        const session = adapter.sessions[0];
+        if (!session) throw new Error("Missing fake Session");
+        await fixture.collector.waitFor((message) => turnEvent(message, "turn/started", turnId));
+        session.startSubagentDelegation({
+          subagentId: "child-call",
+          nativeSubagentId: "native-child",
+          description: "Inspect",
+          background: true,
+          status: "running",
+        });
+        const childStarted = await fixture.collector.waitFor(
+          (message) =>
+            method(message, "thread/started") &&
+            (messageParams(message).thread as JsonObject | undefined)?.parentThreadId === parentId,
+        );
+        const childId = (messageParams(childStarted).thread as JsonObject).id as string;
+        writeRequest(fixture.desktopInput, {
+          id: 901,
+          method: "thread/turns/list",
+          params: { threadId: childId, limit: 20, itemsView: "full" },
+        });
+        await fixture.collector.waitFor((message) => requestId(message, 901));
+        blockNextRead = true;
+        blockNextWrite = writerBlocked;
+        if (nextState === "persisting") turnKey = "late-turn";
+        session.emitSubagentState("native-child", "completed");
+        await entered.promise;
+        const offset = fixture.collector.messages.length;
+        if (shutdown) {
+          fixture.host.close();
+          if (!writerBlocked) await fixture.running;
+        } else {
+          const listSpy = vi.spyOn(mappingStore, "listThreads");
+          session.emitSubagentState("native-child", "running");
+          if (writerBlocked) {
+            await vi.waitFor(() => expect(listSpy).toHaveBeenCalled());
+            // listThreads is an in-memory read; let its consumer update state before draining output.
+            await new Promise((resolve) => setImmediate(resolve));
+            released.resolve(undefined);
+          }
+          session.appendText("Parent queue advanced");
+          await fixture.collector.waitFor(
+            (message) =>
+              method(message, "item/agentMessage/delta") &&
+              messageParams(message).delta === "Parent queue advanced",
+          );
+          expect(
+            fixture.collector.messages
+              .slice(offset)
+              .some((message) => threadStatus(message, childId, "active")),
+          ).toBe(true);
+          expect(
+            fixture.collector.messages
+              .slice(offset)
+              .some((message) => threadStatus(message, childId, "idle")),
+          ).toBe(false);
+          writeRequest(fixture.desktopInput, {
+            id: 902,
+            method: "thread/resume",
+            params: { threadId: childId, excludeTurns: true },
+          });
+          await expect(
+            fixture.collector.waitFor((message) => requestId(message, 902)),
+          ).resolves.toMatchObject({ result: { thread: { status: { type: "active" } } } });
+          if (aba) {
+            terminal = true;
+            session.emitSubagentState("native-child", "completed");
+            session.appendText("Second terminal consumed");
+            await fixture.collector.waitFor(
+              (message) =>
+                method(message, "item/agentMessage/delta") &&
+                messageParams(message).delta === "Second terminal consumed",
+            );
+          }
+        }
+        if (aba) {
+          // Exceed all four refresh delays while the old native read or disk commit remains blocked.
+          await new Promise((resolve) => setTimeout(resolve, 400));
+        }
+        const readsBeforeRelease = readSnapshot.mock.calls.length;
+        const messagesBeforeRelease = fixture.collector.messages.length;
+        released.resolve(undefined);
+        if (shutdown) await fixture.running;
+        if (aba) {
+          await fixture.collector.waitFor((message) => threadStatus(message, childId, "idle"));
+          expect(JSON.stringify(fixture.collector.messages.slice(offset))).toContain(
+            "Fresh terminal result",
+          );
+        } else {
+          await new Promise((resolve) => setTimeout(resolve, 350));
+          expect(readSnapshot).toHaveBeenCalledTimes(readsBeforeRelease);
+          if (shutdown && !writerBlocked)
+            expect(fixture.collector.messages).toHaveLength(messagesBeforeRelease);
+          else
+            expect(
+              fixture.collector.messages
+                .slice(offset)
+                .some(
+                  (message) =>
+                    (method(message, "turn/completed") &&
+                      messageParams(message).threadId === childId) ||
+                    threadStatus(message, childId, "idle"),
+                ),
+            ).toBe(false);
+        }
+        expect(
+          fixture.collector.messages
+            .slice(offset)
+            .some(
+              (message) =>
+                method(message, "item/completed") &&
+                messageParams(message).threadId === childId &&
+                (messageParams(message).item as JsonObject | undefined)?.text ===
+                  "Stale terminal result",
+            ),
+        ).toBe(false);
+        if (nextState === "persisting") {
+          const persisted = await mappingStore.getThread(hostThreadIdSchema.parse(childId));
+          expect(
+            persisted?.turnMappings.find(
+              (mapping) => mapping.nativeTurnRef.nativeTurnKey === "late-turn",
+            )?.hostTurnId,
+          ).toBe(blockedHostTurnId);
+        }
+      } finally {
+        released.resolve(undefined);
+        await stopFixture(fixture);
+      }
+    },
+  );
   it("uses an injected shared listener connection without spawning a stdio app-server", async () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();
@@ -1706,6 +1936,16 @@ describe("AppServerHost HarnessAdapter projection", () => {
     const initialHistory = await fixture.collector.waitFor((message) => requestId(message, 98));
     expect(initialHistory).toMatchObject({
       result: { data: [{ items: [expect.objectContaining({ type: "userMessage" })] }] },
+    });
+    writeRequest(fixture.desktopInput, {
+      id: 95,
+      method: "thread/resume",
+      params: { threadId: childThreadId, excludeTurns: true },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 95)),
+    ).resolves.toMatchObject({
+      result: { thread: { status: { type: "active" } } },
     });
 
     subagentPhase = "temporarily-empty";
@@ -5910,6 +6150,272 @@ describe("AppServerHost HarnessAdapter projection", () => {
     });
     expect(officialWrite).not.toHaveBeenCalled();
     await stopFixture(fixture);
+  });
+
+  it.each(["live", "atCreate"] as const)(
+    "fails closed and cleans a fork whose %s Permission Mode cannot be inherited",
+    async (scope) => {
+      const permissionModes = harnessPermissionModeCatalogSchema.parse({
+        modes: [
+          { id: "default", label: "Default" },
+          { id: "auto", label: "Auto" },
+        ],
+        defaultModeId: "default",
+      });
+      class NonInheritingForkAdapter extends FakeHarnessAdapter {
+        override async open(input: OpenSessionInput) {
+          const result = await super.open(input);
+          if (result.ok && input.kind === "create" && scope === "atCreate") {
+            const autoMode = harnessPermissionModeIdSchema.parse("auto");
+            result.value.initialState.effectivePermissionModeId = autoMode;
+            (result.value as FakeHarnessSession).setStateForSnapshot({
+              ...result.value.initialState,
+              effectivePermissionModeId: autoMode,
+            });
+          }
+          if (result.ok && input.kind === "fork") {
+            const defaultMode = harnessPermissionModeIdSchema.parse("default");
+            result.value.initialState.effectivePermissionModeId = defaultMode;
+            (result.value as FakeHarnessSession).setStateForSnapshot({
+              ...(result.value as FakeHarnessSession).state,
+              effectivePermissionModeId: defaultMode,
+            });
+            if (scope === "live") {
+              (result.value as FakeHarnessSession).rejectNextPermissionModeSelection({
+                code: "invalidRequest",
+                message: "Synthetic selection rejection",
+                retryable: false,
+              });
+            }
+          }
+          return result;
+        }
+      }
+      const adapter = new NonInheritingForkAdapter(
+        harnessIdSchema.parse("pi"),
+        undefined,
+        true,
+        true,
+        null,
+        permissionModes,
+        false,
+        scope,
+      );
+      const fixture = createFixture({ externalAdapters: new Map([["pi", adapter]]) });
+      const sourceId = await startPiThread(fixture);
+      const auto = harnessPermissionModeIdSchema.parse("auto");
+      if (scope === "live") {
+        writeRequest(fixture.desktopInput, {
+          id: 8,
+          method: "codexhost/thread/permission-mode/select",
+          params: { threadId: sourceId, permissionModeId: auto },
+        });
+        await expect(
+          fixture.collector.waitFor((message) => requestId(message, 8)),
+        ).resolves.toHaveProperty("result");
+      }
+      const turnId = await completePiTurn(fixture, sourceId, 9);
+      writeRequest(fixture.desktopInput, {
+        id: 10,
+        method: "thread/fork",
+        params: { threadId: sourceId, lastTurnId: turnId },
+      });
+      const failedFork = await fixture.collector.waitFor((message) => requestId(message, 10));
+      expect(failedFork).toMatchObject({
+        error: { code: -32076, message: expect.stringContaining("Permission Mode") },
+      });
+      const failureMessage = (failedFork.error as JsonObject).message as string;
+      expect(failureMessage).toContain(
+        adapter.sessions[1]?.initialState.nativeRef?.nativeSessionId,
+      );
+      expect(failureMessage).toContain("history may remain");
+      expect(failureMessage).toContain("no delete contract");
+      expect(adapter.sessions[1]?.closed).toBe(true);
+      await expect(fixture.mappingStore.listThreads()).resolves.toHaveLength(1);
+      expect(adapter.sessions[0]?.state.effectivePermissionModeId).toBe(auto);
+      await stopFixture(fixture);
+    },
+  );
+
+  it.each(["selection", "readback"] as const)(
+    "reports %s failure and incomplete fork cleanup",
+    async (failureStage) => {
+      const directory = mkdtempSync(path.join(tmpdir(), "codexhost-fork-cleanup-failure-"));
+      class FailingForkRemovalStore extends MappingStore {
+        override async removeProvisional(id: Parameters<MappingStore["removeProvisional"]>[0]) {
+          const record = await this.getThread(id);
+          if (record?.forkSource) throw new Error("Synthetic provisional removal failure");
+          return super.removeProvisional(id);
+        }
+      }
+      const mappingStore = new FailingForkRemovalStore({ directory });
+      const permissionModes = harnessPermissionModeCatalogSchema.parse({
+        modes: [
+          { id: "default", label: "Default" },
+          { id: "auto", label: "Auto" },
+        ],
+        defaultModeId: "default",
+      });
+      class ThrowingForkAdapter extends FakeHarnessAdapter {
+        override async open(input: OpenSessionInput) {
+          const result = await super.open(input);
+          if (result.ok && input.kind === "fork") {
+            result.value.initialState.effectivePermissionModeId =
+              harnessPermissionModeIdSchema.parse("default");
+            if (failureStage === "selection") {
+              vi.spyOn(result.value, "execute").mockRejectedValueOnce(
+                new Error("Synthetic native selection exception"),
+              );
+            } else {
+              vi.spyOn(result.value, "readSnapshot").mockResolvedValueOnce({
+                ok: false,
+                error: {
+                  code: "unavailable",
+                  message: "Synthetic snapshot failure",
+                  retryable: true,
+                },
+              });
+            }
+            vi.spyOn(result.value, "close").mockRejectedValueOnce(
+              new Error("Synthetic close failure"),
+            );
+          }
+          return result;
+        }
+      }
+      const adapter = new ThrowingForkAdapter(
+        harnessIdSchema.parse("pi"),
+        undefined,
+        true,
+        true,
+        null,
+        permissionModes,
+      );
+      const fixture = createFixture({
+        externalAdapters: new Map([["pi", adapter]]),
+        mappingStore,
+        mappingStoreDirectory: directory,
+      });
+      const sourceId = await startPiThread(fixture);
+      writeRequest(fixture.desktopInput, {
+        id: 8,
+        method: "codexhost/thread/permission-mode/select",
+        params: {
+          threadId: sourceId,
+          permissionModeId: harnessPermissionModeIdSchema.parse("auto"),
+        },
+      });
+      await fixture.collector.waitFor((message) => requestId(message, 8));
+      const turnId = await completePiTurn(fixture, sourceId, 9);
+      writeRequest(fixture.desktopInput, {
+        id: 10,
+        method: "thread/fork",
+        params: { threadId: sourceId, lastTurnId: turnId },
+      });
+      const failure = await fixture.collector.waitFor((message) => requestId(message, 10));
+      const message = (failure.error as JsonObject).message as string;
+      expect(failure.error).toMatchObject({ code: -32081 });
+      expect(message).toContain(
+        failureStage === "selection"
+          ? "Permission Mode selection threw"
+          : "External Harness is unavailable",
+      );
+      expect(message).toContain(adapter.sessions[1]?.initialState.nativeRef?.nativeSessionId);
+      expect(message).toContain("history may remain");
+      expect(message).toContain("derived Session close");
+      expect(message).toContain("provisional Host Thread removal");
+      await expect(mappingStore.listThreads()).resolves.toEqual([
+        expect.objectContaining({ hostThreadId: sourceId, state: "ready" }),
+        expect.objectContaining({
+          state: "creating",
+          forkSource: expect.objectContaining({ hostThreadId: sourceId }),
+        }),
+      ]);
+      await stopFixture(fixture);
+    },
+  );
+
+  it("inherits and persists the effective source Permission Mode across fork and resume", async () => {
+    const permissionModes = harnessPermissionModeCatalogSchema.parse({
+      modes: [
+        { id: "default", label: "Default" },
+        { id: "auto", label: "Auto" },
+      ],
+      defaultModeId: "default",
+    });
+    class ResettingForkAdapter extends FakeHarnessAdapter {
+      override async open(input: OpenSessionInput) {
+        const result = await super.open(input);
+        if (result.ok && input.kind === "fork") {
+          const defaultMode = harnessPermissionModeIdSchema.parse("default");
+          result.value.initialState.effectivePermissionModeId = defaultMode;
+          (result.value as FakeHarnessSession).setStateForSnapshot({
+            ...(result.value as FakeHarnessSession).state,
+            effectivePermissionModeId: defaultMode,
+          });
+        }
+        return result;
+      }
+    }
+    const adapter = new ResettingForkAdapter(
+      harnessIdSchema.parse("pi"),
+      undefined,
+      true,
+      true,
+      null,
+      permissionModes,
+    );
+    const fixture = createFixture({ externalAdapters: new Map([["pi", adapter]]) });
+    const sourceId = await startPiThread(fixture);
+    const auto = harnessPermissionModeIdSchema.parse("auto");
+    writeRequest(fixture.desktopInput, {
+      id: 8,
+      method: "codexhost/thread/permission-mode/select",
+      params: { threadId: sourceId, permissionModeId: auto },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 8)),
+    ).resolves.toHaveProperty("result");
+    const turnId = await completePiTurn(fixture, sourceId, 9);
+    writeRequest(fixture.desktopInput, {
+      id: 10,
+      method: "thread/fork",
+      params: { threadId: sourceId, lastTurnId: turnId },
+    });
+    const response = await fixture.collector.waitFor((message) => requestId(message, 10));
+    const derivedId = ((response.result as JsonObject).thread as JsonObject).id as string;
+    expect(adapter.sessions[1]?.state.effectivePermissionModeId).toBe(auto);
+    expect(adapter.sessions[0]?.state.effectivePermissionModeId).toBe(auto);
+    const stored = await fixture.mappingStore.getThread(hostThreadIdSchema.parse(derivedId));
+    expect(decodeExternalTransportSelection("pi", stored?.transportModelId)?.permissionModeId).toBe(
+      auto,
+    );
+
+    const directory = fixture.mappingStoreDirectory;
+    await closeFixture(fixture);
+    const resumedAdapter = new FakeHarnessAdapter(
+      harnessIdSchema.parse("pi"),
+      undefined,
+      true,
+      true,
+      null,
+      permissionModes,
+    );
+    const reopened = createFixture({
+      mappingStoreDirectory: directory,
+      externalAdapters: new Map([["pi", resumedAdapter]]),
+    });
+    await reopened.ready;
+    writeRequest(reopened.desktopInput, {
+      id: 11,
+      method: "thread/resume",
+      params: { threadId: derivedId, excludeTurns: true },
+    });
+    await expect(
+      reopened.collector.waitFor((message) => requestId(message, 11)),
+    ).resolves.toHaveProperty("result");
+    expect(resumedAdapter.sessions.at(-1)?.state.effectivePermissionModeId).toBe(auto);
+    await stopFixture(reopened);
   });
 
   it("forks a completed boundary while a later source Turn is still running", async () => {
