@@ -60,13 +60,6 @@ impl ChildProcessGuard {
         signal: nix::sys::signal::Signal,
         spare_self_releasing: bool,
     ) -> Result<bool, PlatformError> {
-        #[cfg(target_os = "macos")]
-        use nix::errno::Errno;
-        #[cfg(target_os = "macos")]
-        use nix::sys::signal::killpg;
-        #[cfg(target_os = "macos")]
-        use nix::unistd::Pid;
-
         self.with_tree(|tree| {
             let root_group = tree.process_group_id();
             let mut owned = tree.observe()?;
@@ -103,13 +96,7 @@ impl ChildProcessGuard {
                 #[cfg(target_os = "linux")]
                 tree.signal_processes(&group_members, signal)?;
                 #[cfg(target_os = "macos")]
-                if let Err(error) = killpg(Pid::from_raw(process_group), signal)
-                    && error != Errno::ESRCH
-                {
-                    return Err(PlatformError::Io(io::Error::from_raw_os_error(
-                        error as i32,
-                    )));
-                }
+                signal_macos_group(process_group, signal)?;
             }
             let escaped = owned
                 .into_iter()
@@ -118,6 +105,27 @@ impl ChildProcessGuard {
             tree.signal_processes(&escaped, signal)?;
             Ok(false)
         })
+    }
+}
+
+/// Signals a process group whose members were just observed. They may all
+/// exit before the signal: an empty group is ESRCH, and one left with only
+/// an unreaped leader (the Shim keeps its exited root unreaped) is EPERM on
+/// macOS. Neither is a failure; the caller counts live members.
+#[cfg(target_os = "macos")]
+fn signal_macos_group(
+    process_group: i32,
+    signal: nix::sys::signal::Signal,
+) -> Result<(), PlatformError> {
+    use nix::errno::Errno;
+    use nix::sys::signal::killpg;
+    use nix::unistd::Pid;
+
+    match killpg(Pid::from_raw(process_group), signal) {
+        Ok(()) | Err(Errno::ESRCH | Errno::EPERM) => Ok(()),
+        Err(error) => Err(PlatformError::Io(io::Error::from_raw_os_error(
+            error as i32,
+        ))),
     }
 }
 
@@ -397,6 +405,39 @@ pub fn spawn_supervised(command: &mut Command) -> Result<SupervisedChild, Platfo
 #[cfg(all(test, any(target_os = "macos", target_os = "linux")))]
 mod tests {
     use super::{spawn_supervised, unix_process_snapshot};
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_group_left_with_only_its_unreaped_leader_is_not_a_signal_failure() {
+        use std::os::unix::process::CommandExt;
+
+        let mut leader = Command::new("/usr/bin/true")
+            .process_group(0)
+            .spawn()
+            .expect("spawn group leader");
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while crate::macos_wait::exit_status_retaining(leader.id())
+            .expect("peek leader")
+            .is_none()
+        {
+            assert!(Instant::now() < deadline, "leader did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let group = i32::try_from(leader.id()).expect("pid fits i32");
+        // The raw call reports EPERM for a group holding only a zombie.
+        assert_eq!(
+            nix::sys::signal::killpg(
+                nix::unistd::Pid::from_raw(group),
+                nix::sys::signal::Signal::SIGTERM
+            ),
+            Err(nix::errno::Errno::EPERM)
+        );
+        super::signal_macos_group(group, nix::sys::signal::Signal::SIGTERM)
+            .expect("zombie-only group is not a failure");
+        leader.wait().expect("reap leader");
+        super::signal_macos_group(group, nix::sys::signal::Signal::SIGTERM)
+            .expect("empty group is not a failure");
+    }
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::process::Command;

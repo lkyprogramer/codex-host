@@ -10,17 +10,23 @@ pub(crate) fn exit_status_retaining(process_id: u32) -> io::Result<Option<ExitSt
     // SAFETY: an all-zero siginfo_t is a valid value, and `waitid` only
     // writes into the one it is given.
     let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
-    // SAFETY: `info` outlives the call.
-    let result = unsafe {
-        libc::waitid(
-            libc::P_PID,
-            id,
-            &raw mut info,
-            libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
-        )
-    };
-    if result != 0 {
-        return Err(io::Error::last_os_error());
+    loop {
+        // SAFETY: `info` outlives the call.
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                id,
+                &raw mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result == 0 {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if error.kind() != io::ErrorKind::Interrupted {
+            return Err(error);
+        }
     }
     // WNOHANG leaves the record empty while the child runs.
     if info.si_pid == 0 {
