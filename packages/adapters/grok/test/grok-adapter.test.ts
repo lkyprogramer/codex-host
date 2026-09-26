@@ -804,6 +804,38 @@ describe("Grok Adapter ACP projection", () => {
     await adapter.close();
   });
 
+  it("closes a cancelled Turn's pending Approval and refuses a later response", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-cancelled-approval");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "test" }] });
+    expect((await nextEvent(iterator)).type).toBe("turn.started");
+
+    const permission = transport.permission();
+    const output = await nextOutput(iterator);
+    if (output.kind !== "interaction") throw new Error("Expected Grok Approval");
+    const { interactionId } = output.interaction;
+
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "interaction.closed",
+      interactionId,
+      reason: "cancelled",
+    });
+    await expect(
+      session.execute({
+        type: "interaction.respond",
+        interactionId,
+        response: { type: "approval", actionId: "allow-once" },
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    await adapter.close();
+  });
+
   it("projects Thinking, Tool, Approval, Text, Usage, and terminal in order", async () => {
     const transport = new FakeGrokTransport();
     const { adapter, session } = await openedSession(transport);

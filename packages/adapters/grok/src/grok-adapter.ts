@@ -976,8 +976,17 @@ class GrokHarnessSession implements HarnessSession {
     }
     if (active.cancellationRequested) return { ok: true, value: { cancellationRequested: true } };
     active.cancellationRequested = true;
-    for (const approval of active.approvals.values()) {
+    // A cancelled Turn's approvals are closed now: a later response must be
+    // refused, not accepted and recorded as responded.
+    for (const [interactionId, approval] of active.approvals) {
+      active.approvals.delete(interactionId);
       approval.resolve({ outcome: { outcome: "cancelled" } });
+      this.#event({
+        type: "interaction.closed",
+        interactionId,
+        turnId: active.command.turnId,
+        reason: "cancelled",
+      });
     }
     try {
       await this.#transport.cancel();

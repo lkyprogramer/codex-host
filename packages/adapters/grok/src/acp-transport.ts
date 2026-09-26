@@ -261,20 +261,32 @@ function classifyStartupError(error: unknown): GrokTransportError {
   return new GrokTransportError("unavailable", "Grok CLI could not start", { cause: error });
 }
 
-function withTimeout<T>(promise: Promise<T>, milliseconds: number, operation: string): Promise<T> {
+function withTimeout<T>(
+  promise: Promise<T>,
+  milliseconds: number,
+  operation: string,
+  onTimeout?: (error: GrokTransportError) => void,
+): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   return Promise.race([
     promise,
     new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(
-        () => reject(new GrokTransportError("unavailable", `${operation} timed out`)),
-        milliseconds,
-      );
+      timeout = setTimeout(() => {
+        const error = new GrokTransportError("unavailable", `${operation} timed out`);
+        onTimeout?.(error);
+        reject(error);
+      }, milliseconds);
     }),
   ]).finally(() => {
     if (timeout) clearTimeout(timeout);
   });
 }
+
+/**
+ * A native Compact can legitimately run for minutes on a long conversation;
+ * it is still bounded, and it is cancellable meanwhile.
+ */
+const COMPACT_TIMEOUT_MS = 10 * 60_000;
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -912,12 +924,17 @@ export class GrokAcpTransport {
       };
       let raw: unknown;
       try {
-        raw = await connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_METHOD, params);
+        raw = await this.#retiringOnTimeout(
+          connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_METHOD, params),
+          "Grok Native Compact",
+          COMPACT_TIMEOUT_MS,
+        );
       } catch (error) {
         if (!isGrokMethodNotFound(error)) throw error;
-        raw = await connection.request<unknown, unknown>(
-          GROK_COMPACT_CONVERSATION_FALLBACK_METHOD,
-          params,
+        raw = await this.#retiringOnTimeout(
+          connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_FALLBACK_METHOD, params),
+          "Grok Native Compact",
+          COMPACT_TIMEOUT_MS,
         );
       }
       await yieldToEventLoop();
@@ -933,8 +950,12 @@ export class GrokAcpTransport {
     const connection = this.#connection;
     if (!connection || !this.#sessionId) throw new Error("Grok ACP Session is unavailable");
     try {
-      await connection.setSessionMode({ sessionId: this.#sessionId, modeId });
+      await this.#retiringOnTimeout(
+        connection.setSessionMode({ sessionId: this.#sessionId, modeId }),
+        "Grok Session mode configuration",
+      );
     } catch (error) {
+      if (error instanceof GrokTransportError) throw error;
       if (error instanceof RequestError && error.code === -32601) {
         throw new GrokTransportError(
           "protocolError",
@@ -957,11 +978,17 @@ export class GrokAcpTransport {
       );
     }
     try {
-      const raw = await connection.request<unknown, unknown>(GROK_INTERJECT_METHOD, {
-        sessionId: this.#sessionId,
-        text,
-        interjectionId,
-      });
+      // An interjection only adds to the running Turn, which stays
+      // cancellable: a late answer is refused, the connection kept.
+      const raw = await withTimeout(
+        connection.request<unknown, unknown>(GROK_INTERJECT_METHOD, {
+          sessionId: this.#sessionId,
+          text,
+          interjectionId,
+        }),
+        this.#options.commandTimeoutMs,
+        "Grok Native Interject",
+      );
       const parsed = parseGrokInterjectResponse(raw);
       if (!parsed) {
         throw new GrokTransportError("protocolError", "Grok Interject returned an invalid result");
@@ -983,13 +1010,13 @@ export class GrokAcpTransport {
   async setModel(modelId: string, reasoningEffort?: string): Promise<void> {
     const connection = this.#connection;
     if (!connection || !this.#sessionId) throw new Error("Grok ACP Session is unavailable");
-    const response = await connection.request<unknown, Record<string, unknown>>(
-      "session/set_model",
-      {
+    const response = await this.#retiringOnTimeout(
+      connection.request<unknown, Record<string, unknown>>("session/set_model", {
         sessionId: this.#sessionId,
         modelId,
         ...(reasoningEffort ? { reasoningEffort } : {}),
-      },
+      }),
+      "Grok Model configuration",
     );
     if (!isRecord(response) || !isRecord(response._meta) || !isRecord(response._meta.model)) {
       throw new GrokTransportError("protocolError", "Grok rejected Model configuration");
@@ -1172,5 +1199,28 @@ export class GrokAcpTransport {
   #fault(error: GrokTransportError): void {
     if (this.#closing || this.#closed) return;
     this.#options.onFault?.(error);
+  }
+
+  /**
+   * A write whose answer never came leaves Grok's native state unknown (was
+   * the Model switched? is the Compact still running?), so the connection is
+   * retired rather than reused: the Session faults and closes.
+   */
+  #retiringOnTimeout<T>(
+    request: Promise<T>,
+    operation: string,
+    timeoutMs = this.#options.commandTimeoutMs,
+  ): Promise<T> {
+    return withTimeout(request, timeoutMs, operation, (error) => {
+      this.#fault(
+        new GrokTransportError(
+          "processExited",
+          `${operation} did not answer; the connection is retired`,
+          {
+            cause: error,
+          },
+        ),
+      );
+    });
   }
 }
