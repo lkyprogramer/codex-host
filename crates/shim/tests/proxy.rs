@@ -426,8 +426,19 @@ fn rejects_missing_stock_cli_when_cli_override_does_not_name_the_running_shim() 
     assert!(String::from_utf8_lossy(&output.stderr).contains("does not identify the running Shim"));
 }
 
+/// The official CLI inside a fixture bundle: the provisioned CLI app of
+/// current Desktops, or the legacy `Resources/codex`.
 #[cfg(target_os = "macos")]
-fn macos_fixture_bundle(directory: &std::path::Path) -> PathBuf {
+fn macos_fixture_cli(bundle: &std::path::Path, provisioned: bool) -> PathBuf {
+    if provisioned {
+        bundle.join("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+    } else {
+        bundle.join("Contents/Resources/codex")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_fixture_bundle(directory: &std::path::Path, provisioned: bool) -> PathBuf {
     let bundle = directory.join("ChatGPT.app");
     fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
     fs::create_dir_all(bundle.join("Contents/Resources")).unwrap();
@@ -444,15 +455,31 @@ fn macos_fixture_bundle(directory: &std::path::Path) -> PathBuf {
     .unwrap();
     fs::write(bundle.join("Contents/Resources/app.asar"), b"fixture").unwrap();
     fs::copy(fake_codex_path(), bundle.join("Contents/MacOS/ChatGPT")).unwrap();
-    fs::copy(fake_codex_path(), bundle.join("Contents/Resources/codex")).unwrap();
+    let cli = macos_fixture_cli(&bundle, provisioned);
+    fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    if provisioned {
+        fs::write(
+            bundle.join("Contents/Resources/codex-cli/codex-package.json"),
+            r#"{"layoutVersion":1,"entrypoint":"bin/codex"}"#,
+        )
+        .unwrap();
+    }
+    fs::copy(fake_codex_path(), cli).unwrap();
     bundle
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_browser_helper_preserving_only_cli_override_reaches_official_cli() {
+    for provisioned in [false, true] {
+        macos_browser_helper_reaches_official_cli(provisioned);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_browser_helper_reaches_official_cli(provisioned: bool) {
     let directory = temporary_directory();
-    let bundle = macos_fixture_bundle(&directory);
+    let bundle = macos_fixture_bundle(&directory, provisioned);
     let mut command = shim_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("CODEXHOST_") {
@@ -480,16 +507,19 @@ fn macos_browser_helper_preserving_only_cli_override_reaches_official_cli() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_native_helpers_do_not_become_host_runtime_owners() {
-    for (depth, detached) in [
-        (0, false),
-        (1, false),
-        (2, false),
-        (0, true),
-        (1, true),
-        (2, true),
+    for (depth, detached, provisioned) in [
+        (0, false, false),
+        (1, false, false),
+        (2, false, false),
+        (0, true, false),
+        (1, true, false),
+        (2, true, false),
+        (0, false, true),
+        (1, false, true),
+        (2, true, true),
     ] {
         let directory = temporary_directory();
-        let bundle = macos_fixture_bundle(&directory);
+        let bundle = macos_fixture_bundle(&directory, provisioned);
         let desktop = bundle.join("Contents/MacOS/ChatGPT");
         let mut command = Command::new(if detached {
             fake_codex_path()
@@ -517,7 +547,7 @@ fn macos_native_helpers_do_not_become_host_runtime_owners() {
             .env_remove(REMOTE_SSH_MANAGED_ENV)
             .env(
                 STOCK_CODEX_PATH_ENV,
-                bundle.join("Contents/Resources/codex"),
+                macos_fixture_cli(&bundle, provisioned),
             )
             .env(CODEX_CLI_PATH_ENV, shim_path())
             .env(HOST_NODE_PATH_ENV, fake_codex_path())
@@ -542,11 +572,14 @@ fn macos_native_helpers_do_not_become_host_runtime_owners() {
         drop(stdin);
         let output = child.wait_with_output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "depth={depth}: {stderr}");
+        assert!(
+            output.status.success(),
+            "depth={depth} provisioned={provisioned}: {stderr}"
+        );
         assert_eq!(
             stderr.contains("args=app-server|--listen|stdio://"),
             depth > 0,
-            "only auxiliary helpers may use stock CLI: depth={depth}, {stderr}"
+            "only auxiliary helpers may use stock CLI: depth={depth}, provisioned={provisioned}, {stderr}"
         );
         if depth > 0 {
             assert!(!directory.join("local-host-runtime-owner.lock").exists());

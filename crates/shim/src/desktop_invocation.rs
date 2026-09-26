@@ -42,11 +42,14 @@ fn is_macos_desktop_helper(stock_codex_path: &std::path::Path) -> Option<bool> {
     // LaunchServices reparents Desktop to launchd, so the launcher cannot be an
     // ancestor. Match the exact Desktop in the already-resolved official CLI's
     // validated bundle instead; direct Desktop -> shim must still start Host.
-    let bundle = stock_codex_path.parent()?.parent()?.parent()?;
-    let installation = discover_codex_desktop_from_root(bundle).ok()?;
-    if installation.executable_codex_cli != stock_codex_path {
-        return None;
-    }
+    // The CLI is `<bundle>/Contents/Resources/codex` in earlier Desktops and
+    // `<bundle>/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`
+    // in current ones, whose nested CLI app is not the Desktop bundle.
+    let installation = [3, 7].into_iter().find_map(|depth| {
+        let installation =
+            discover_codex_desktop_from_root(stock_codex_path.ancestors().nth(depth)?).ok()?;
+        (installation.executable_codex_cli == stock_codex_path).then_some(installation)
+    })?;
     let mut child = process_snapshot(std::process::id()).ok()?;
     for depth in 1..=32 {
         if child.parent_id <= 1 || child.parent_id == child.id {
