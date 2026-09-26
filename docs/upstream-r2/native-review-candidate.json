@@ -1,0 +1,28 @@
+{
+  "head": "af255febcba902a70d16cfec9271dfa2c5cd6ae9",
+  "reviewSession": "01a0dbe7-1910-7303-bee9-8f168921b99f",
+  "agentType": "reviewer",
+  "model": "gpt-6-astra",
+  "reasoningEffort": "high",
+  "files": {
+    "crates/launcher/src/desktop_attachment.rs": "6f83d09d35a31b8f3fec7c0ebb44cb87a9a1e5b1056e49e038fae57daa4f04ad",
+    "crates/launcher/src/main.rs": "cc6eda4d9a4ab7a896719f286c4c1653251e5e706ca4e43e80eda7ea5693feab",
+    "packages/adapters/omp/src/omp-rpc-session.ts": "bd71d1e82f677130b63d23cce05705a5f2c446239662bea5df4feac06fba0e2e",
+    "packages/adapters/omp/test/omp-rpc-session.test.ts": "2b26b8300434ce718800d20b683b2939c4cfc861a30565de6f6a33e894b0595f",
+    "packages/adapters/opencode/src/server-connection.ts": "a1b0182036e5a9403ff8b01d4f8050b98e5d2af81dd8a7e6536fcc6c8b43be77",
+    "packages/adapters/opencode/test/sdk-transport.test.ts": "d877273e20e11a16c5ab2280f7d2d0cd81ad10b65bbe2363accf834be774e9e1",
+    "packages/adapters/pi/src/pi-rpc-session.ts": "177b8071d11bf69b02f37445b2dec2f9c5a1dcd1e8cf98563a4b60dcdea34848",
+    "packages/adapters/pi/test/pi-rpc-session.test.ts": "054276292d0ef5a1bf136830f041bd3091ac39fea47eacbdfaf27fca73feea29",
+    "packages/desktop-control/src/controller-attachment-server.ts": "48de85c21fbeb97687bf88072bf7ce9cb16943c7e6609b0a1380e2a30e923fea",
+    "packages/desktop-control/test/controller-attachment-server.test.ts": "793bfe8caf6f3b0361c7441693c636cac2a61477186f1bb46801c710fa1aa1c5",
+    "packages/host-runtime/src/app-server-host.ts": "bd8203ba5d6d71c3c444396765eb3b8d09fffb88dbfdd43ac9fa10fa98ea7141",
+    "packages/host-runtime/src/external-thread-fork.ts": "352b0b203ded4b7dc3fae67de0832c55095c5040dad95b63fc91ce0a5646e6dc",
+    "packages/host-runtime/src/external-thread-runtime.ts": "d06fced3f8eec54024b3d213e60bf4a6ca8b897cb7bbb226f0331eb4d2c9f4bc",
+    "packages/host-runtime/src/external-turn-steering.ts": "dc1eb03d84ab1c14ec3e8e7fad783150949998c0955ef4bd000d3b42471d639d",
+    "packages/host-runtime/test/app-server-host.test.ts": "2b35dfbd92c7a16d7e498e4cc27474d61c20134069543b48607ae278381dee1b",
+    "packages/host-runtime/test/external-thread-runtime.test.ts": "7f1438aae1fdf9d536db1d86ea42e86683de6d7fa14d756486be55fb972f890a",
+    "packages/host-runtime/test/external-turn-steering.test.ts": "c02514574bee84acbdea5e21cd4f6042da6d204f1450b741cf530f1aab37e252",
+    "packages/mapping-store/src/mapping-store.ts": "ffe2d01b6c45f1e04e2bb2b42105c647c3162f3abf8a3af318f878b565dccdc2",
+    "packages/mapping-store/test/macos-lock.test.ts": "f6ce5a96bd86a4ea5652bdac0b91752661629b1bbc715ee434bd7d8749cdce30"
+  }
+}
