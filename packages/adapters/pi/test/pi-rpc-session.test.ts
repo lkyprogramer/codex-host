@@ -78,11 +78,13 @@ class FakePiRpcProcess extends EventEmitter {
   #thinkingLevel = "high";
   readonly #scenario: Scenario;
   readonly #compactionDelayMs: number | undefined;
+  readonly #cancelDelayMs: number | undefined;
 
-  constructor(scenario: Scenario, compactionDelayMs?: number) {
+  constructor(scenario: Scenario, compactionDelayMs?: number, cancelDelayMs?: number) {
     super();
     this.#scenario = scenario;
     this.#compactionDelayMs = compactionDelayMs;
+    this.#cancelDelayMs = cancelDelayMs;
     this.stdin.on("data", (chunk: Buffer) => this.#push(chunk));
     this.stdin.once("finish", () => {
       this.exitCode = 0;
@@ -434,16 +436,20 @@ class FakePiRpcProcess extends EventEmitter {
       ["cancel", "cancel-no-settle", "interaction-cancel"].includes(this.#scenario)
     ) {
       if (this.#scenario === "cancel-no-settle") return;
-      if (this.#scenario === "cancel") {
-        this.#output({
-          type: "tool_execution_end",
-          toolCallId: "long-tool",
-          toolName: "gate_long_tool",
-          result: { content: [{ type: "text", text: "cancelled" }] },
-          isError: true,
-        });
-      }
-      this.#settleAgent();
+      const settle = () => {
+        if (this.#scenario === "cancel") {
+          this.#output({
+            type: "tool_execution_end",
+            toolCallId: "long-tool",
+            toolName: "gate_long_tool",
+            result: { content: [{ type: "text", text: "cancelled" }] },
+            isError: true,
+          });
+        }
+        this.#settleAgent();
+      };
+      if (this.#cancelDelayMs) setTimeout(settle, this.#cancelDelayMs);
+      else settle();
       return;
     }
     if (command.type !== "prompt") return;
@@ -725,19 +731,28 @@ function session(
   options: {
     commandTimeoutMs?: number;
     nativeCompactionDelayMs?: number;
+    nativeCancelDelayMs?: number;
     cancelTimeoutMs?: number;
   } = {},
 ): PiRpcSession {
   const processAdapter: PiRpcProcessAdapter = {
     spawn() {
-      return owned(new FakePiRpcProcess(scenario, options.nativeCompactionDelayMs));
+      return owned(
+        new FakePiRpcProcess(
+          scenario,
+          options.nativeCompactionDelayMs,
+          options.nativeCancelDelayMs,
+        ),
+      );
     },
   };
   return new PiRpcSession(
     {
       cwd: process.cwd(),
       commandTimeoutMs: options.commandTimeoutMs ?? 2_000,
-      cancelTimeoutMs: options.cancelTimeoutMs ?? 500,
+      ...(options.cancelTimeoutMs === undefined
+        ? {}
+        : { cancelTimeoutMs: options.cancelTimeoutMs }),
       closeTimeoutMs: 500,
       onFault,
     },
@@ -1531,6 +1546,74 @@ describe("Pi RPC Turn aggregation", () => {
       cancelled: false,
     });
     await rpc.close();
+  });
+
+  it.each([1_000, 5_000, 25_000])(
+    "keeps the default cancellation alive until native settlement at %i ms",
+    async (delay) => {
+      vi.useFakeTimers();
+      const onFault = vi.fn();
+      const rpc = session("cancel", onFault, { nativeCancelDelayMs: delay });
+      try {
+        await rpc.start();
+        const completed = vi.fn();
+        const turn = rpc.runTurn("cancel slowly", () => undefined);
+        void turn.then(completed);
+        await rpc.abort();
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(completed).not.toHaveBeenCalled();
+        expect(onFault).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(turn).resolves.toEqual({ text: "", cancelled: true });
+        await expect(rpc.runTurn("continue", () => undefined)).resolves.toMatchObject({
+          cancelled: false,
+        });
+        expect(onFault).not.toHaveBeenCalled();
+      } finally {
+        await rpc.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("bounds native cancellation at 30 seconds without treating acknowledgement as completion", async () => {
+    vi.useFakeTimers();
+    const onFault = vi.fn();
+    const rpc = session("cancel-no-settle", onFault);
+    try {
+      await rpc.start();
+      const turn = rpc.runTurn("never settles", () => undefined);
+      const rejected = expect(turn).rejects.toThrow("cancellation did not settle");
+      await rpc.abort();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(onFault).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(onFault).toHaveBeenCalledOnce();
+      await expect(rpc.runTurn("unavailable", () => undefined)).rejects.toThrow("unavailable");
+    } finally {
+      await rpc.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets close finish without waiting for the longer native cancellation window", async () => {
+    vi.useFakeTimers();
+    const onFault = vi.fn();
+    const rpc = session("cancel", onFault, { nativeCancelDelayMs: 25_000 });
+    try {
+      await rpc.start();
+      const turn = rpc.runTurn("close during cancel", () => undefined);
+      const rejected = expect(turn).rejects.toThrow("closed");
+      await rpc.abort();
+      await rpc.close();
+      await rejected;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onFault).not.toHaveBeenCalled();
+    } finally {
+      await rpc.close();
+      vi.useRealTimers();
+    }
   });
 
   it("fails and closes a cancellation that does not reach stable settlement", async () => {

@@ -512,7 +512,8 @@ export class PiRpcSession {
     }
     this.#options = {
       commandTimeoutMs: 30_000,
-      cancelTimeoutMs: 2_000,
+      // Abort acknowledgement is not settlement: native tools may still be unwinding.
+      cancelTimeoutMs: 30_000,
       closeTimeoutMs: 2_000,
       ...options,
     };

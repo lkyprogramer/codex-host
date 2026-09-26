@@ -26,6 +26,7 @@ class FakeOmpProcess extends EventEmitter {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   readonly commands: Record<string, unknown>[] = [];
+  promptFrames: Record<string, unknown>[] = [];
   #buffer = "";
   #sessionId = "omp-session";
 
@@ -60,6 +61,10 @@ class FakeOmpProcess extends EventEmitter {
 
   #output(value: Record<string, unknown>): void {
     this.stdout.write(`${JSON.stringify(value)}\n`);
+  }
+
+  emitFrame(value: Record<string, unknown>): void {
+    this.#output(value);
   }
 
   #response(command: Record<string, unknown>, data: Record<string, unknown> = {}): void {
@@ -157,6 +162,7 @@ class FakeOmpProcess extends EventEmitter {
     if (command.type === "prompt") {
       this.#response(command);
       queueMicrotask(() => {
+        for (const frame of this.promptFrames) this.#output(frame);
         if (this.terminalMessageMode === "approval") {
           this.#output({
             type: "extension_ui_request",
@@ -308,6 +314,69 @@ describe("OMP RPC session", () => {
       cancelled: false,
     });
     expect(events).toContainEqual({ type: "text.delta", messageId: "assistant-1", delta: "PONG" });
+    await session.close();
+  });
+
+  it("ignores late and duplicate untracked Tool updates while a later Turn remains valid", async () => {
+    const process = new FakeOmpProcess();
+    const onFault = vi.fn();
+    const session = new OmpRpcSession(
+      { cwd: "/synthetic", commandTimeoutMs: 2_000, onFault },
+      { spawn: () => owned(process) },
+    );
+    await session.start();
+    await session.runTurn("first", () => undefined);
+
+    process.emitFrame({ type: "tool_execution_update", toolCallId: "old-tool" });
+    process.emitFrame({ type: "tool_execution_end", toolCallId: "old-tool" });
+    process.promptFrames = [
+      { type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", args: {} },
+      { type: "tool_execution_update", toolCallId: "old-tool" },
+      { type: "tool_execution_end", toolCallId: "old-tool" },
+      { type: "tool_execution_update", toolCallId: "new-tool", partialResult: "reading" },
+      { type: "tool_execution_end", toolCallId: "new-tool", toolName: "read", result: "done" },
+      { type: "tool_execution_end", toolCallId: "new-tool", toolName: "read", result: "done" },
+    ];
+    const events: OmpTurnEvent[] = [];
+    await expect(session.runTurn("second", (event) => events.push(event))).resolves.toMatchObject({
+      text: "PONG",
+      cancelled: false,
+    });
+    expect(events.filter((event) => event.type.startsWith("tool."))).toEqual([
+      { type: "tool.started", callId: "new-tool", toolName: "read", arguments: {} },
+      { type: "tool.updated", callId: "new-tool", output: "reading" },
+      {
+        type: "tool.completed",
+        callId: "new-tool",
+        toolName: "read",
+        result: "done",
+        isError: false,
+      },
+    ]);
+    expect(onFault).not.toHaveBeenCalled();
+    await session.close();
+  });
+
+  it.each([
+    [{ type: "tool_execution_update", toolCallId: "active-tool" }, "invalid Tool update"],
+    [
+      { type: "tool_execution_end", toolCallId: "active-tool", toolName: "wrong", result: "done" },
+      "invalid Tool end",
+    ],
+  ])("faults on malformed events for a tracked Tool", async (frame, expected) => {
+    const process = new FakeOmpProcess();
+    process.promptFrames = [
+      { type: "tool_execution_start", toolCallId: "active-tool", toolName: "read", args: {} },
+      frame,
+    ];
+    const onFault = vi.fn();
+    const session = new OmpRpcSession(
+      { cwd: "/synthetic", commandTimeoutMs: 2_000, onFault },
+      { spawn: () => owned(process) },
+    );
+    await session.start();
+    await expect(session.runTurn("bad tool", () => undefined)).rejects.toThrow(expected);
+    expect(onFault).toHaveBeenCalledWith(expect.objectContaining({ kind: "protocolError" }));
     await session.close();
   });
 
