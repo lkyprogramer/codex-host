@@ -45,6 +45,7 @@ import {
   isNativeContextUsageControlCandidate,
   nativeContextUsageControlForComposer,
   reconcileComposerNativeControls,
+  refreshSendButton,
   trailingActionAnchor,
   type ComposerAgentControl,
 } from "../src/renderer-composer-dom.js";
@@ -871,7 +872,7 @@ describe("Renderer Composer DOM behavior", () => {
     const modelRoot = { parentElement: toolbar, nextElementSibling: send };
     const agentRoot = { parentElement: toolbar, nextElementSibling: send };
     const control = {
-      composer: { querySelectorAll: () => [] },
+      composer: { querySelectorAll: () => [], contains: () => true },
       sendButton: send,
       root: agentRoot,
       picker: { root: agentRoot },
@@ -894,6 +895,78 @@ describe("Renderer Composer DOM behavior", () => {
 
     expect(insertBefore).toHaveBeenCalledWith(modelRoot, voice);
     expect(insertBefore).toHaveBeenCalledWith(agentRoot, voice);
+  });
+
+  it("follows a replacement send button without replacing the mounted control", () => {
+    const oldSend = {
+      type: "submit",
+      isConnected: false,
+      disabled: true,
+      parentElement: null,
+      getAttribute: () => null,
+      hasAttribute: () => false,
+      contains: () => false,
+    } as unknown as HTMLButtonElement;
+    const liveSend = {
+      type: "submit",
+      isConnected: true,
+      disabled: false,
+      parentElement: null,
+      getAttribute: () => null,
+      hasAttribute: () => false,
+      contains: () => false,
+    } as unknown as HTMLButtonElement;
+    const insertBefore = vi.fn();
+    const toolbar = { children: [liveSend], insertBefore };
+    Object.assign(liveSend, { parentElement: toolbar });
+    const modelRoot = { parentElement: null, nextElementSibling: null };
+    const agentRoot = { parentElement: null, nextElementSibling: null };
+    const composer = {
+      contains: (element: unknown) => element === liveSend || element === toolbar,
+      querySelectorAll: (selector: string) => (selector === "button" ? [liveSend] : []),
+    };
+    const control = {
+      composer,
+      sendButton: oldSend,
+      sendDisabledBeforeSwitch: false,
+      root: agentRoot,
+      picker: { root: agentRoot },
+      modelPicker: { root: modelRoot },
+      nativeModelControl: null,
+      nativePermissionModeControl: null,
+      credits: { anchor: null, place: vi.fn(), root: { remove: vi.fn() } },
+      usage: null,
+    } as unknown as ComposerAgentControl;
+
+    reconcileComposerNativeControls(control, true, false);
+
+    expect(control.sendButton).toBe(liveSend);
+    expect(liveSend.disabled).toBe(true);
+    expect(insertBefore).toHaveBeenCalledWith(modelRoot, liveSend);
+    expect(insertBefore).toHaveBeenCalledWith(agentRoot, liveSend);
+    expect(refreshSendButton(control)).toBe(liveSend);
+    expect(insertBefore).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not treat Stop as a replacement for a recognised Send", () => {
+    const oldSend = {
+      type: "submit",
+      isConnected: false,
+      getAttribute: () => null,
+    } as unknown as HTMLButtonElement;
+    const stop = {
+      type: "button",
+      isConnected: true,
+      getAttribute: (name: string) => (name === "aria-label" ? "Stop" : null),
+    } as unknown as HTMLButtonElement;
+    const control = {
+      composer: { contains: () => false, querySelectorAll: () => [stop] },
+      sendButton: oldSend,
+      sendDisabledBeforeSwitch: null,
+    } as unknown as ComposerAgentControl;
+
+    expect(refreshSendButton(control)).toBeNull();
+    expect(control.sendButton).toBe(oldSend);
   });
 
   it("re-places model and agent pickers before the pause button", () => {
@@ -919,7 +992,7 @@ describe("Renderer Composer DOM behavior", () => {
     const modelRoot = { parentElement: toolbar, nextElementSibling: send };
     const agentRoot = { parentElement: toolbar, nextElementSibling: send };
     const control = {
-      composer: { querySelectorAll: () => [] },
+      composer: { querySelectorAll: () => [], contains: () => true },
       sendButton: send,
       root: agentRoot,
       picker: { root: agentRoot },
@@ -1271,6 +1344,12 @@ describe("Renderer Composer DOM behavior", () => {
     const otherConversationTarget = ["conversation", "opaque-2"];
 
     expect(shouldTransferComposerState(defaultTarget, defaultTarget, "draft")).toBe(true);
+    expect(
+      shouldTransferComposerState(["default", "draft-1"], ["default", "draft-1"], "draft"),
+    ).toBe(true);
+    expect(
+      shouldTransferComposerState(["default", "draft-1"], ["default", "draft-2"], "draft"),
+    ).toBe(false);
     expect(shouldTransferComposerState(defaultTarget, firstConversationTarget, "draft")).toBe(
       false,
     );

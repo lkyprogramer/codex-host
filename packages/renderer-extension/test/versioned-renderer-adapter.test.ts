@@ -384,6 +384,24 @@ describe("current Codex Renderer Agent adapter", () => {
     expect(findComposerModelTarget(missing)).toBeNull();
   });
 
+  it("does not recover a draft from an uncommitted React ancestor", () => {
+    const values = Array.from({ length: 13 }, () => ({}));
+    values[2] = "client-new-thread:stale";
+    values[7] = "client-new-thread:stale";
+    const composer = composerWithFiber({
+      updateQueue: { memoCache: { data: [values] } },
+      return: null,
+    });
+    vi.stubGlobal("window", {
+      __codexhostHostRoutingV1: { committedAncestors: () => [] },
+    });
+    try {
+      expect(findComposerModelTarget(composer)).toBeNull();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("uses the current Composer conversation identity", () => {
     const composer = composerWithFiber({
       memoizedProps: { conversationId: "thread-1" },
@@ -530,6 +548,72 @@ describe("current Codex Renderer Agent adapter", () => {
         if (descriptor) Object.defineProperty(globalThis, name, descriptor);
         else Reflect.deleteProperty(globalThis, name);
       }
+    }
+  });
+
+  it("serves a Host client without a Composer and selects only the addressed Composer policy", async () => {
+    const localPolicy = {
+      state: "ready" as const,
+      hostId: "local",
+      select: vi.fn(() => true),
+      clear: vi.fn(),
+    };
+    const remotePolicy = {
+      state: "ready" as const,
+      hostId: "remote",
+      select: vi.fn(() => true),
+      clear: vi.fn(),
+    };
+    const local = {
+      hostId: "local",
+      manager: { sendRequest: vi.fn(async () => ({ plugins: [] })) },
+      policy: localPolicy,
+    };
+    const remote = {
+      hostId: "remote",
+      manager: { sendRequest: vi.fn(async () => ({ plugins: [] })) },
+      policy: remotePolicy,
+    };
+    const remoteComposer = {} as Element;
+    const routing = {
+      forHost: (hostId: string) =>
+        hostId === "local" ? local : hostId === "remote" ? remote : null,
+      forComposer: (composer?: Element) => (composer === remoteComposer ? remote : null),
+      hostIdForComposer: () => null,
+    };
+    const fakeWindow = {
+      __codexhostHostRoutingV1: routing,
+      dispatchEvent: vi.fn(),
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      setInterval: vi.fn(() => 1),
+      clearInterval: vi.fn(),
+    };
+    const fakeDocument = {
+      addEventListener: vi.fn(),
+      removeEventListener: vi.fn(),
+      querySelectorAll: vi.fn(() => []),
+      documentElement: {},
+    };
+    vi.stubGlobal("window", fakeWindow);
+    vi.stubGlobal("document", fakeDocument);
+    vi.stubGlobal(
+      "CustomEvent",
+      class CustomEvent {
+        constructor(readonly type: string) {}
+      },
+    );
+    try {
+      const adapter = installCurrentRendererAdapter();
+      await expect(
+        adapter.modelControl?.clientForHost?.("local")?.listHarnessPlugins?.(),
+      ).resolves.toEqual({ plugins: [] });
+      expect(adapter.applyAgent("pi", undefined, undefined, undefined, remoteComposer)).toBe(true);
+      expect(remotePolicy.select).toHaveBeenCalledOnce();
+      expect(localPolicy.select).not.toHaveBeenCalled();
+      adapter.dispose();
+    } finally {
+      vi.unstubAllGlobals();
     }
   });
 

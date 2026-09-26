@@ -39,7 +39,11 @@ vi.mock("../src/renderer-composer-dom.js", async (importOriginal) => {
         composer: testState.composer,
         composerId: "composer-1",
         root: { isConnected: true, remove: vi.fn() },
-        picker: { root: { isConnected: true } },
+        picker: {
+          root: { isConnected: true },
+          agents: [...args[3]],
+          presentations: new Map(),
+        },
         modelPicker: { root: { isConnected: true }, trigger: {} },
         permissionModePicker: { root: { isConnected: true } },
         nativeModelControl: null,
@@ -58,6 +62,12 @@ vi.mock("../src/renderer-composer-dom.js", async (importOriginal) => {
         sendButton: testState.sendButton,
         sendDisabledBeforeSwitch: null,
       };
+    },
+    replaceComposerAgentPicker: (
+      control: RendererComposerDom.ComposerAgentControl,
+      agents: Parameters<typeof RendererComposerDom.replaceComposerAgentPicker>[1],
+    ) => {
+      control.picker.agents = [...agents];
     },
     renderComposerAgentControl: (
       _control: unknown,
