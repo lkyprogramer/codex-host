@@ -2734,7 +2734,21 @@ fn host_anchor_path_through(shim: &std::path::Path, environment: &[(&str, &str)]
     for (name, value) in environment {
         command.env(name, value);
     }
-    let mut shim = command.spawn().expect("spawn fake Host Runtime Shim");
+    // The Shim was just copied: on Linux a thread of this test process that
+    // forks meanwhile holds the copy's write descriptor until its exec, and
+    // executing the file then fails with ETXTBSY. That passes; retry it.
+    let mut attempts = 0;
+    let mut shim = loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 =>
+            {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => break result.expect("spawn fake Host Runtime Shim"),
+        }
+    };
     let stdin = shim.stdin.take().expect("Host Runtime stdin");
     let identity = wait_for_file(&ready, Duration::from_secs(5));
     drop(stdin);

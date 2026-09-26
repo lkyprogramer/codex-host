@@ -244,11 +244,16 @@ fn wait_for_child(
         if self_release_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
             child.force_terminate()?;
             self_release_deadline = None;
-        } else if self_release_deadline.is_some() && refresh_process_tree {
-            // Anchors are still finishing; anything else forked since the
-            // forced round (outside their groups) is killed as it appears,
-            // not only when their budget runs out.
-            child.force_terminate_sparing_self_releasing()?;
+        } else if self_release_deadline.is_some()
+            && refresh_process_tree
+            // Anchors are still finishing; every other owned process forked
+            // since the forced round (a kept escapee included) is killed as
+            // it appears, not only when their budget runs out. A failed
+            // round is retried on the next observation rather than ending
+            // the wait, which would also skip the reclaim after it.
+            && let Err(error) = child.force_terminate_sparing_self_releasing()
+        {
+            eprintln!("codexhost shim: forced round while anchors finish failed: {error}");
         }
         thread::sleep(POLL_INTERVAL);
     }
