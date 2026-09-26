@@ -54,7 +54,22 @@ vi.mock("node:child_process", async (original) => ({
           chunk("native", "own replay");
           result = {};
         }
+        if (request.method === "session/set_mode") {
+          // Arrives while the new Session is configured, before it is open.
+          chunk("other", "foreign during create");
+          chunk("native", "own during create");
+        }
         if (request.method === "session/prompt") {
+          send({
+            jsonrpc: "2.0",
+            id: "permission-other",
+            method: "session/request_permission",
+            params: {
+              sessionId: "other",
+              toolCall: { toolCallId: "tool-other", title: "Other Session tool" },
+              options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }],
+            },
+          });
           chunk("other", "foreign");
           chunk("native", "own");
           result = { stopReason: "end_turn" };
@@ -109,6 +124,23 @@ describe("Kiro ACP Session updates", () => {
       async () => ({ action: "dismissed" }),
     );
     expect(texts(events)).toEqual(["own"]);
+  });
+
+  it("keeps only its own updates while a new Session is configured", async () => {
+    const opened = await transport.open({ kind: "create", modeId: "plan" });
+    expect(texts(opened.replay)).not.toContain("foreign during create");
+  });
+
+  it("does not hand another Session's approval to this Turn", async () => {
+    await transport.open({ kind: "create" });
+    const onPermission = vi.fn(async () => ({ outcome: { outcome: "cancelled" as const } }));
+    await transport.runTurn(
+      "hello",
+      () => undefined,
+      onPermission,
+      async () => ({ action: "dismissed" }),
+    );
+    expect(onPermission).not.toHaveBeenCalled();
   });
 
   it("replays only the Session being loaded", async () => {

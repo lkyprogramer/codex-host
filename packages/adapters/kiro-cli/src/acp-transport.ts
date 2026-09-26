@@ -374,6 +374,9 @@ export class KiroAcpTransport {
         );
         session = created;
         sessionId = created.sessionId;
+        // Configuring the new Session happens before it is open; its updates
+        // are this Session's, anything else's are not.
+        this.#loadingSessionId = sessionId;
         configOptions = (created as { configOptions?: unknown[] }).configOptions;
 
         if (input.modeId) {
@@ -407,6 +410,7 @@ export class KiroAcpTransport {
           checkpointMessageId: input.checkpointMessageId,
         });
         sessionId = forked.sessionId;
+        this.#loadingSessionId = sessionId;
 
         session = await withTimeout(
           connection.loadSession({
@@ -904,7 +908,8 @@ export class KiroAcpTransport {
   }
 
   async #handlePermission(request: RequestPermissionRequest): Promise<RequestPermissionResponse> {
-    if (this.#activePrompt) {
+    // Another Session's approval is not this Turn's to answer.
+    if (this.#activePrompt && request.sessionId === this.#sessionId) {
       return this.#activePrompt.onPermission(request);
     }
     return { outcome: { outcome: "cancelled" } };
@@ -915,7 +920,7 @@ export class KiroAcpTransport {
     params: Record<string, unknown>,
   ): Promise<Record<string, unknown>> {
     if (method === "_kiro/userInput") {
-      if (this.#activePrompt) {
+      if (this.#activePrompt && params.sessionId === this.#sessionId) {
         const result = await this.#activePrompt.onQuestion(
           params as unknown as KiroUserInputParams,
         );
