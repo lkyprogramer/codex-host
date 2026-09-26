@@ -12,7 +12,7 @@ use std::process::{Command, Stdio};
 
 use codexhost_platform::configure_background_command;
 #[cfg(target_os = "macos")]
-use codexhost_platform::exchange_paths;
+use codexhost_platform::{PlatformError, exchange_paths};
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use serde::Deserialize;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -140,18 +140,34 @@ fn install_windows(
 }
 
 /// Names an update gives the copies it keeps beside the application: the
-/// staged new version, which becomes the previous version once exchanged in,
-/// and the backup earlier updaters renamed the previous version to.
+/// staged new version, which becomes the previous version once exchanged in;
+/// the previous version renamed aside where the volume cannot exchange (and
+/// by earlier updaters); and a rejected new version put aside by a restore.
 #[cfg(target_os = "macos")]
-const MACOS_LEFTOVER_PREFIXES: [&str; 2] = [".codexhost-update-", ".codexhost-backup-"];
+const MACOS_LEFTOVER_PREFIXES: [&str; 3] = [
+    ".codexhost-update-",
+    ".codexhost-backup-",
+    ".codexhost-rejected-",
+];
 
 /// Removes what earlier updates left beside an intact application: a previous
 /// version kept because its update never proved healthy, or a partial copy
-/// from an interrupted staging.
+/// from an interrupted staging. Best effort: a copy that cannot be removed
+/// (another owner, an immutable flag) is reported, never a reason to refuse
+/// this update and every later one.
 #[cfg(target_os = "macos")]
-fn remove_macos_leftovers(parent: &Path) -> Result<(), Box<dyn Error>> {
-    for entry in fs::read_dir(parent)? {
-        let entry = entry?;
+fn remove_macos_leftovers(parent: &Path) {
+    let entries = match fs::read_dir(parent) {
+        Ok(entries) => entries,
+        Err(error) => {
+            eprintln!(
+                "codexhost updater: could not list {}: {error}",
+                parent.display()
+            );
+            return;
+        }
+    };
+    for entry in entries.flatten() {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         let ours = name.ends_with(".app")
@@ -159,11 +175,45 @@ fn remove_macos_leftovers(parent: &Path) -> Result<(), Box<dyn Error>> {
                 .iter()
                 .any(|prefix| name.starts_with(prefix));
         // Never follow a link out of the application's directory.
-        if ours && entry.file_type()?.is_dir() {
-            fs::remove_dir_all(entry.path())?;
+        if ours
+            && entry.file_type().is_ok_and(|kind| kind.is_dir())
+            && let Err(error) = fs::remove_dir_all(entry.path())
+        {
+            eprintln!(
+                "codexhost updater: could not remove the earlier update copy {}: {error}",
+                entry.path().display()
+            );
         }
     }
-    Ok(())
+}
+
+/// Puts `incoming` at `application` and returns where the displaced version
+/// now is. One atomic exchange where the volume supports it; otherwise
+/// (exFAT, SMB) two renames through `aside`, as earlier updaters did, and
+/// only between them does the application path lack a version.
+#[cfg(target_os = "macos")]
+fn replace_macos_application(
+    incoming: &Path,
+    application: &Path,
+    aside: &Path,
+) -> Result<PathBuf, Box<dyn Error>> {
+    match exchange_paths(incoming, application) {
+        Ok(()) => return Ok(incoming.to_path_buf()),
+        Err(PlatformError::Unsupported(_)) => {}
+        Err(error) => return Err(error.into()),
+    }
+    fs::rename(application, aside)?;
+    if let Err(error) = fs::rename(incoming, application) {
+        return Err(match fs::rename(aside, application) {
+            Ok(()) => error.into(),
+            Err(restore) => format!(
+                "{error}; the application could not be put back ({restore}) and is at {}",
+                aside.display()
+            )
+            .into(),
+        });
+    }
+    Ok(aside.to_path_buf())
 }
 
 #[cfg(target_os = "macos")]
@@ -179,12 +229,13 @@ fn install_macos(
     if !macos.app_path.is_dir() {
         return Err("macOS application to update is missing".into());
     }
-    remove_macos_leftovers(parent)?;
+    remove_macos_leftovers(parent);
     let unique = format!("{}-{}", std::process::id(), unix_seconds());
     let mount = env::temp_dir().join(format!("codexhost-update-mount-{unique}"));
     let staged = parent.join(format!(".codexhost-update-{unique}.app"));
+    let aside = parent.join(format!(".codexhost-backup-{unique}.app"));
     fs::create_dir_all(&mount)?;
-    if staged.exists() {
+    if staged.exists() || aside.exists() {
         return Err("macOS update staging path already exists".into());
     }
     let attach_result = run_checked(
@@ -235,12 +286,14 @@ fn install_macos(
     }
     detach_result?;
 
-    // One atomic exchange: the application path never lacks a complete
-    // version, and afterwards `staged` holds the previous one.
-    if let Err(error) = exchange_paths(&staged, &macos.app_path) {
-        let _ = fs::remove_dir_all(&staged);
-        return Err(format!("could not activate updated macOS application: {error}").into());
-    }
+    let previous = match replace_macos_application(&staged, &macos.app_path, &aside) {
+        Ok(previous) => previous,
+        Err(error) => {
+            // A failed replacement leaves the new copy where it was staged.
+            let _ = fs::remove_dir_all(&staged);
+            return Err(format!("could not activate updated macOS application: {error}").into());
+        }
+    };
     if let Err(error) = verify_distribution(
         &macos
             .app_path
@@ -251,13 +304,32 @@ fn install_macos(
         &request.version,
         "installer",
     ) {
-        // Only a restored previous version makes the rejected copy disposable.
-        if exchange_paths(&staged, &macos.app_path).is_ok() {
-            let _ = fs::remove_dir_all(&staged);
-        }
-        return Err(error);
+        let rejected = parent.join(format!(".codexhost-rejected-{unique}.app"));
+        return Err(
+            match replace_macos_application(&previous, &macos.app_path, &rejected) {
+                Ok(rejected) => {
+                    let _ = fs::remove_dir_all(rejected);
+                    error
+                }
+                Err(restore) => {
+                    // The previous version is the only good copy; move it off a
+                    // name the next update clears.
+                    let kept = parent.join(format!("codexhost-previous-{unique}.app"));
+                    let location = if fs::rename(&previous, &kept).is_ok() {
+                        kept
+                    } else {
+                        previous
+                    };
+                    format!(
+                    "{error}; the previous version could not be restored ({restore}) and is at {}",
+                    location.display()
+                )
+                .into()
+                }
+            },
+        );
     }
-    Ok(staged)
+    Ok(previous)
 }
 
 #[cfg(not(target_os = "macos"))]
@@ -335,9 +407,10 @@ mod tests {
         ] {
             fs::create_dir_all(directory).unwrap();
         }
+        fs::create_dir_all(parent.join(".codexhost-rejected-7-8.app")).unwrap();
         std::os::unix::fs::symlink(&outside, parent.join(".codexhost-backup-5-6.app")).unwrap();
 
-        super::remove_macos_leftovers(&parent).unwrap();
+        super::remove_macos_leftovers(&parent);
 
         let mut names = fs::read_dir(&parent)
             .unwrap()
@@ -350,5 +423,73 @@ mod tests {
         );
         assert!(outside.is_dir());
         fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    fn assert_replaces_application(parent: &std::path::Path) {
+        use std::fs;
+
+        let _ = fs::remove_dir_all(parent);
+        let (application, incoming, aside) = (
+            parent.join("codexhost.app"),
+            parent.join(".codexhost-update-1-2.app"),
+            parent.join(".codexhost-backup-1-2.app"),
+        );
+        fs::create_dir_all(&application).unwrap();
+        fs::create_dir_all(&incoming).unwrap();
+        fs::write(application.join("version"), "old").unwrap();
+        fs::write(incoming.join("version"), "new").unwrap();
+
+        let previous = super::replace_macos_application(&incoming, &application, &aside).unwrap();
+
+        assert_eq!(
+            fs::read_to_string(application.join("version")).unwrap(),
+            "new"
+        );
+        assert_eq!(fs::read_to_string(previous.join("version")).unwrap(), "old");
+        // And back, as a failed verification restores it.
+        let rejected = parent.join(".codexhost-rejected-1-2.app");
+        let displaced =
+            super::replace_macos_application(&previous, &application, &rejected).unwrap();
+        assert_eq!(
+            fs::read_to_string(application.join("version")).unwrap(),
+            "old"
+        );
+        assert_eq!(
+            fs::read_to_string(displaced.join("version")).unwrap(),
+            "new"
+        );
+        fs::remove_dir_all(parent).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn replaces_the_application_by_exchange() {
+        assert_replaces_application(
+            &std::env::temp_dir().join(format!("codexhost-updater-replace-{}", std::process::id())),
+        );
+    }
+
+    /// Needs a volume without exchange support: set
+    /// CODEXHOST_TEST_NO_EXCHANGE_DIR to a directory on, e.g., a mounted exFAT
+    /// disk image.
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "needs a volume without RENAME_SWAP"]
+    fn replaces_the_application_by_renames_where_exchange_is_unsupported() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("CODEXHOST_TEST_NO_EXCHANGE_DIR")
+                .expect("CODEXHOST_TEST_NO_EXCHANGE_DIR"),
+        );
+        let probe = (root.join("probe-a"), root.join("probe-b"));
+        std::fs::create_dir_all(&probe.0).unwrap();
+        std::fs::create_dir_all(&probe.1).unwrap();
+        assert!(matches!(
+            codexhost_platform::exchange_paths(&probe.0, &probe.1),
+            Err(codexhost_platform::PlatformError::Unsupported(_))
+        ));
+        std::fs::remove_dir_all(&probe.0).unwrap();
+        std::fs::remove_dir_all(&probe.1).unwrap();
+        assert_replaces_application(&root.join("replace"));
     }
 }

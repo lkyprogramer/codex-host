@@ -240,10 +240,17 @@ pub fn atomic_replace_file(source: &Path, target: &Path) -> Result<(), PlatformE
     Ok(())
 }
 
-/// Atomically exchanges two existing entries on one volume.
+/// Atomically exchanges two existing entries on one volume. A volume without
+/// exchange support (exFAT, SMB) reports [`PlatformError::Unsupported`].
 #[cfg(target_os = "macos")]
 pub fn exchange_paths(left: &Path, right: &Path) -> Result<(), PlatformError> {
-    macos_exchange::exchange_paths(left, right).map_err(PlatformError::Io)
+    macos_exchange::exchange_paths(left, right).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ENOTSUP) {
+            PlatformError::Unsupported("this volume cannot exchange entries atomically")
+        } else {
+            PlatformError::Io(error)
+        }
+    })
 }
 
 pub fn canonical_existing_file(path: &Path) -> Result<PathBuf, PlatformError> {

@@ -286,6 +286,26 @@ fn transfer_lock_to_updater(pending: &PendingUpdate, updater_pid: u32) -> io::Re
     result
 }
 
+/// Where the Updater's diagnostics go: beside its status, in the operation
+/// directory the update manager retains and later removes. Without one the
+/// Updater still runs, silently.
+#[cfg(target_os = "macos")]
+fn updater_log(status_path: &Path) -> Stdio {
+    use std::os::unix::fs::OpenOptionsExt;
+
+    status_path
+        .parent()
+        .and_then(|directory| {
+            OpenOptions::new()
+                .create(true)
+                .append(true)
+                .mode(0o600)
+                .open(directory.join("updater.log"))
+                .ok()
+        })
+        .map_or_else(Stdio::null, Stdio::from)
+}
+
 #[cfg(target_os = "macos")]
 pub(crate) fn start_pending_update(started_request: &mut Option<PathBuf>) -> io::Result<()> {
     if started_request.is_some() {
@@ -306,7 +326,7 @@ pub(crate) fn start_pending_update(started_request: &mut Option<PathBuf>) -> io:
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(updater_log(&pending.status_path))
         .spawn()?;
     if let Err(error) = transfer_lock_to_updater(&pending, child.id()) {
         let _ = child.kill();
@@ -407,6 +427,35 @@ mod tests {
                 .canonicalize()
                 .expect("canonical request fixture"),
         }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn updater_diagnostics_go_to_an_owner_only_log_beside_the_status() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = std::env::temp_dir().join(format!(
+            "codexhost-updater-log-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        fs::create_dir_all(&directory).unwrap();
+        let mut child = std::process::Command::new("/bin/sh")
+            .args(["-c", "echo diagnostic >&2"])
+            .stderr(super::updater_log(&directory.join(super::STATUS_FILE)))
+            .spawn()
+            .unwrap();
+        assert!(child.wait().unwrap().success());
+        let log = directory.join("updater.log");
+        assert_eq!(fs::read_to_string(&log).unwrap(), "diagnostic\n");
+        assert_eq!(
+            fs::metadata(&log).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(target_os = "macos")]
