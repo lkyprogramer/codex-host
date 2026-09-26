@@ -125,7 +125,15 @@ function headerInsertionPoint(header: HTMLElement): RendererSettingsHeaderInsert
   const titlebar = header.querySelector<HTMLElement>(SETTINGS_MAIN_TITLEBAR_SELECTOR);
   const content = titlebar?.querySelector<HTMLElement>(SETTINGS_MAIN_TITLEBAR_CONTENT_SELECTOR);
   if (titlebar && content && isVisible(titlebar)) {
-    return { parent: titlebar, before: content.nextSibling };
+    // Once mounted the trigger is itself the content's next sibling; aiming
+    // before it would move it on every refresh, and each move triggers the
+    // next refresh.
+    const next = content.nextSibling;
+    const mounted =
+      next !== null &&
+      "hasAttribute" in next &&
+      (next as Element).hasAttribute(SETTINGS_TRIGGER_ATTRIBUTE);
+    return { parent: titlebar, before: mounted ? next.nextSibling : next };
   }
 
   const endSlot = [...header.querySelectorAll<HTMLElement>(SETTINGS_HEADER_SLOT_SELECTOR)]

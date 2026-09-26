@@ -178,6 +178,9 @@ describe("Renderer settings header trigger", () => {
         else this.children.splice(index, 0, child);
         return child;
       }
+      hasAttribute(name: string): boolean {
+        return this.attributes.has(name);
+      }
       querySelector(selector: string): FakeElement | null {
         const attribute = /^:scope > \[([a-z-]+)="true"\]$/u.exec(selector)?.[1];
         return (
@@ -259,6 +262,14 @@ describe("Renderer settings header trigger", () => {
       expect(control.refresh()).toBe(true);
       expect(overlayHeader.children).toEqual([overlayStartSlot, titlebar, overlayEndSlot]);
       expect(titlebar.children).toEqual([separator, titleContent, control.root, reserved]);
+      // A settled trigger stays put: every move is a DOM mutation that
+      // schedules another refresh.
+      const insertBefore = vi.spyOn(titlebar, "insertBefore");
+      expect(control.refresh()).toBe(true);
+      expect(control.refresh()).toBe(true);
+      expect(insertBefore).not.toHaveBeenCalled();
+      expect(titlebar.children).toEqual([separator, titleContent, control.root, reserved]);
+      insertBefore.mockRestore();
       currentHeader = header;
       expect(control.refresh()).toBe(true);
       expect(titlebar.children).toEqual([separator, titleContent, reserved]);
