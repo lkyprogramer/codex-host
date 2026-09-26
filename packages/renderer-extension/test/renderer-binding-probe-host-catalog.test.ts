@@ -9,6 +9,7 @@ import {
 } from "../src/renderer-model-picker.js";
 import type { RendererConnectionDiagnostics } from "../src/settings/connections-page.js";
 import type { RendererSessionImportClient } from "../src/settings/session-import-page.js";
+import type { RendererResourcesClient } from "../src/settings/resources-page.js";
 import type * as VersionedRendererAdapter from "../src/versioned-renderer-adapter.js";
 
 const testState = vi.hoisted(() => ({
@@ -19,6 +20,7 @@ const testState = vi.hoisted(() => ({
   selectModel: null as null | ((modelId: string) => void),
   getConnectionDiagnostics: null as null | (() => RendererConnectionDiagnostics | null),
   getSessionImportClient: null as null | (() => RendererSessionImportClient | null),
+  getResourcesClient: null as null | (() => RendererResourcesClient | null),
   documentListeners: new Map<string, EventListener>(),
   modelTarget: ["conversation", "thread-a"] as readonly unknown[],
 }));
@@ -104,10 +106,12 @@ vi.mock("../src/renderer-settings-lifecycle.js", () => ({
     options: {
       getConnectionDiagnostics(): RendererConnectionDiagnostics | null;
       getSessionImportClient(): RendererSessionImportClient | null;
+      getResourcesClient(): RendererResourcesClient | null;
     },
   ) => {
     testState.getConnectionDiagnostics = options.getConnectionDiagnostics;
     testState.getSessionImportClient = options.getSessionImportClient;
+    testState.getResourcesClient = options.getResourcesClient;
     return {
       locale: "en",
       refresh: vi.fn(),
@@ -175,6 +179,7 @@ function installFakeBrowser(): void {
   testState.selectModel = null;
   testState.getConnectionDiagnostics = null;
   testState.getSessionImportClient = null;
+  testState.getResourcesClient = null;
   testState.documentListeners.clear();
   testState.modelTarget = ["conversation", "thread-a"];
   const window_ = {
@@ -354,7 +359,7 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
     expect(applyAgent).not.toHaveBeenCalled();
   });
 
-  it("routes Session import to local while the current Composer Host is remote", async () => {
+  it("routes Session import and Resources to local while the current Composer Host is remote", async () => {
     installFakeBrowser();
     const local = {
       inspectHarness: vi.fn(async () => readyInspection()),
@@ -365,6 +370,7 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       })),
       listHarnessSessions: vi.fn(async () => ({ candidates: [] })),
       importHarnessSession: vi.fn(async () => ({ threadId: "local-thread" })),
+      listLoadedSessions: vi.fn(async () => ({ sessions: [] })),
     };
     const remote = {
       inspectHarness: vi.fn(async () => readyInspection()),
@@ -375,11 +381,13 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       })),
       listHarnessSessions: vi.fn(),
       importHarnessSession: vi.fn(),
+      listLoadedSessions: vi.fn(async () => ({ sessions: [] })),
     };
+    let localRoute = local;
     const modelControl = {
       ...remote,
       currentHostId: () => "remote-1",
-      clientForHost: vi.fn((hostId: string) => (hostId === "local" ? local : remote)),
+      clientForHost: vi.fn((hostId: string) => (hostId === "local" ? localRoute : remote)),
       inspectThread: vi.fn(),
       inspectThreadCommands: vi.fn(async () => ({ commands: [] })),
       inspectThreadUsage: vi.fn(),
@@ -405,6 +413,10 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       harnessId: harnessIdSchema.parse("pi"),
       nativeSessionId: "native-session",
     });
+    await testState.getResourcesClient?.()?.listLoadedSessions();
+    const replacement = { ...local, listLoadedSessions: vi.fn(async () => ({ sessions: [] })) };
+    localRoute = replacement;
+    await testState.getResourcesClient?.()?.listLoadedSessions();
 
     expect(modelControl.clientForHost).toHaveBeenCalledWith("local");
     expect(local.listSessionImportSources).toHaveBeenCalledOnce();
@@ -413,6 +425,9 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       harnessId: "pi",
       nativeSessionId: "native-session",
     });
+    expect(local.listLoadedSessions).toHaveBeenCalledOnce();
+    expect(replacement.listLoadedSessions).toHaveBeenCalledOnce();
+    expect(remote.listLoadedSessions).not.toHaveBeenCalled();
     expect(remote.listHarnessSessions).not.toHaveBeenCalled();
     expect(remote.importHarnessSession).not.toHaveBeenCalled();
   });

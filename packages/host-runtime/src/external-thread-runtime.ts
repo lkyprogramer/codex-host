@@ -29,6 +29,7 @@ import {
   permissionModeFixedAtCreate,
   hostThreadIdSchema,
   type HarnessId,
+  type LoadedSessionsResult,
   type HarnessPermissionModeId,
   type HarnessThinkingOptionId,
   type HostInteractionId,
@@ -236,6 +237,13 @@ export class ExternalThreadRuntime {
   readonly #threads = new Map<string, ExternalThread>();
   readonly #idleTimers = new Map<ExternalThread, IdleSuspendTimer>();
   readonly #idleUnknownReported = new Set<ExternalThread>();
+  readonly #resourceObservations = new WeakMap<
+    ExternalThread,
+    {
+      lastActivityAt: number;
+      lastRelease: LoadedSessionsResult["sessions"][number]["lastRelease"];
+    }
+  >();
   readonly #epoch: string;
   readonly #historyReadTimeoutMs: number;
   readonly #historyRestoreTimeoutMs: number;
@@ -281,6 +289,27 @@ export class ExternalThreadRuntime {
 
   values(): ExternalThread[] {
     return [...this.#threads.values()];
+  }
+
+  /** Projects existing in-memory Sessions without loading history or touching idle timers. */
+  loadedSessions(): LoadedSessionsResult {
+    return {
+      sessions: this.values().map((thread) => {
+        const observed = this.#resourceObservations.get(thread);
+        if (!observed) throw new Error("Registered Session has no resource observation");
+        return {
+          threadId: thread.id,
+          harnessId: thread.record.harnessId,
+          running: thread.running,
+          resourceState:
+            thread.session instanceof ManagedHarnessSession
+              ? thread.session.resourceState
+              : "unavailable",
+          lastActivityAt: observed.lastActivityAt,
+          lastRelease: observed.lastRelease ? { ...observed.lastRelease } : null,
+        };
+      }),
+    };
   }
 
   remove(threadId: string): void {
@@ -390,6 +419,10 @@ export class ExternalThreadRuntime {
       changes: new ThreadChangeHub(this.#epoch),
       attentionChanges: new ThreadChangeHub(`${this.#epoch}:attention`),
     };
+    this.#resourceObservations.set(externalThread, {
+      lastActivityAt: Date.now(),
+      lastRelease: null,
+    });
     externalThread.session = new ManagedHarnessSession({
       session: input.session,
       resume: (options) => this.#resumeSuspendedSession(externalThread, options),
@@ -451,6 +484,8 @@ export class ExternalThreadRuntime {
   }
 
   #touchIdleTimer(thread: ExternalThread): void {
+    const observed = this.#resourceObservations.get(thread);
+    if (observed) observed.lastActivityAt = Date.now();
     this.#clearIdleTimer(thread);
     this.#idleUnknownReported.delete(thread);
     this.#armIdleTimer(thread, 0);
@@ -499,6 +534,10 @@ export class ExternalThreadRuntime {
       this.#diagnose(error);
     } finally {
       if (this.#idleTimers.get(thread) === idle) this.#idleTimers.delete(thread);
+    }
+    const observed = this.#resourceObservations.get(thread);
+    if (observed) {
+      observed.lastRelease = { status: result?.status ?? "unknown", observedAt: Date.now() };
     }
     if (result?.status === "releaseFailed") {
       // Unlike an undecided attempt, a failed release can leave native

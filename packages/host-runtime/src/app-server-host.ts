@@ -1,3 +1,8 @@
+import {
+  LOADED_SESSIONS_METHOD,
+  loadedSessionsParamsSchema,
+  loadedSessionsResultSchema,
+} from "@codexhost/shared-contracts";
 import { DesktopRequestDispatcher } from "./desktop-request-dispatcher.js";
 import { AccountRateLimits } from "./codex-runtime/account-rate-limits.js";
 import { inspectHarnessAccounts } from "./harness-accounts.js";
@@ -953,6 +958,18 @@ export class AppServerHost {
     request: JsonRpcRequest,
     frame: Buffer<ArrayBufferLike>,
   ): Promise<void> {
+    if (request.method === LOADED_SESSIONS_METHOD) {
+      if (
+        !loadedSessionsParamsSchema.safeParse(request.params === undefined ? {} : request.params)
+          .success
+      ) {
+        await this.#writer.json(rpcError(request, -32602, "Resource list params must be empty"));
+        return;
+      }
+      const result = loadedSessionsResultSchema.parse(this.#externalRuntime.loadedSessions());
+      await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(result) }));
+      return;
+    }
     if (
       request.method === "codexhost/update/check" ||
       request.method === "codexhost/update/start" ||

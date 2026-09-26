@@ -29,6 +29,7 @@ import {
 import { createAppearanceSettingsPage } from "./appearance-page.js";
 import { createReleaseNotesElement } from "./release-notes.js";
 import { createAccountsSettingsPage, type RendererCodexAccountClient } from "./accounts-page.js";
+import { createResourcesSettingsPage, type RendererResourcesClient } from "./resources-page.js";
 
 export type {
   RendererConnectionAgentSnapshot,
@@ -64,6 +65,7 @@ function isWindowsRenderer(window: Window | null | undefined): boolean {
 export const DEFAULT_RENDERER_SETTINGS_PAGE_IDS = [
   "connections",
   "accounts",
+  "resources",
   "session-import",
   "appearance",
   "updates",
@@ -607,10 +609,12 @@ export function createDefaultRendererSettingsPages(
   getSessionImportClient: () => RendererSessionImportClient | null = () => null,
   openImportedThread: RendererImportedThreadOpener = () =>
     Promise.reject(new Error("Imported Thread navigation is unavailable")),
+  getResourcesClient: () => RendererResourcesClient | null = () => null,
 ): readonly RendererSettingsPageDefinition[] {
   return Object.freeze([
     createConnectionsSettingsPage(messages, getDiagnostics),
     createAccountsSettingsPage(messages, getAccountClient),
+    createResourcesSettingsPage(messages, getResourcesClient),
     createSessionImportSettingsPage(messages, getSessionImportClient, openImportedThread),
     createAppearanceSettingsPage(messages),
     updatesPage(messages, getUpdateClient),
@@ -625,6 +629,7 @@ export function createDefaultRendererSettingsRegistry(
   getAccountClient: () => RendererCodexAccountClient | null = () => null,
   getSessionImportClient: () => RendererSessionImportClient | null = () => null,
   openImportedThread?: RendererImportedThreadOpener,
+  getResourcesClient: () => RendererResourcesClient | null = () => null,
 ): RendererSettingsPageRegistry {
   return createRendererSettingsPageRegistry(
     createDefaultRendererSettingsPages(
@@ -634,6 +639,7 @@ export function createDefaultRendererSettingsRegistry(
       getAccountClient,
       getSessionImportClient,
       openImportedThread,
+      getResourcesClient,
     ),
   );
 }

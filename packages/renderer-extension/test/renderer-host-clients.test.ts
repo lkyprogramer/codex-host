@@ -5,7 +5,12 @@ import {
   type RendererHostRouting,
 } from "../src/renderer-host-clients.js";
 
-function route(hostId: string, sendRequest = vi.fn(async () => ({ plugins: [] }))) {
+function route(
+  hostId: string,
+  sendRequest: (method: string, params: unknown) => Promise<unknown> = vi.fn(async () => ({
+    plugins: [],
+  })),
+) {
   return {
     hostId,
     manager: { sendRequest },
@@ -14,6 +19,29 @@ function route(hostId: string, sendRequest = vi.fn(async () => ({ plugins: [] })
 }
 
 describe("Renderer Host clients", () => {
+  it("reads resource observations through the current local route only", async () => {
+    const sendOld = vi.fn(async () => ({ sessions: [] }));
+    const sendNew = vi.fn(async () => ({ sessions: [] }));
+    const oldRoute = route("local", sendOld);
+    const replacement = route("local", sendNew);
+    let current: RendererHostRoute | null = oldRoute;
+    const clients = createRendererHostClients(
+      () => ({ forHost: () => current }) as unknown as RendererHostRouting,
+    );
+    const stale = clients.forHost("local");
+    await expect(stale?.listLoadedSessions?.()).resolves.toEqual({ sessions: [] });
+    current = replacement;
+    await expect(stale?.listLoadedSessions?.()).rejects.toThrow("unavailable for Host local");
+    const live = clients.forHost("local");
+    await expect(live?.listLoadedSessions?.()).resolves.toEqual({ sessions: [] });
+    current = null;
+    expect(clients.forHost("local")).toBeNull();
+    await expect(live?.listLoadedSessions?.()).rejects.toThrow("unavailable for Host local");
+    expect(sendOld).toHaveBeenCalledExactlyOnceWith("codexhost/resources/list", {});
+    expect(sendNew).toHaveBeenCalledExactlyOnceWith("codexhost/resources/list", {});
+    clients.dispose();
+  });
+
   it("keeps distinct Host clients available without a Composer", async () => {
     const local = route("local");
     const remote = route("remote");

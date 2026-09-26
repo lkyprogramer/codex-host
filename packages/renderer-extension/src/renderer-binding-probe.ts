@@ -703,6 +703,10 @@ export function installRendererBindingProbe(
   const settingsLifecycle = installRendererSettingsLifecycle(window, {
     getUpdateClient: () => modelClientForHost("local"),
     getAccountClient: () => modelClientForHost("local"),
+    getResourcesClient: () => {
+      const list = modelClientForHost("local")?.listLoadedSessions;
+      return list ? { listLoadedSessions: () => list() } : null;
+    },
     getConnectionDiagnostics: () => connectionDiagnostics,
     getSessionImportClient: () => {
       const client = modelClientForHost("local");

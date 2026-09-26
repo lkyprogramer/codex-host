@@ -2613,6 +2613,59 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  it("lists cached resource observations without opening Sessions or forwarding native requests", async () => {
+    const fixture = createFixture();
+    const officialWrite = vi.fn();
+    fixture.official.stdin.on("data", officialWrite);
+    try {
+      writeRequest(fixture.desktopInput, {
+        id: 901,
+        method: "codexhost/resources/list",
+        params: {},
+      });
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 901)),
+      ).resolves.toMatchObject({ result: { sessions: [] } });
+      expect(fixture.adapter.sessions).toHaveLength(0);
+      expect(officialWrite).not.toHaveBeenCalled();
+      const threadId = await startPiThread(fixture);
+      const nativeWrites = officialWrite.mock.calls.length;
+      writeRequest(fixture.desktopInput, {
+        id: 902,
+        method: "codexhost/resources/list",
+        params: {},
+      });
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 902)),
+      ).resolves.toMatchObject({
+        result: {
+          sessions: [
+            {
+              threadId,
+              harnessId: "pi",
+              running: false,
+              resourceState: "loaded",
+              lastRelease: null,
+            },
+          ],
+        },
+      });
+      expect(fixture.adapter.sessions).toHaveLength(1);
+      expect(officialWrite).toHaveBeenCalledTimes(nativeWrites);
+      for (const [id, params] of [
+        [903, null],
+        [904, { release: true }],
+      ] as const) {
+        writeRequest(fixture.desktopInput, { id, method: "codexhost/resources/list", params });
+        await expect(
+          fixture.collector.waitFor((message) => requestId(message, id)),
+        ).resolves.toMatchObject({ error: { code: -32602 } });
+      }
+    } finally {
+      await stopFixture(fixture);
+    }
+  });
+
   it("handles Pi inspection locally without opening a Thread Session", async () => {
     const fixture = createFixture();
     const officialWrite = vi.fn();
@@ -4105,6 +4158,44 @@ describe("AppServerHost HarnessAdapter projection", () => {
     ]);
     expect(restartedAdapter.sessions).toHaveLength(0);
     await stopFixture(restarted);
+  });
+
+  it("forwards official section_position pages with native cursors and no External injection", async () => {
+    const fixture = createFixture();
+    await startPiThread(fixture);
+    const request = {
+      id: 948,
+      method: "thread/list",
+      params: {
+        limit: 100,
+        sortKey: "section_position",
+        sectionId: "section-a",
+        cursor: "native-page-2",
+        modelProviders: [],
+        useStateDbOnly: true,
+      },
+    };
+    const result = {
+      data: [{ id: "official-thread", sectionPosition: 2 }],
+      nextCursor: "native-page-3",
+    };
+    const forwarded = new Promise<JsonObject>((resolve) => {
+      fixture.official.stdin.once("data", (chunk: Buffer) => {
+        const value = JSON.parse(chunk.toString("utf8")) as JsonObject;
+        resolve(value);
+        fixture.official.stdout.write(`${JSON.stringify({ id: value.id, result })}\n`);
+      });
+    });
+    try {
+      writeRequest(fixture.desktopInput, request);
+      await expect(forwarded).resolves.toEqual(request);
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 948)),
+      ).resolves.toEqual({ id: 948, result });
+      expect(fixture.adapter.sessions).toHaveLength(1);
+    } finally {
+      await stopFixture(fixture);
+    }
   });
 
   it("forwards a future official Thread list filter unchanged without External injection", async () => {

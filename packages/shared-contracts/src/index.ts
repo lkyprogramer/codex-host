@@ -305,3 +305,14 @@ export const packageMetadata = {
   name: "@codexhost/shared-contracts",
   contractVersion: WORKSPACE_CONTRACT_VERSION,
 } as const;
+
+export {
+  LOADED_SESSIONS_METHOD,
+  loadedSessionsParamsSchema,
+  loadedSessionsResultSchema,
+  loadedSessionResourceStateSchema,
+  loadedSessionReleaseStatusSchema,
+  type LoadedSessionsResult,
+  type LoadedSessionResourceState,
+  type LoadedSessionReleaseStatus,
+} from "./loaded-sessions.js";
