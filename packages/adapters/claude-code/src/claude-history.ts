@@ -20,6 +20,12 @@ interface ClaudeHistoryMessage {
   message: Record<string, unknown>;
   syntheticUser: boolean;
   interrupted: boolean;
+  /**
+   * A background-task notification Claude injects to start an autonomous
+   * Turn. Live, that Turn is keyed by this record's uuid, so history starts
+   * the same Turn here.
+   */
+  autonomousStart: boolean;
 }
 
 const claudeCodeHarnessId: HarnessId = harnessIdSchema.parse("claude-code");
@@ -86,6 +92,18 @@ function isTaskNotificationOrigin(value: Record<string, unknown>): boolean {
   return isRecord(value.origin) && value.origin.kind === "task-notification";
 }
 
+function isAutonomousStart(value: Record<string, unknown>): boolean {
+  if (value.parent_tool_use_id !== null && value.parent_tool_use_id !== undefined) return false;
+  if (isTaskNotificationOrigin(value)) return true;
+  const parts = isRecord(value.message) ? textParts(value.message.content) : [];
+  return parts.length > 0 && parts.every(isTaskNotificationRecord);
+}
+
+/** Where a top-level Turn starts: a human prompt, or an autonomous one. */
+function startsTurn(message: ClaudeHistoryMessage): boolean {
+  return isHumanUser(message) || message.autonomousStart;
+}
+
 function visibleUserTextParts(message: ClaudeHistoryMessage): string[] {
   if (message.type !== "user" || message.syntheticUser) return [];
   const parts = textParts(message.message.content);
@@ -140,6 +158,7 @@ function conversationMessages(values: unknown[], sessionId: string): ClaudeHisto
       uuid: value.uuid,
       message: value.message,
       interrupted,
+      autonomousStart: value.type === "user" && isAutonomousStart(value),
       syntheticUser:
         value.type === "user" &&
         (interrupted ||
@@ -200,12 +219,12 @@ export function mapClaudeSnapshot(values: unknown[], sessionId: string): HostThr
   const turns: HostThreadSnapshot["turns"] = [];
   for (let index = 0; index < messages.length;) {
     const user = messages[index];
-    if (!user || !isHumanUser(user)) {
+    if (!user || !startsTurn(user)) {
       index += 1;
       continue;
     }
     let end = index + 1;
-    while (end < messages.length && !isHumanUser(messages[end] as ClaudeHistoryMessage)) end += 1;
+    while (end < messages.length && !startsTurn(messages[end] as ClaudeHistoryMessage)) end += 1;
     const turnMessages = messages.slice(index, end);
     const outcome = turnOutcome(turnMessages);
     const results = toolResultBlocks(turnMessages);

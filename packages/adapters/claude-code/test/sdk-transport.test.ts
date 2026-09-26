@@ -773,6 +773,22 @@ describe("ClaudeSdkTransport autonomous task continuation", () => {
     await value.transport.close();
   });
 
+  it("keys an autonomous Turn without a notification by its first transcript record", async () => {
+    const value = fixture();
+    const autonomous: ClaudeAutonomousTurn[] = [];
+    value.transport.setAutonomousTurnHandler((turn) => autonomous.push(turn));
+    await value.transport.start();
+
+    // A streamed partial is not a transcript record; the Assistant message is.
+    pushPartialText(value.fakeQuery, "Unprompted", "00000000-0000-4000-8000-000000000051");
+    pushAssistantText(value.fakeQuery, "Unprompted", "00000000-0000-4000-8000-000000000052");
+    completeTurn(value.fakeQuery);
+
+    await vi.waitFor(() => expect(autonomous).toHaveLength(1));
+    expect(autonomous[0]?.nativeTurnKey).toBe("00000000-0000-4000-8000-000000000052");
+    await value.transport.close();
+  });
+
   it("preserves a failed task-notification whose user content is text blocks", async () => {
     const value = fixture();
     const autonomous: ClaudeAutonomousTurn[] = [];

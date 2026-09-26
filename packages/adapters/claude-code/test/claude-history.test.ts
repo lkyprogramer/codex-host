@@ -391,7 +391,7 @@ describe("Claude history mapping", () => {
     ]);
   });
 
-  it("omits Claude background task-notification records without hiding later human Turns", () => {
+  it("starts an autonomous Turn at each background task notification, keyed by its record", () => {
     const notification = `<task-notification>
 <task-id>a7b2e1021a9dc42e0</task-id>
 <tool-use-id>call_oIKmvIhI8V7NLb7dB7DFwZkN</tool-use-id>
@@ -414,15 +414,25 @@ describe("Claude history mapping", () => {
       message("assistant", "assistant-4", "still visible", "end_turn"),
     ];
 
-    expect(mapClaudeSnapshot(history, sessionId).turns).toMatchObject([
+    // Live, each notification starts an autonomous Turn keyed by its record's
+    // uuid; history must yield the same Turns after a restart.
+    const turns = mapClaudeSnapshot(history, sessionId).turns;
+    expect(turns.map((turn) => turn.items.length)).toEqual([1, 1, 1, 1]);
+    expect(turns).toMatchObject([
       {
         nativeTurnRef: { nativeTurnKey: "user-1" },
         input: [{ type: "text", text: "start three agents" }],
-        items: [
-          { item: { type: "agentMessage", text: "agents started" } },
-          { item: { type: "agentMessage", text: "first agent finished" } },
-          { item: { type: "agentMessage", text: "all agents finished" } },
-        ],
+        items: [{ item: { type: "agentMessage", text: "agents started" } }],
+      },
+      {
+        nativeTurnRef: { nativeTurnKey: "notification-origin" },
+        input: [],
+        items: [{ item: { type: "agentMessage", text: "first agent finished" } }],
+      },
+      {
+        nativeTurnRef: { nativeTurnKey: "notification-xml" },
+        input: [],
+        items: [{ item: { type: "agentMessage", text: "all agents finished" } }],
       },
       {
         nativeTurnRef: { nativeTurnKey: "user-2" },

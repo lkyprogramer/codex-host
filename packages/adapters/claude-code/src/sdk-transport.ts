@@ -995,10 +995,13 @@ export class ClaudeSdkTransport implements ClaudeTurnTransport {
             events: [],
             nativeTurnKey: null,
           });
+        // The Turn is keyed by its first top-level transcript record, the
+        // task notification that starts it, as history reads it back; a
+        // segment without one still takes a persistent record uuid.
         if (
           autonomous.nativeTurnKey === null &&
           isRecord(message) &&
-          message.type === "user" &&
+          (message.type === "user" || message.type === "assistant") &&
           (message.parent_tool_use_id === null || message.parent_tool_use_id === undefined) &&
           typeof message.uuid === "string" &&
           message.uuid.length > 0
