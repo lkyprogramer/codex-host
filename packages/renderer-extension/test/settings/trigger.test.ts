@@ -178,6 +178,14 @@ describe("Renderer settings header trigger", () => {
         else this.children.splice(index, 0, child);
         return child;
       }
+      querySelector(selector: string): FakeElement | null {
+        const attribute = /^:scope > \[([a-z-]+)="true"\]$/u.exec(selector)?.[1];
+        return (
+          (attribute &&
+            this.children.find((child) => child.attributes.get(attribute) === "true")) ||
+          null
+        );
+      }
       querySelectorAll(selector: string): FakeElement[] {
         return selector === ':scope > [data-test-id="header-shell-slot"]'
           ? this.children.filter((child) => child.attributes.has("data-test-id"))
@@ -228,6 +236,32 @@ describe("Renderer settings header trigger", () => {
       });
 
       expect(control.root).not.toBeNull();
+      expect(header.children).toEqual([startSlot, content, control.root, endSlot]);
+
+      // Current Desktops overlay the Thread title bar on the header; the
+      // trigger joins the overlay after its title content, before the space
+      // reserved for the end slot, instead of sitting under the title.
+      const overlayHeader = new FakeElement();
+      const overlayStartSlot = new FakeElement(0);
+      overlayStartSlot.setAttribute("data-test-id", "header-shell-slot");
+      const titlebar = new FakeElement(411);
+      titlebar.setAttribute("data-app-shell-main-titlebar", "true");
+      const separator = new FakeElement(411);
+      const titleContent = new FakeElement(411);
+      titleContent.setAttribute("data-app-shell-header-obstacle", "true");
+      const reserved = new FakeElement(1387);
+      titlebar.append(separator, titleContent, reserved);
+      const overlayEndSlot = new FakeElement(1387);
+      overlayEndSlot.setAttribute("data-test-id", "header-shell-slot");
+      overlayHeader.append(overlayStartSlot, titlebar, overlayEndSlot);
+      currentHeader = overlayHeader;
+
+      expect(control.refresh()).toBe(true);
+      expect(overlayHeader.children).toEqual([overlayStartSlot, titlebar, overlayEndSlot]);
+      expect(titlebar.children).toEqual([separator, titleContent, control.root, reserved]);
+      currentHeader = header;
+      expect(control.refresh()).toBe(true);
+      expect(titlebar.children).toEqual([separator, titleContent, reserved]);
       expect(header.children).toEqual([startSlot, content, control.root, endSlot]);
 
       const replacementHeader = new FakeElement();

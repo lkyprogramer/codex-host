@@ -9,6 +9,8 @@ export const SETTINGS_HEADER_SURFACE_SELECTOR =
   '[data-testid="app-shell-header-context-menu-surface"]';
 const SETTINGS_APPLICATION_HEADER_SELECTOR = 'header[data-pip-obstacle="app-shell-header"]';
 const SETTINGS_HEADER_SLOT_SELECTOR = ':scope > [data-test-id="header-shell-slot"]';
+const SETTINGS_MAIN_TITLEBAR_SELECTOR = ':scope > [data-app-shell-main-titlebar="true"]';
+const SETTINGS_MAIN_TITLEBAR_CONTENT_SELECTOR = ':scope > [data-app-shell-header-obstacle="true"]';
 
 export interface RendererSettingsTriggerControl {
   root: HTMLElement;
@@ -100,11 +102,8 @@ export function inspectRendererSettingsContract(
     const bounds = measuredBounds(header);
     return bounds.width > 0 && bounds.height > 0;
   });
-  const insertionPointCount = visibleHeaders.filter((header) =>
-    [...header.querySelectorAll<HTMLElement>(SETTINGS_HEADER_SLOT_SELECTOR)].some((slot) => {
-      const bounds = measuredBounds(slot);
-      return bounds.width > 0 && bounds.height > 0;
-    }),
+  const insertionPointCount = visibleHeaders.filter(
+    (header) => headerInsertionPoint(header) !== null,
   ).length;
   return {
     headerCount: headers.length,
@@ -113,22 +112,33 @@ export function inspectRendererSettingsContract(
   };
 }
 
+function isVisible(element: Element): boolean {
+  const bounds = measuredBounds(element);
+  return bounds.width > 0 && bounds.height > 0;
+}
+
+function headerInsertionPoint(header: HTMLElement): RendererSettingsHeaderInsertionPoint | null {
+  // Current Desktops lay the Thread title bar over the header as an absolute
+  // overlay, so a header child would sit under the Thread title. Inside the
+  // overlay the trigger follows the title content, which yields the room,
+  // and precedes the space the overlay reserves for the end slot.
+  const titlebar = header.querySelector<HTMLElement>(SETTINGS_MAIN_TITLEBAR_SELECTOR);
+  const content = titlebar?.querySelector<HTMLElement>(SETTINGS_MAIN_TITLEBAR_CONTENT_SELECTOR);
+  if (titlebar && content && isVisible(titlebar)) {
+    return { parent: titlebar, before: content.nextSibling };
+  }
+
+  const endSlot = [...header.querySelectorAll<HTMLElement>(SETTINGS_HEADER_SLOT_SELECTOR)]
+    .filter(isVisible)
+    .toSorted((left, right) => measuredBounds(right).left - measuredBounds(left).left)[0];
+  return endSlot ? { parent: header, before: endSlot } : null;
+}
+
 function findRendererSettingsHeaderInsertionPoint(
   ownerDocument: Document,
 ): RendererSettingsHeaderInsertionPoint | null {
   const header = ownerDocument.querySelector<HTMLElement>(SETTINGS_APPLICATION_HEADER_SELECTOR);
-  if (!header) return null;
-
-  const headerBounds = measuredBounds(header);
-  if (headerBounds.width <= 0 || headerBounds.height <= 0) return null;
-
-  const endSlot = [...header.querySelectorAll<HTMLElement>(SETTINGS_HEADER_SLOT_SELECTOR)]
-    .filter((slot) => {
-      const bounds = measuredBounds(slot);
-      return bounds.width > 0 && bounds.height > 0;
-    })
-    .toSorted((left, right) => measuredBounds(right).left - measuredBounds(left).left)[0];
-  return endSlot ? { parent: header, before: endSlot } : null;
+  return header && isVisible(header) ? headerInsertionPoint(header) : null;
 }
 
 export function mountRendererSettingsTrigger(
