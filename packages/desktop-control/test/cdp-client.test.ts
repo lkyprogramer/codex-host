@@ -4,6 +4,7 @@ import {
   CdpClient,
   getCdpBrowserVersion,
   listCdpTargets,
+  waitForRendererTarget,
   type CdpFetch,
   type CdpSocketFactory,
 } from "../src/index.js";
@@ -91,6 +92,54 @@ describe("CDP client", () => {
         webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/page-1",
       },
     ]);
+  });
+
+  it("skips unattachable targets before a valid Renderer page", async () => {
+    const page = {
+      id: "page-1",
+      type: "page",
+      title: "Codex",
+      url: "app://-/index.html",
+      webSocketDebuggerUrl: "ws://127.0.0.1:9222/devtools/page/page-1",
+    };
+    const fetchImpl: CdpFetch = async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return [
+          { id: "worker-1", type: "worker", url: "" },
+          { id: "page-2", type: "page", url: "app://-/index.html" },
+          page,
+        ];
+      },
+    });
+
+    await expect(listCdpTargets("http://127.0.0.1:9222", fetchImpl)).resolves.toEqual([page]);
+    await expect(
+      waitForRendererTarget("http://127.0.0.1:9222", {
+        fetchImpl,
+        timeoutMs: 100,
+        pollIntervalMs: 1,
+      }),
+    ).resolves.toEqual(page);
+  });
+
+  it("reports no Renderer target when every listed target is unattachable", async () => {
+    const fetchImpl: CdpFetch = async () => ({
+      ok: true,
+      status: 200,
+      async json() {
+        return [{ id: "page-1", type: "page", url: "app://-/index.html" }];
+      },
+    });
+
+    await expect(
+      waitForRendererTarget("http://127.0.0.1:9222", {
+        fetchImpl,
+        timeoutMs: 10,
+        pollIntervalMs: 1,
+      }),
+    ).rejects.toThrow("CDP has no attachable app:// page target");
   });
 
   it("validates browser-level discovery metadata", async () => {

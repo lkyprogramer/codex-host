@@ -65,12 +65,21 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-function sameAgents(actual: readonly string[], expected: readonly string[]): boolean {
+function sameAgentIdentities(actual: readonly string[], expected: readonly string[]): boolean {
+  const identities = new Set(actual);
   return (
-    (actual.length === expected.length &&
-      actual.every((agent, index) => agent === expected[index])) ||
-    (actual[0] === "codex" && new Set(actual).size === actual.length)
+    actual.length === expected.length &&
+    identities.size === actual.length &&
+    expected.every((agent) => identities.has(agent))
   );
+}
+
+function matchesExpectedAgents(actual: readonly string[], expected: readonly string[]): boolean {
+  // The production Controller supplies only the required built-in identity;
+  // plugin capabilities determine the rest of the Renderer catalog at runtime.
+  return expected.length === 1 && expected[0] === "codex"
+    ? actual.includes("codex") && new Set(actual).size === actual.length
+    : sameAgentIdentities(actual, expected);
 }
 
 function isPrimaryRendererUrl(value: string): boolean {
@@ -117,7 +126,7 @@ function validateBindingStatus(
     value.version !== 2 ||
     !Array.isArray(value.enabledAgents) ||
     value.enabledAgents.some((agent) => typeof agent !== "string") ||
-    !sameAgents(value.enabledAgents as string[], expectedAgents) ||
+    !matchesExpectedAgents(value.enabledAgents as string[], expectedAgents) ||
     !isRecord(value.adapter)
   ) {
     throw new Error("Production Renderer binding returned an invalid status");
@@ -146,7 +155,9 @@ async function waitForPrimaryTarget(
         preferredTargetId,
       );
       if (target) return target;
-      lastError = new Error("Renderer CDP has no primary app://-/index.html page target");
+      lastError = new Error(
+        "Renderer CDP has no attachable primary app://-/index.html page target",
+      );
     } catch (error) {
       lastError = error;
     }
