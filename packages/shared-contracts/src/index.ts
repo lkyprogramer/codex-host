@@ -316,3 +316,19 @@ export {
   type LoadedSessionResourceState,
   type LoadedSessionReleaseStatus,
 } from "./loaded-sessions.js";
+
+export { mergeHarnessCommandCatalogs } from "./harness-commands.js";
+
+export {
+  isComposerCodePosition,
+  DELEGATION_MENTION_PATH_PREFIX,
+  HARNESS_COMMAND_MENTION_PATH_PREFIX,
+  delegationMentionPath,
+  formatDelegationMentionLink,
+  stripDelegationMentions,
+  harnessCommandMentionPath,
+  formatHarnessCommandMentionLink,
+  decodeHarnessCommandMention,
+  restoreHarnessCommandMentions,
+  type DelegationMention,
+} from "./delegation-mention.js";

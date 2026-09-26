@@ -617,10 +617,29 @@ export interface HarnessSessionImportCapability {
   resolveCandidate?(nativeSessionId: string): Promise<HarnessResult<HarnessSessionImportSource>>;
 }
 
+/** Structural cancellation signal; the public Adapter contract has no DOM/Node dependency. */
+export interface HarnessCatalogSignal {
+  readonly aborted: boolean;
+  readonly reason?: unknown;
+  addEventListener(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener(type: "abort", listener: () => void): void;
+}
+export interface InspectHarnessCommandsInput {
+  cwd: string;
+  signal: HarnessCatalogSignal;
+}
+
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
   /** Static command metadata. Reading it must not inspect, connect to, or open a Native Session. */
   readonly commandCatalog?: HarnessCommandCatalog;
+  /** Session command lists include native workspace metadata, not only builtin entries. */
+  readonly liveCommandCatalog?: boolean;
+  /** Bounded read-only metadata discovery. No model Turn or retained Native Session;
+   * close all temporary resources on success, failure, cancellation and timeout. */
+  inspectCommands?(
+    input: InspectHarnessCommandsInput,
+  ): Promise<HarnessResult<HarnessCommandCatalog>>;
   readonly sessionImport?: HarnessSessionImportCapability;
   readonly subagents?: HarnessSubagentCapability;
   readonly webUi?: HarnessWebUiAction;

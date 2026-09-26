@@ -110,3 +110,5 @@ export const packageMetadata = {
   name: "@codexhost/harness-adapter",
   contractVersion: WORKSPACE_CONTRACT_VERSION,
 } as const;
+
+export type { InspectHarnessCommandsInput, HarnessCatalogSignal } from "./text-session.js";
