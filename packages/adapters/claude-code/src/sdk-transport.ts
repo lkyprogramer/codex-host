@@ -15,7 +15,11 @@ import type { HarnessAccountSnapshot, HarnessThinkingOptionId } from "@codexhost
 import { projectClaudeAccountUsage } from "./account-usage.js";
 
 import { resolveClaudeCodeExecutable, withNodeRuntimeOnPath } from "./command.js";
-import type { ClaudeModelInspectionSnapshot } from "./model-catalog.js";
+import {
+  mergeClaudeModelPickerOptions,
+  readClaudeUserModelPicker,
+  type ClaudeModelInspectionSnapshot,
+} from "./model-catalog.js";
 import { ClaudeNativeTurnAccumulator, parseClaudePlanLimitEvent } from "./native-message.js";
 import { isClaudePermissionMode, type ClaudePermissionMode } from "./permission-modes.js";
 import { claudeThinkingConfiguration, parseClaudeThinkingOptionId } from "./thinking-options.js";
@@ -1185,8 +1189,9 @@ export class ClaudeSdkModelInspector implements ClaudeModelInspector {
       const canSelectModel =
         Array.isArray(initialized.models) && typeof candidate.setModel === "function";
       const canSelectPermissionMode = typeof candidate.setPermissionMode === "function";
+      const modelPicker = await readClaudeUserModelPicker(this.#environment);
       return {
-        models: initialized.models,
+        models: mergeClaudeModelPickerOptions(initialized.models, modelPicker),
         canSelectModel,
         canSelectPermissionMode,
       };

@@ -1,4 +1,7 @@
 import { Buffer } from "node:buffer";
+import { readFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 
 import {
   HARNESS_MODEL_LABEL_MAX_LENGTH,
@@ -26,6 +29,30 @@ const modelInfoSchema = z.object({
   displayName: z.string().trim().min(1).max(HARNESS_MODEL_LABEL_MAX_LENGTH),
   resolvedModel: harnessResolvedModelLabelSchema.optional(),
 });
+
+const modelPickerOptionSchema = z.object({
+  model: z.string().trim().min(1).max(CLAUDE_MODEL_VALUE_MAX_LENGTH),
+  label: z.string().trim().min(1).max(HARNESS_MODEL_LABEL_MAX_LENGTH).optional(),
+  description: z.string().trim().min(1).max(HARNESS_MODEL_LABEL_MAX_LENGTH).optional(),
+  behavesAs: harnessResolvedModelLabelSchema.optional(),
+});
+
+const modelPickerSettingsSchema = z.object({
+  options: z.array(z.unknown()).optional(),
+  replaceBuiltInOptions: z.boolean().optional(),
+});
+
+export interface ClaudeModelPickerOption {
+  model: string;
+  label?: string;
+  description?: string;
+  behavesAs?: string;
+}
+
+export interface ClaudeModelPickerSettings {
+  options: ClaudeModelPickerOption[];
+  replaceBuiltInOptions: boolean;
+}
 
 export interface ClaudeModelInspectionSnapshot {
   models: unknown;
@@ -66,6 +93,119 @@ export function decodeClaudeModelRef(ref: HarnessModelRef): string | undefined {
     throw new Error("Claude Code Model Ref is not canonical");
   }
   return value === "default" ? undefined : value;
+}
+
+export function resolveClaudeConfigDirectory(environment: NodeJS.ProcessEnv = process.env): string {
+  return path.resolve(environment.CLAUDE_CONFIG_DIR ?? path.join(os.homedir(), ".claude"));
+}
+
+export function parseClaudeModelPickerSettings(
+  value: unknown,
+): ClaudeModelPickerSettings | undefined {
+  if (value === undefined || value === null) return undefined;
+  const parsed = modelPickerSettingsSchema.safeParse(value);
+  if (!parsed.success) return undefined;
+  const { options: input, replaceBuiltInOptions } = parsed.data;
+  if (input === undefined && replaceBuiltInOptions === undefined) return undefined;
+  const options: ClaudeModelPickerOption[] = [];
+  const seen = new Set<string>();
+  for (const entry of input ?? []) {
+    const option = modelPickerOptionSchema.safeParse(entry);
+    if (!option.success || seen.has(option.data.model)) continue;
+    try {
+      encodeClaudeModelRef(option.data.model);
+    } catch {
+      continue;
+    }
+    seen.add(option.data.model);
+    options.push({
+      model: option.data.model,
+      ...(option.data.label ? { label: option.data.label } : {}),
+      ...(option.data.description ? { description: option.data.description } : {}),
+      ...(option.data.behavesAs ? { behavesAs: option.data.behavesAs } : {}),
+    });
+  }
+  // Invalid non-empty options cannot replace the SDK's selectable models.
+  if (input?.length && options.length === 0) return undefined;
+  return { options, replaceBuiltInOptions: replaceBuiltInOptions === true };
+}
+
+/** Read only Claude's user-level model picker setting; other fields never enter the catalog. */
+export async function readClaudeUserModelPicker(
+  environment: NodeJS.ProcessEnv = process.env,
+): Promise<ClaudeModelPickerSettings | undefined> {
+  let raw: string;
+  try {
+    raw = await readFile(
+      path.join(resolveClaudeConfigDirectory(environment), "settings.json"),
+      "utf8",
+    );
+  } catch {
+    return undefined;
+  }
+  try {
+    const document: unknown = JSON.parse(raw);
+    if (document === null || typeof document !== "object" || Array.isArray(document)) {
+      return undefined;
+    }
+    return parseClaudeModelPickerSettings((document as Record<string, unknown>).modelPicker);
+  } catch {
+    return undefined;
+  }
+}
+
+function modelValue(row: unknown): string | undefined {
+  if (row === null || typeof row !== "object" || Array.isArray(row)) return undefined;
+  const value = (row as Record<string, unknown>).value;
+  return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
+function optionRow(option: ClaudeModelPickerOption, sdkRow?: unknown): Record<string, unknown> {
+  const base =
+    sdkRow !== null && typeof sdkRow === "object" && !Array.isArray(sdkRow)
+      ? (sdkRow as Record<string, unknown>)
+      : {};
+  return {
+    ...base,
+    value: option.model,
+    displayName: option.label ?? option.model,
+    ...(option.description ? { description: option.description } : {}),
+    ...(option.behavesAs ? { resolvedModel: option.behavesAs } : {}),
+  };
+}
+
+export function mergeClaudeModelPickerOptions(
+  sdkModels: unknown,
+  modelPicker: ClaudeModelPickerSettings | undefined,
+): unknown {
+  if (!modelPicker || !Array.isArray(sdkModels)) return sdkModels;
+  const sdkByValue = new Map<string, unknown>();
+  for (const row of sdkModels) {
+    const value = modelValue(row);
+    if (value && !sdkByValue.has(value)) sdkByValue.set(value, row);
+  }
+  if (modelPicker.replaceBuiltInOptions) {
+    const defaultRow = sdkByValue.get("default") ?? { value: "default", displayName: "Default" };
+    const merged: unknown[] = [defaultRow];
+    const included = new Set<string>(["default"]);
+    for (const option of modelPicker.options) {
+      if (included.has(option.model)) {
+        if (option.model === "default") merged[0] = optionRow(option, defaultRow);
+        continue;
+      }
+      merged.push(optionRow(option, sdkByValue.get(option.model)));
+      included.add(option.model);
+    }
+    return merged;
+  }
+  const merged = [...sdkModels];
+  const included = new Set(sdkByValue.keys());
+  for (const option of modelPicker.options) {
+    if (included.has(option.model)) continue;
+    merged.push(optionRow(option));
+    included.add(option.model);
+  }
+  return merged;
 }
 
 function uniqueDisplayLabels(rows: Array<z.infer<typeof modelInfoSchema>>): Map<string, string> {
