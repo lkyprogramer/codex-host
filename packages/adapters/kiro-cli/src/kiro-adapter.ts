@@ -57,7 +57,9 @@ import {
   type HarnessPermissionModeId,
   type HostInteractionId,
   type HostTurnId,
+  type NativeCheckpointRef,
   type NativeSessionRef,
+  type NativeTurnRef,
 } from "@codexhost/shared-contracts";
 
 import {
@@ -725,6 +727,14 @@ export class KiroSession implements HarnessSession {
   #publishedUsage: string;
   #usageRefresh: Promise<void> | null = null;
   #newSessionWithoutTurn: boolean;
+  /**
+   * Native Turn keys this Session has seen in its history. A Turn whose own
+   * key was not reported can still be identified as the single new one, but
+   * only while this list is complete: a new Session starts complete (it has
+   * no Turns), a resumed one once its history was read.
+   */
+  #knownTurnKeys = new Set<string>();
+  #knownTurnKeysComplete: boolean;
   #reading = false;
 
   constructor(options: KiroSessionOptions) {
@@ -743,6 +753,7 @@ export class KiroSession implements HarnessSession {
     this.#onClose = options.onClose;
     this.#usage = options.usage ?? new KiroUsage();
     this.#newSessionWithoutTurn = options.createdEmptySession ?? false;
+    this.#knownTurnKeysComplete = this.#newSessionWithoutTurn;
     this.initialUsage = this.#usage.snapshot();
     this.#publishedUsage = JSON.stringify(this.initialUsage);
 
@@ -840,6 +851,7 @@ export class KiroSession implements HarnessSession {
         };
       }
       const snapshot = await this.#readSnapshotFn(location);
+      this.#rememberTurns(snapshot);
       return {
         ok: true,
         value: {
@@ -934,6 +946,7 @@ export class KiroSession implements HarnessSession {
     const userText = command.input.map((i) => i.text).join("\n");
     const output = new KiroTurnOutput(turnId, this.#cwd, (event) => this.#channel.emit(event));
     let assignedUserMessageId: string | undefined;
+    const turnKeysBefore = this.#knownTurnKeysComplete ? new Set(this.#knownTurnKeys) : null;
     const stopped = new Promise<never>((_resolve, reject) => {
       this.#stopTurn = () => reject(this.#faultError ?? new Error("Session closed"));
     });
@@ -1051,29 +1064,25 @@ export class KiroSession implements HarnessSession {
           turnOutcome = { status: "succeeded" };
         }
       } catch (error) {
-        turnOutcome =
-          this.#closed && !this.#faultError
-            ? { status: "cancelled", reason: "Session closed" }
-            : {
-                status: "failed",
-                error: {
-                  code: "nativeFailure",
-                  message: error instanceof Error ? error.message : "Kiro prompt failed",
-                  retryable: false,
-                },
-              };
+        turnOutcome = this.#failedOutcome(error, "Kiro prompt failed");
       } finally {
         this.#cancelInteractions(turnId);
 
         output.finish(turnOutcome);
-        const nativeTurnRef = assignedUserMessageId
-          ? nativeTurnRefSchema.parse({
-              harnessId: this.harnessId,
-              nativeSessionId: this.#sessionId,
-              nativeTurnKey: assignedUserMessageId,
-              formatVersion: 1,
-            })
-          : undefined;
+        const settled = await this.#settledTurn(assignedUserMessageId, turnKeysBefore);
+        const nativeTurnRef =
+          settled?.nativeTurnRef ??
+          (assignedUserMessageId
+            ? nativeTurnRefSchema.parse({
+                harnessId: this.harnessId,
+                nativeSessionId: this.#sessionId,
+                nativeTurnKey: assignedUserMessageId,
+                formatVersion: 1,
+              })
+            : undefined);
+        const outcome: TurnOutcome = settled?.checkpoint
+          ? { ...turnOutcome, checkpoint: settled.checkpoint }
+          : turnOutcome;
 
         this.#channel.emit({
           kind: "event",
@@ -1081,7 +1090,7 @@ export class KiroSession implements HarnessSession {
             type: "turn.completed",
             turnId,
             ...(nativeTurnRef ? { nativeTurnRef } : {}),
-            outcome: turnOutcome,
+            outcome,
           },
         });
 
@@ -1498,17 +1507,7 @@ export class KiroSession implements HarnessSession {
           },
         });
       } catch (error) {
-        const outcome: TurnOutcome =
-          this.#closed && !this.#faultError
-            ? { status: "cancelled", reason: "Session closed" }
-            : {
-                status: "failed",
-                error: {
-                  code: "nativeFailure",
-                  message: error instanceof Error ? error.message : "Command execution failed",
-                  retryable: false,
-                },
-              };
+        const outcome = this.#failedOutcome(error, "Command execution failed");
         if (compactionItem) {
           this.#channel.emit({
             kind: "event",
@@ -1535,6 +1534,76 @@ export class KiroSession implements HarnessSession {
     };
     this.#activeTask = execute();
     return { ok: true, value: { turnId } };
+  }
+
+  /**
+   * How a Turn ended when its native call failed. A Session closed on
+   * purpose cancels it; one that faulted reports why the process was lost,
+   * not the generic rejection the pending call saw.
+   */
+  #failedOutcome(error: unknown, fallback: string): TurnOutcome {
+    if (this.#closed && !this.#faultError) return { status: "cancelled", reason: "Session closed" };
+    if (this.#faultError) {
+      return {
+        status: "failed",
+        error: {
+          code: "processExited",
+          message: this.#faultError.message,
+          retryable: true,
+          ...(this.#faultError.diagnostic ? { diagnostic: this.#faultError.diagnostic } : {}),
+        },
+      };
+    }
+    return {
+      status: "failed",
+      error: {
+        code: "nativeFailure",
+        message: error instanceof Error ? error.message : fallback,
+        retryable: false,
+      },
+    };
+  }
+
+  #rememberTurns(snapshot: HostThreadSnapshot): void {
+    for (const turn of snapshot.turns) this.#knownTurnKeys.add(turn.nativeTurnRef.nativeTurnKey);
+    this.#knownTurnKeysComplete = true;
+  }
+
+  /**
+   * The native Turn a finished Turn persisted, read back from history: its
+   * reported key when Kiro sent one, otherwise the single Turn that is new
+   * since the Turn started. Nothing is guessed when that is ambiguous.
+   */
+  async #settledTurn(
+    assignedKey: string | undefined,
+    before: ReadonlySet<string> | null,
+  ): Promise<{ nativeTurnRef: NativeTurnRef; checkpoint?: NativeCheckpointRef } | null> {
+    if (this.#closed) return null;
+    try {
+      const location = await this.#locateSession(
+        { environment: this.#environment },
+        this.#sessionId,
+      );
+      if (!location) return null;
+      const snapshot = await this.#readSnapshotFn(location);
+      const created = before
+        ? snapshot.turns.filter((turn) => !before.has(turn.nativeTurnRef.nativeTurnKey))
+        : [];
+      this.#rememberTurns(snapshot);
+      const turn = assignedKey
+        ? snapshot.turns.find((candidate) => candidate.nativeTurnRef.nativeTurnKey === assignedKey)
+        : created.length === 1
+          ? created[0]
+          : undefined;
+      if (!turn) return null;
+      return {
+        nativeTurnRef: turn.nativeTurnRef,
+        ...(turn.checkpoint ? { checkpoint: turn.checkpoint } : {}),
+      };
+    } catch {
+      // History is not readable yet: report what the live Turn observed.
+      return null;
+    }
   }
 
   fault(error: KiroTransportError): void {

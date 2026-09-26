@@ -296,6 +296,25 @@ spawnOwnedProcess(command, args, {
 | Linux 同一 tick 边界 | 补单元测试 |
 | 测试隔离 | Shim 测试的回收只作用于测试自己的临时记录目录 |
 
+### 4.9 阶段 C 完成情况（分支 `feat/process-anchor`）
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| AD-1 | 已修 | Grok 取消 Turn 时，待处理的审批被删除、以 cancelled 应答原生端，并发出 `interaction.closed{cancelled}`；之后到达的回复被拒绝 |
+| AD-2 | 已修 | Kiro transport 的 `cancel` 在取消通知送不出去时报错，Adapter 原有的失败分支得以生效；用内存 ACP 对端测试 |
+| AD-3 | 已修 | Grok 的 `session/set_model`、`session/set_mode` 限时（`commandTimeoutMs`，默认 30 秒），原生 Compact 限时 10 分钟，超时即让连接退役（Session 判故障并关闭）；interject 超时只拒绝本次调用，所在的 Turn 仍可取消；用真实 transport 加不响应的假 ACP 进程测试 |
+| AD-4 | 已修 | Antigravity 取消后清理失败时，先把 Turn 以失败结束，再发出 `session.faulted` 并结束输出，与 Turn 结束后清理失败的处理一致 |
+| AD-5 | 未修（待真机核对） | `num_turns` 究竟是整个对话累计的轮数，还是单次 `agy` 运行内的迭代次数，只能用真实 CLI 跑两轮对话来核对，而这会消耗额度，需要确认后再做；仓库夹具与本机的 `agy` 数据里都没有真实记录 |
+| AD-6 | 已修 | Kiro 只接收当前 Session 的更新；load 回放期间只接收正在加载的那个 Session 的更新；新 Session 的 id 确定之前全部放行 |
+| AD-7 | 已修 | 统一为“只读命令超时只拒绝、配置写入超时则退役连接”：Pi / OMP 的 `set_model`、`set_thinking_level`，以及 Pi `clone`、OMP `branch` 超时时终止连接（原先只拒绝）；Grok 见 AD-3 |
+| AD-8 | 已修 | Cursor 只在 `session/load` 期间收集回放；两个 Turn 之间到达的更新不再保存；回放超过 10 万条时 load 失败，不再在 ACP 处理函数里抛异常 |
+| AD-11 | 已修 | Pi 启动超时的计时器随启动结束而清理；帧缓冲设上限：Pi 128 MiB，OMP 4 MiB（OMP 协议会把更大的内容分块发送），超限时判为协议错误 |
+| AD-12 | 已修 | Kiro 在 Turn 结束后读取原生历史：用上报的用户消息 id，或“已知 Turn 列表完整时唯一新增的那个 Turn”，补上 `nativeTurnRef` 和 checkpoint，无法确定时不做猜测；进程故障导致的失败报告 `processExited` 及故障原因，不再笼统报 `nativeFailure` |
+| HC-6 | 已修 | Snapshot 对齐写回完整映射列表时带上 revision 前提（Store 报告 `STALE_RECORD` 时重新读取并对齐，最多 3 次）；待处理 Turn 改为在 Store 内按 id 移除，不再整体覆盖 |
+| HC-7 | 已修 | 带 `requestId` 的发送由它派生 Host Turn id，重试时如果持久化记录里已有该 Turn，就直接返回、不唤醒 Thread（Thread 卸载或 Host 重启后同样有效；Thread 已加载时，内容不一致仍会报错）；对未加载 Thread 的 release 不再恢复它，直接返回“未持有资源、作业是否停止未知” |
+| HC-10 | 已修 | `ManagedHarnessSession` 显式 `implements HarnessSession`，合同里的可选能力允许读出 `undefined`；故障按原因报告（超时 `unavailable`，非法或未结束的挂起 `protocolError`，挂起期间的活动或恢复不兼容 `invalidState`，其余 `nativeFailure`）；恢复时的能力比较改为结构化比较 |
+| HC-11 | 已修 | `turn.cancel` 不再进入 `ManagedHarnessSession` 的操作队列，直接交给当前的原生 Session |
+
 ## 5. 修复顺序
 
 | 阶段 | 内容 | 覆盖条目 |

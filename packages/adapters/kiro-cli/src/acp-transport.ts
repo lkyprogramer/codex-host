@@ -251,6 +251,8 @@ export class KiroAcpTransport {
   #initialize: InitializeResponse | null = null;
   #replay: KiroTransportEvent[] | null = null;
   #sessionId: string | null = null;
+  /** The Session being loaded, whose replayed updates arrive before it is open. */
+  #loadingSessionId: string | null = null;
   #stderrTail = "";
   readonly #configUpdates = new Set<{
     update(params: SessionNotification): void;
@@ -435,6 +437,7 @@ export class KiroAcpTransport {
           );
         }
       } else {
+        this.#loadingSessionId = input.sessionId;
         session = await withTimeout(
           connection.loadSession({
             cwd: this.#options.cwd,
@@ -486,6 +489,7 @@ export class KiroAcpTransport {
       }
 
       this.#sessionId = sessionId;
+      this.#loadingSessionId = null;
       const replay = this.#replay ?? [];
       this.#replay = null;
 
@@ -665,8 +669,12 @@ export class KiroAcpTransport {
     if (!connection || !this.#sessionId || this.#closed || this.#closing) return;
     try {
       await connection.cancel({ sessionId: this.#sessionId });
-    } catch {
-      // Cancellation is best-effort notification
+    } catch (error) {
+      // The notification could not be delivered: the Turn keeps running, and
+      // the caller must learn that rather than report a cancellation.
+      throw new KiroTransportError("unavailable", "Kiro could not deliver the cancellation", {
+        cause: error,
+      });
     }
   }
 
@@ -801,6 +809,11 @@ export class KiroAcpTransport {
   }
 
   #handleUpdate(params: SessionNotification): void {
+    // One ACP process can report other Sessions (a subagent, a Session it
+    // still loads): only this Session's updates belong to it. Before the
+    // identity of a new Session is known, nothing else can be running.
+    const expected = this.#sessionId ?? this.#loadingSessionId;
+    if (expected !== null && params.sessionId !== expected) return;
     for (const listener of this.#configUpdates) listener.update(params);
     const update = params.update;
     const meta =
