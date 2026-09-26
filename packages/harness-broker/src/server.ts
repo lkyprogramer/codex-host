@@ -123,6 +123,17 @@ function processIsAlive(processId: number): boolean {
   }
 }
 
+/**
+ * A live pid alone does not prove the owner survived: after a crash the pid
+ * can belong to an unrelated process. An owner listens before it publishes,
+ * so a live owner is one still accepting connections on its endpoint.
+ */
+async function ownerIsLive(descriptor: HarnessBrokerDescriptorV1): Promise<boolean> {
+  if (!processIsAlive(descriptor.ownerPid)) return false;
+  if (process.platform === "win32") return true;
+  return socketAcceptsConnections(descriptor.socketPath);
+}
+
 async function assertNoLiveDescriptor(descriptorPath: string): Promise<void> {
   try {
     const metadata = await lstat(descriptorPath);
@@ -137,7 +148,7 @@ async function assertNoLiveDescriptor(descriptorPath: string): Promise<void> {
     const descriptor = harnessBrokerDescriptorSchema.parse(
       JSON.parse(await readFile(descriptorPath, "utf8")),
     );
-    if (processIsAlive(descriptor.ownerPid)) {
+    if (await ownerIsLive(descriptor)) {
       throw new Error("Harness broker descriptor already has a live owner");
     }
   } catch (error) {

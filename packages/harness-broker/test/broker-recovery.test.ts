@@ -344,3 +344,39 @@ describe("broker recovery ownership", () => {
     },
   );
 });
+
+describe.skipIf(process.platform === "win32")("broker descriptor ownership", () => {
+  it("replaces a descriptor whose owner pid is alive but no longer serves", async () => {
+    const f = await fixture();
+    // This process stands in for an unrelated process that reused the pid.
+    await writeFile(
+      f.descriptorPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        protocolVersion: 1,
+        harnessId: id,
+        generation: randomUUID(),
+        ownerPid: process.pid,
+        socketPath: f.endpoint("crashed"),
+        token: "0".repeat(64),
+      }),
+      { mode: 0o600 },
+    );
+    const server = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    cleanup.push(() => server.close());
+    expect(server.descriptor.socketPath).toBe(f.socketPath);
+  });
+
+  it("refuses to replace a descriptor whose owner still serves", async () => {
+    const f = await fixture();
+    const server = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    cleanup.push(() => server.close());
+    await expect(
+      startHarnessBrokerServer({
+        ...f,
+        socketPath: f.endpoint("second"),
+        adapter: new FakeHarnessAdapter(id),
+      }),
+    ).rejects.toThrow("already has a live owner");
+  });
+});
