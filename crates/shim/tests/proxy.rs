@@ -321,6 +321,59 @@ fn preserves_arguments_and_removes_recursive_environment() {
 }
 
 #[test]
+fn auxiliary_app_servers_use_stock_cli_with_host_paths_configured() {
+    for (arguments, originator, stock) in [
+        (vec!["app-server", "--stdio"], None, false),
+        (
+            vec![
+                "-c",
+                "model_provider=openai-memgen",
+                "app-server",
+                "--stdio",
+            ],
+            None,
+            true,
+        ),
+        (
+            vec![
+                "app-server",
+                "--config=model_provider=openai-memgen",
+                "--stdio",
+            ],
+            None,
+            true,
+        ),
+        (vec!["app-server", "--stdio"], Some("Computer Use"), true),
+        (vec!["app-server", "--stdio"], Some("Codex Desktop"), false),
+        (vec!["app-server", "proxy"], None, true),
+    ] {
+        let mut command = shim_command();
+        command
+            .args(&arguments)
+            .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
+            .env(HOST_NODE_PATH_ENV, fake_codex_path())
+            .env(HOST_RUNTIME_PATH_ENV, fake_codex_path())
+            .env("FAKE_CODEX_PRINT_INVOCATION", "1")
+            .env_remove("CODEXHOST_LAUNCHER_PID")
+            .env_remove("CODEXHOST_NPM_NODE_PATH")
+            .env_remove("CODEXHOST_NPM_PACKAGE_ROOT")
+            .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+            .stdin(Stdio::null());
+        if let Some(originator) = originator {
+            command.env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", originator);
+        }
+        let output = command.output().expect("run configured shim");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{arguments:?}: {stderr}");
+        assert_eq!(
+            stderr.contains(&format!("args={}", arguments.join("|"))),
+            stock,
+            "{arguments:?}: {stderr}",
+        );
+    }
+}
+
+#[test]
 fn managed_remote_child_receives_inherited_proxy_environment() {
     let output = run_shim(
         b"",

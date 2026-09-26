@@ -262,7 +262,7 @@ export function createNpmPackageManifest({ version, target }) {
 export function createNpmBinLauncherSource({ version }) {
   return `#!/usr/bin/env node
 import { spawn } from "node:child_process";
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import path from "node:path";
@@ -295,7 +295,10 @@ const require = createRequire(import.meta.url);
 let packageRoot;
 try {
   packageRoot = path.dirname(require.resolve(\`\${platformPackage}/package.json\`));
-} catch {
+} catch (error) {
+  if (error?.code === "ERR_INVALID_PACKAGE_CONFIG") {
+    fail(\`invalid platform package metadata for '\${platformPackage}'. Reinstall ${NPM_PACKAGE_NAME} and its platform package together.\`);
+  }
   // Local folder installs symlink packages into the source tree; Node realpaths
   // the entry script, so the sibling platform package drops off the resolution
   // chain. Fall back to the npm global layout derived from the bin symlink.
@@ -319,6 +322,21 @@ try {
 }
 
 startupTrace("platform package resolved");
+let platformMetadata;
+try {
+  platformMetadata = JSON.parse(readFileSync(path.join(packageRoot, "package.json"), "utf8"));
+} catch {
+  fail(\`invalid platform package metadata for '\${platformPackage}'. Reinstall ${NPM_PACKAGE_NAME} and its platform package together.\`);
+}
+if (
+  !platformMetadata ||
+  typeof platformMetadata !== "object" ||
+  platformMetadata.name !== platformPackage ||
+  typeof platformMetadata.version !== "string" ||
+  platformMetadata.version !== version
+) {
+  fail(\`platform package '\${platformPackage}' does not match ${NPM_PACKAGE_NAME} version \${version}. Reinstall ${NPM_PACKAGE_NAME} and its platform package together.\`);
+}
 const executableSuffix = process.platform === "win32" ? ".exe" : "";
 const launcher = path.join(packageRoot, "bin", \`codexhost\${executableSuffix}\`);
 const shim = path.join(packageRoot, "libexec", \`codexhost-shim\${executableSuffix}\`);

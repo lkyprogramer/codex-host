@@ -1,3 +1,4 @@
+import type { HarnessSession } from "@codexhost/harness-adapter";
 import { FakeHarnessSession } from "@codexhost/harness-adapter/testing";
 import {
   harnessIdSchema,
@@ -546,7 +547,7 @@ describe("ManagedHarnessSession", () => {
   it("gives a native release its own, longer bound than interactive operations", async () => {
     const current = session();
     lifecycle(current);
-    const release = current.resourceLifecycle;
+    const release = (current as HarnessSession).resourceLifecycle;
     if (!release) throw new Error("Missing idle lifecycle");
     const suspend = release.suspend.bind(release);
     Object.defineProperty(current, "resourceLifecycle", {

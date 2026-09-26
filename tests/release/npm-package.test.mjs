@@ -103,29 +103,23 @@ async function createHomebrewNodeLayout(root) {
   return { brewPrefix, cellarNode, prefixNpm, libexecNpm };
 }
 
-async function createGlobalCodexhostInstall(prefix) {
-  const platformPackage =
-    process.platform === "win32"
-      ? `@codexhost/cli-win32-${process.arch}`
-      : `@codexhost/cli-darwin-${process.arch}`;
+async function createGlobalCodexhostInstall(prefix, options = {}) {
+  const platformPackage = `@codexhost/cli-${process.platform}-${process.arch}`;
   const packageRoot = path.join(prefix, "lib", "node_modules", platformPackage);
-  const launcherPath = path.join(
-    prefix,
-    "lib",
-    "node_modules",
-    "@codexhost",
-    "cli",
-    "bin",
-    "codexhost.js",
-  );
+  const launcherPath = options.sourceTree
+    ? path.join(prefix, "source", "bin", "codexhost.js")
+    : path.join(prefix, "lib", "node_modules", "@codexhost", "cli", "bin", "codexhost.js");
   const userBin = path.join(prefix, "bin", "codexhost");
-  await writeExecutable(launcherPath, createNpmBinLauncherSource({ version: "0.1.5" }));
+  await writeExecutable(
+    launcherPath,
+    createNpmBinLauncherSource({ version: options.version ?? "0.1.5" }),
+  );
   await mkdir(path.dirname(userBin), { recursive: true });
   await symlink(path.relative(path.dirname(userBin), launcherPath), userBin);
   await mkdir(packageRoot, { recursive: true });
   await writeFile(
     path.join(packageRoot, "package.json"),
-    `${JSON.stringify({ name: platformPackage, version: "0.1.5" })}\n`,
+    options.metadata ?? `${JSON.stringify({ name: platformPackage, version: "0.1.5" })}\n`,
   );
   const executableSuffix = process.platform === "win32" ? ".exe" : "";
   for (const relative of [
@@ -169,7 +163,7 @@ async function createNpmMetaPackageFixture(root) {
   }
 }
 
-async function createLauncherLifecycleFixture(root, platform) {
+async function createLauncherLifecycleFixture(root, platform, options = {}) {
   const launcherPath = path.join(root, "node_modules", "@codexhost", "cli", "bin", "codexhost.js");
   const platformPackage = `@codexhost/cli-${platform}-x64`;
   const platformRoot = path.join(root, "node_modules", ...platformPackage.split("/"));
@@ -177,11 +171,14 @@ async function createLauncherLifecycleFixture(root, platform) {
   const npmCliPath = path.join(root, "npm-cli.js");
   const preloadPath = path.join(root, "launcher-child-preload.mjs");
 
-  await writeExecutable(launcherPath, createNpmBinLauncherSource({ version: "0.1.0" }));
+  await writeExecutable(
+    launcherPath,
+    createNpmBinLauncherSource({ version: options.version ?? "0.1.0" }),
+  );
   await mkdir(platformRoot, { recursive: true });
   await writeFile(
     path.join(platformRoot, "package.json"),
-    `${JSON.stringify({ name: platformPackage, version: "0.1.0" })}\n`,
+    options.metadata ?? `${JSON.stringify({ name: platformPackage, version: "0.1.0" })}\n`,
   );
   for (const relative of [
     path.join("bin", `codexhost${executableSuffix}`),
@@ -251,10 +248,14 @@ async function runLauncherLifecycle(platform) {
   }
 }
 
-async function runGeneratedWrapperLifecycle(platform, userArguments, exitCodes) {
+async function runGeneratedWrapperLifecycle(platform, userArguments, exitCodes, options = {}) {
   const root = await temporaryDirectory();
   try {
-    const { launcherPath, npmCliPath } = await createLauncherLifecycleFixture(root, platform);
+    const { launcherPath, npmCliPath } = await createLauncherLifecycleFixture(
+      root,
+      platform,
+      options,
+    );
     const preloadPath = path.join(root, "remote-broker-preload.mjs");
     const callsPath = path.join(root, "spawn-calls.jsonl");
     await writeFile(
@@ -298,7 +299,12 @@ syncBuiltinESMExports();
         windowsHide: true,
       },
     );
-    const calls = (await readFile(callsPath, "utf8"))
+    const calls = (
+      await readFile(callsPath, "utf8").catch((error) => {
+        if (error.code === "ENOENT") return "";
+        throw error;
+      })
+    )
       .trim()
       .split("\n")
       .filter(Boolean)
@@ -309,7 +315,114 @@ syncBuiltinESMExports();
   }
 }
 
+async function runGlobalWrapperVersion(options = {}) {
+  const root = await temporaryDirectory();
+  try {
+    const { userBin } = await createGlobalCodexhostInstall(root, {
+      ...options,
+      sourceTree: true,
+    });
+    const preloadPath = path.join(root, "record-spawn.mjs");
+    const callsPath = path.join(root, "spawn-calls.txt");
+    const npmCliPath = path.join(root, "npm-cli.js");
+    await writeFile(npmCliPath, "// fixture npm CLI\n");
+    await writeFile(
+      preloadPath,
+      `import childProcess from "node:child_process";
+import { appendFileSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { syncBuiltinESMExports } from "node:module";
+childProcess.spawn = () => {
+  appendFileSync(process.env.CODEXHOST_TEST_CALLS, "spawn\\n");
+  const child = new EventEmitter();
+  setTimeout(() => child.emit("exit", 0, null), 5);
+  return child;
+};
+syncBuiltinESMExports();
+`,
+    );
+    const result = spawnSync(
+      process.execPath,
+      ["--import", pathToFileURL(preloadPath).href, userBin, "broker", "status"],
+      {
+        encoding: "utf8",
+        env: { ...process.env, npm_execpath: npmCliPath, CODEXHOST_TEST_CALLS: callsPath },
+        timeout: 2_000,
+        windowsHide: true,
+      },
+    );
+    const calls = await readFile(callsPath, "utf8").catch((error) => {
+      if (error.code === "ENOENT") return "";
+      throw error;
+    });
+    return { result, calls };
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+}
+
 describe("npm package release", () => {
+  it("runs native payload when the resolved platform package matches a local prerelease", async () => {
+    const version = "0.1.0-local.20260926";
+    const { result, calls } = await runGeneratedWrapperLifecycle(
+      "darwin",
+      ["broker", "status"],
+      [0],
+      {
+        version,
+        metadata: JSON.stringify({ name: "@codexhost/cli-darwin-x64", version }),
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("rejects a mismatched resolved platform package before native spawn", async () => {
+    const { result, calls } = await runGeneratedWrapperLifecycle(
+      "darwin",
+      ["broker", "status"],
+      [0],
+      { metadata: JSON.stringify({ name: "@codexhost/cli-darwin-x64", version: "0.1.1" }) },
+    );
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("does not match @codexhost/cli version 0.1.0");
+    expect(result.stderr).toContain("Reinstall @codexhost/cli and its platform package together");
+    expect(calls).toEqual([]);
+  });
+
+  it.each(["{", "null", JSON.stringify({ version: "0.1.0" })])(
+    "rejects invalid platform metadata before native spawn: %s",
+    async (metadata) => {
+      const { result, calls } = await runGeneratedWrapperLifecycle(
+        "darwin",
+        ["broker", "status"],
+        [0],
+        { metadata },
+      );
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain("platform package");
+      expect(calls).toEqual([]);
+    },
+  );
+
+  it.runIf(process.platform !== "win32")(
+    "checks the actual platform package through the global bin symlink fallback",
+    async () => {
+      const matched = await runGlobalWrapperVersion();
+      expect(matched.result.status, matched.result.stderr).toBe(0);
+      expect(matched.calls).toBe("spawn\n");
+
+      const mismatched = await runGlobalWrapperVersion({
+        metadata: JSON.stringify({
+          name: `@codexhost/cli-${process.platform}-${process.arch}`,
+          version: "0.1.4",
+        }),
+      });
+      expect(mismatched.result.status).toBe(1);
+      expect(mismatched.result.stderr).toContain("does not match @codexhost/cli version 0.1.5");
+      expect(mismatched.calls).toBe("");
+    },
+  );
   it("maps the current host to a release target id", () => {
     expect(hostReleaseTargetId("darwin", "arm64")).toBe("macos-arm64");
     expect(hostReleaseTargetId("darwin", "x64")).toBe("macos-x64");
