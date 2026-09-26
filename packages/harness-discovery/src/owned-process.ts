@@ -43,14 +43,17 @@ const warnedAnchors = new Set<string>();
  * is never started as if it were the Harness.
  */
 const warnedDiagnostics = new Set<string>();
+/** Diagnostics naming a pid or path differ each time; bound what is kept. */
+const MAX_WARNED_DIAGNOSTICS = 64;
 
 /**
- * Anchor diagnostics describe the platform (no pid namespace here, an
+ * Anchor diagnostics mostly describe the platform (no pid namespace here, an
  * unreadable process table), so every spawn would repeat them: report each
  * distinct one once per Host.
  */
 function warnOnce(message: string): void {
   if (warnedDiagnostics.has(message)) return;
+  if (warnedDiagnostics.size >= MAX_WARNED_DIAGNOSTICS) warnedDiagnostics.clear();
   warnedDiagnostics.add(message);
   process.emitWarning(message);
 }
@@ -383,7 +386,8 @@ class AnchoredProcessTree implements OwnedProcessTree {
       warnOnce(`Process anchor: ${typeof detail === "string" ? detail : "unknown"}`);
     } else if (type === "dryRun") {
       // CODEXHOST_PROCESS_ANCHOR_DRY_RUN=1: what the anchor would have ended.
-      warnOnce(
+      // Sent only when that changes, so every report is shown.
+      process.emitWarning(
         `Process anchor dry run: ${JSON.stringify({
           escapees: Reflect.get(message, "escapees"),
           rejected: Reflect.get(message, "rejected"),

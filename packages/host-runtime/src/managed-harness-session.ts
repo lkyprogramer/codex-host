@@ -40,12 +40,13 @@ type SessionOperation<T> = (session: HarnessSession) => Promise<T>;
  */
 export const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
 /**
- * An idle suspension or an owned-job stop releases native processes, which
- * may legitimately wait out a Harness's own cleanup grace (anchors allow up
- * to twice a 10-minute grace). It is still bounded, just not by the
- * interactive deadline.
+ * An idle suspension or an owned-job stop releases native processes and may
+ * wait out a Harness's own cleanup grace, which is 2-3 s for every shipped
+ * adapter (the anchor waits up to twice that plus a few seconds). The bound
+ * is still short: every later operation, a user's wake included, queues
+ * behind a release that hangs.
  */
-export const DEFAULT_RELEASE_TIMEOUT_MS = 25 * 60_000;
+export const DEFAULT_RELEASE_TIMEOUT_MS = 5 * 60_000;
 
 const SUSPEND_STATUSES = new Set(["suspended", "busy", "unknown", "releaseFailed", "unsupported"]);
 
@@ -99,13 +100,7 @@ function unavailable<T>(message: string): HarnessResult<T> {
 function validSuspendResult(value: unknown): value is HarnessIdleSuspendResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const result = value as { status?: unknown; scope?: unknown; reason?: unknown };
-  if (
-    result.status !== "suspended" &&
-    result.status !== "busy" &&
-    result.status !== "unknown" &&
-    result.status !== "releaseFailed" &&
-    result.status !== "unsupported"
-  ) {
+  if (typeof result.status !== "string" || !SUSPEND_STATUSES.has(result.status)) {
     return false;
   }
   if (result.status === "suspended" && (typeof result.scope !== "string" || !result.scope.trim())) {

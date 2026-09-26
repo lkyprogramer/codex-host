@@ -258,6 +258,82 @@ describe.skipIf(process.platform === "win32")("anchored Harness processes", () =
     }
   });
 
+  it("reports an anchor diagnostic once however many spawns repeat it", async () => {
+    useAnchor(requireRealAnchor());
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+    try {
+      for (let run = 0; run < 2; run += 1) {
+        const { child, tree } = spawnOwnedProcess(
+          process.execPath,
+          ["-e", "setTimeout(()=>{},300)"],
+          {
+            closeTimeoutMs: 500,
+            // A relative ledger path is refused on every spawn alike.
+            env: {
+              ...process.env,
+              CODEXHOST_PROCESS_LEDGER_DIR: "relative-ledger",
+              CODEXHOST_PROCESS_ISOLATION: "group",
+            },
+          },
+        );
+        await closed(child);
+        await tree?.close();
+      }
+      const repeated = warning.mock.calls.filter(([message]) =>
+        String(message).includes("CODEXHOST_PROCESS_LEDGER_DIR must be absolute"),
+      );
+      expect(repeated).toHaveLength(1);
+    } finally {
+      warning.mockRestore();
+    }
+  });
+
+  it("shows what a dry run would have ended", async () => {
+    useAnchor(requireRealAnchor());
+    const ledger = await mkdtemp(path.join(os.tmpdir(), "codexhost-dry-run-ledger-"));
+    const warning = vi.spyOn(process, "emitWarning").mockImplementation(() => undefined);
+    try {
+      const { child, tree } = spawnOwnedProcess(
+        process.execPath,
+        [
+          "-e",
+          [
+            "const {spawn}=require('node:child_process');",
+            "const c=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{detached:true,stdio:'ignore'});",
+            "process.stdout.write(c.pid+'\\n');",
+            "setInterval(()=>{},1000);",
+          ].join(""),
+        ],
+        {
+          closeTimeoutMs: 500,
+          env: {
+            ...process.env,
+            CODEXHOST_PROCESS_ANCHOR_DRY_RUN: "1",
+            CODEXHOST_PROCESS_LEDGER_DIR: ledger,
+            CODEXHOST_PROCESS_ISOLATION: "group",
+          },
+        },
+      );
+      const escapee = Number(await readLine(child));
+      leftovers.push(escapee);
+      await vi.waitFor(
+        () =>
+          expect(
+            warning.mock.calls.some(
+              ([message]) =>
+                String(message).startsWith("Process anchor dry run:") &&
+                String(message).includes(`"pid":${escapee}`),
+            ),
+          ).toBe(true),
+        { timeout: 5_000 },
+      );
+      await tree?.close();
+    } finally {
+      warning.mockRestore();
+      await rm(ledger, { recursive: true, force: true });
+    }
+  });
+
   it("ends the Harness tree when the Host dies without closing anything", async () => {
     const anchor = requireRealAnchor();
     const module = path.join(repositoryRoot, "packages/harness-discovery/dist/owned-process.js");
