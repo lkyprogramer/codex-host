@@ -426,12 +426,45 @@ describe("Grok Adapter ACP projection", () => {
           expect(received).toEqual(expect.arrayContaining(["primary", "isolated"]));
           expect(received).not.toContain("primary:isolated");
         },
-        // An idle release shuts a transport down exactly as close does.
+        // The resumed Session's native side stops answering session/set_model.
+        // The fixture then keeps GrokAcpTransport's contract for an unanswered
+        // configuration write (acp-configuration-timeout.test.ts proves it on
+        // a real process): the write rejects as timed out and the retired
+        // connection faults.
+        stallConfiguration: async (session) => {
+          const transport = transports.at(-1);
+          const options = transportOptions.at(-1);
+          if (!transport || !options) throw new Error("no transport to stall");
+          transport.setModel.mockImplementationOnce(
+            () =>
+              new Promise<undefined>((_resolve, reject) => {
+                setTimeout(() => {
+                  const timedOut = new GrokTransportError(
+                    "unavailable",
+                    "session/set_model timed out",
+                  );
+                  options.onFault?.(
+                    new GrokTransportError(
+                      "processExited",
+                      "session/set_model did not answer; the connection is retired",
+                      { cause: timedOut },
+                    ),
+                  );
+                  reject(timedOut);
+                }, 50);
+              }),
+          );
+          const model = session.initialState.effectiveModel;
+          if (!model) throw new Error("resumed Grok Session has no Model");
+          return { type: "model.select", model };
+        },
+        // An idle release shuts a transport down exactly as close does. A
+        // faulted Session's close awaits the shutdown its fault already began
+        // (transport close is shared), so a second close is not residue.
         readCleanup: async () => ({
           residue: transports.every(
             (transport) =>
-              transport.close.mock.calls.length +
-                transport.releaseOwnedProcess.mock.calls.length ===
+              transport.close.mock.calls.length + transport.releaseOwnedProcess.mock.calls.length >=
               1,
           )
             ? "none"
@@ -460,6 +493,7 @@ describe("Grok Adapter ACP projection", () => {
       suspendWhileBusy: { status: "passed" },
       suspendIdle: { status: "passed", detail: "suspended (grok-acp-session)" },
       closedSessionRefusesWork: { status: "passed" },
+      configurationTimeout: { status: "passed" },
       fork: { status: "notCovered" },
       rollback: { status: "notCovered" },
       permissionAtCreate: { status: "notCovered" },
