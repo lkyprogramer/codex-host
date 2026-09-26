@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use codexhost_platform::{process_executable_path, process_exists};
+use codexhost_platform::{ProcessSnapshot, process_exists, process_snapshot};
 use serde::Deserialize;
 
 use install::{install, relaunch};
@@ -48,8 +48,9 @@ fn wait_for_launcher_exit(request: &UpdateRequest) -> Result<(), Box<dyn Error>>
     if !process_exists(request.wait_pid) {
         return Err("Launcher exited before the background Updater started".into());
     }
+    let launcher = process_snapshot(request.wait_pid)?;
     let expected = request.wait_executable.canonicalize()?;
-    let actual = process_executable_path(request.wait_pid)?.canonicalize()?;
+    let actual = launcher.executable.canonicalize()?;
     if !same_executable(&expected, &actual) {
         return Err(format!(
             "refusing update because PID {} is not the expected Launcher",
@@ -58,13 +59,22 @@ fn wait_for_launcher_exit(request: &UpdateRequest) -> Result<(), Box<dyn Error>>
         .into());
     }
     let started = Instant::now();
-    while process_exists(request.wait_pid) {
+    while same_instance_running(
+        launcher.started_at_micros,
+        process_snapshot(request.wait_pid).ok(),
+    ) {
         if started.elapsed() >= WAIT_TIMEOUT {
             return Err("Launcher did not exit before the update timeout".into());
         }
         thread::sleep(Duration::from_millis(100));
     }
     Ok(())
+}
+
+/// A reused pid is another process: the Launcher is the one that started
+/// when first observed.
+fn same_instance_running(started_at_micros: u64, current: Option<ProcessSnapshot>) -> bool {
+    current.is_some_and(|process| process.started_at_micros == started_at_micros)
 }
 
 fn relaunched_launcher_is_ready(
@@ -120,10 +130,27 @@ fn apply(request_path: &Path) -> Result<(), Box<dyn Error>> {
     let result = (|| -> Result<(), Box<dyn Error>> {
         wait_for_launcher_exit(&request)?;
         write_status(&request, "installing", None)?;
-        install(&request)?;
+        let previous = install(&request)?;
         write_status(&request, "restarting", None)?;
-        relaunch(&request)?;
-        wait_for_relaunch(&request)?;
+        if let Err(error) = relaunch(&request).and_then(|()| wait_for_relaunch(&request)) {
+            return Err(match previous {
+                Some(previous) => format!(
+                    "{error}; the previous version is kept at {}",
+                    previous.display()
+                )
+                .into(),
+                None => error,
+            });
+        }
+        if let Some(previous) = previous
+            && let Err(error) = fs::remove_dir_all(&previous)
+        {
+            // The update itself succeeded; the next one removes this copy.
+            eprintln!(
+                "codexhost updater: could not remove the previous version at {}: {error}",
+                previous.display()
+            );
+        }
         write_status(&request, "succeeded", None)?;
         Ok(())
     })();
@@ -159,7 +186,29 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 mod tests {
-    use super::relaunched_launcher_is_ready;
+    use std::path::PathBuf;
+
+    use codexhost_platform::ProcessSnapshot;
+
+    use super::{relaunched_launcher_is_ready, same_instance_running};
+
+    fn started_at(started_at_micros: u64) -> ProcessSnapshot {
+        ProcessSnapshot {
+            id: 41,
+            parent_id: 1,
+            process_group_id: 41,
+            executable: PathBuf::from("/Applications/codexhost.app/Contents/MacOS/codexhost"),
+            started_at_micros,
+        }
+    }
+
+    #[test]
+    fn waits_only_while_the_observed_launcher_instance_runs() {
+        assert!(same_instance_running(7, Some(started_at(7))));
+        assert!(!same_instance_running(7, None));
+        // The pid now names a process that started later.
+        assert!(!same_instance_running(7, Some(started_at(9))));
+    }
 
     #[test]
     fn accepts_a_live_relaunched_launcher_without_executable_path_matching() {

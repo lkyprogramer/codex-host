@@ -7,9 +7,12 @@ use std::fs::{self, File};
 use std::io::Read;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
 use codexhost_platform::configure_background_command;
+#[cfg(target_os = "macos")]
+use codexhost_platform::exchange_paths;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 use serde::Deserialize;
 #[cfg(any(target_os = "windows", target_os = "macos"))]
@@ -136,19 +139,52 @@ fn install_windows(
     Err("Windows installer updates require Windows".into())
 }
 
+/// Names an update gives the copies it keeps beside the application: the
+/// staged new version, which becomes the previous version once exchanged in,
+/// and the backup earlier updaters renamed the previous version to.
 #[cfg(target_os = "macos")]
-fn install_macos(request: &UpdateRequest, macos: &MacOsInstallation) -> Result<(), Box<dyn Error>> {
+const MACOS_LEFTOVER_PREFIXES: [&str; 2] = [".codexhost-update-", ".codexhost-backup-"];
+
+/// Removes what earlier updates left beside an intact application: a previous
+/// version kept because its update never proved healthy, or a partial copy
+/// from an interrupted staging.
+#[cfg(target_os = "macos")]
+fn remove_macos_leftovers(parent: &Path) -> Result<(), Box<dyn Error>> {
+    for entry in fs::read_dir(parent)? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let ours = name.ends_with(".app")
+            && MACOS_LEFTOVER_PREFIXES
+                .iter()
+                .any(|prefix| name.starts_with(prefix));
+        // Never follow a link out of the application's directory.
+        if ours && entry.file_type()?.is_dir() {
+            fs::remove_dir_all(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos(
+    request: &UpdateRequest,
+    macos: &MacOsInstallation,
+) -> Result<PathBuf, Box<dyn Error>> {
     verify_artifact(&macos.dmg_path, &macos.artifact_sha256)?;
     let parent = macos
         .app_path
         .parent()
         .ok_or("macOS application path has no parent")?;
+    if !macos.app_path.is_dir() {
+        return Err("macOS application to update is missing".into());
+    }
+    remove_macos_leftovers(parent)?;
     let unique = format!("{}-{}", std::process::id(), unix_seconds());
     let mount = env::temp_dir().join(format!("codexhost-update-mount-{unique}"));
     let staged = parent.join(format!(".codexhost-update-{unique}.app"));
-    let backup = parent.join(format!(".codexhost-backup-{unique}.app"));
     fs::create_dir_all(&mount)?;
-    if staged.exists() || backup.exists() {
+    if staged.exists() {
         return Err("macOS update staging path already exists".into());
     }
     let attach_result = run_checked(
@@ -199,9 +235,10 @@ fn install_macos(request: &UpdateRequest, macos: &MacOsInstallation) -> Result<(
     }
     detach_result?;
 
-    fs::rename(&macos.app_path, &backup)?;
-    if let Err(error) = fs::rename(&staged, &macos.app_path) {
-        let _ = fs::rename(&backup, &macos.app_path);
+    // One atomic exchange: the application path never lacks a complete
+    // version, and afterwards `staged` holds the previous one.
+    if let Err(error) = exchange_paths(&staged, &macos.app_path) {
+        let _ = fs::remove_dir_all(&staged);
         return Err(format!("could not activate updated macOS application: {error}").into());
     }
     if let Err(error) = verify_distribution(
@@ -214,27 +251,30 @@ fn install_macos(request: &UpdateRequest, macos: &MacOsInstallation) -> Result<(
         &request.version,
         "installer",
     ) {
-        let _ = fs::remove_dir_all(&macos.app_path);
-        let _ = fs::rename(&backup, &macos.app_path);
+        // Only a restored previous version makes the rejected copy disposable.
+        if exchange_paths(&staged, &macos.app_path).is_ok() {
+            let _ = fs::remove_dir_all(&staged);
+        }
         return Err(error);
     }
-    fs::remove_dir_all(backup)?;
-    Ok(())
+    Ok(staged)
 }
 
 #[cfg(not(target_os = "macos"))]
 fn install_macos(
     _request: &UpdateRequest,
     _macos: &MacOsInstallation,
-) -> Result<(), Box<dyn Error>> {
+) -> Result<PathBuf, Box<dyn Error>> {
     Err("macOS DMG updates require macOS".into())
 }
 
-pub(crate) fn install(request: &UpdateRequest) -> Result<(), Box<dyn Error>> {
+/// Installs the update. Returns the previous version when it was kept aside:
+/// it may be discarded only once the updated one has started.
+pub(crate) fn install(request: &UpdateRequest) -> Result<Option<PathBuf>, Box<dyn Error>> {
     match &request.installation {
-        Installation::Npm(npm) => install_npm(request, npm),
-        Installation::WindowsInstaller(windows) => install_windows(request, windows),
-        Installation::MacosDmg(macos) => install_macos(request, macos),
+        Installation::Npm(npm) => install_npm(request, npm).map(|()| None),
+        Installation::WindowsInstaller(windows) => install_windows(request, windows).map(|()| None),
+        Installation::MacosDmg(macos) => install_macos(request, macos).map(Some),
     }
 }
 
@@ -272,5 +312,43 @@ mod tests {
     fn distribution_metadata_rejects_unknown_fields() {
         let metadata = br#"{"schemaVersion":1,"version":"1.2.3","distribution":"npm","target":"macos-arm64","extra":true}"#;
         assert!(serde_json::from_slice::<DistributionMetadata>(metadata).is_err());
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn removes_only_update_leftovers_beside_the_application() {
+        use std::fs;
+
+        let root = std::env::temp_dir().join(format!(
+            "codexhost-updater-leftovers-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        let parent = root.join("Applications");
+        let outside = root.join("outside.app");
+        for directory in [
+            parent.join("codexhost.app"),
+            parent.join("Other.app"),
+            parent.join(".codexhost-update-1-2.app/Contents"),
+            parent.join(".codexhost-backup-3-4.app"),
+            outside.clone(),
+        ] {
+            fs::create_dir_all(directory).unwrap();
+        }
+        std::os::unix::fs::symlink(&outside, parent.join(".codexhost-backup-5-6.app")).unwrap();
+
+        super::remove_macos_leftovers(&parent).unwrap();
+
+        let mut names = fs::read_dir(&parent)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>();
+        names.sort();
+        assert_eq!(
+            names,
+            [".codexhost-backup-5-6.app", "Other.app", "codexhost.app"]
+        );
+        assert!(outside.is_dir());
+        fs::remove_dir_all(&root).unwrap();
     }
 }
