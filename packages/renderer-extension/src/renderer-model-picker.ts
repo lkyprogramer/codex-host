@@ -16,6 +16,7 @@ import {
   ensureRendererTriggerChipStyle,
   TRIGGER_CHIP_CLASS,
 } from "./renderer-trigger-chip-style.js";
+import { readModelFavorites, writeModelFavorites } from "./renderer-model-favorites.js";
 
 const MENU_CLASSES =
   "fixed z-50 overflow-hidden rounded-xl bg-token-dropdown-background/90 text-token-foreground shadow-lg backdrop-blur-xl";
@@ -50,9 +51,14 @@ export interface RendererModelPickerPresentation {
 }
 
 interface ModelOptionControl {
+  ref: HarnessModelRef;
+  label: string;
+  row: HTMLElement;
   button: HTMLButtonElement;
+  favorite: HTMLButtonElement;
   check: HTMLElement;
   searchText: string;
+  stale: boolean;
 }
 
 interface ThinkingOptionControl {
@@ -71,6 +77,9 @@ export interface RendererModelPickerControl {
   searchInput: HTMLInputElement;
   searchHeader: HTMLElement;
   searchEmpty: HTMLElement;
+  harnessId: string;
+  favorites: Map<string, HarnessModelRef>;
+  currentView?: RendererModelControlView;
   options: Map<string, ModelOptionControl>;
   thinkingOptions: Map<string, ThinkingOptionControl>;
   close(): void;
@@ -112,6 +121,38 @@ function ensureModelScrollbarStyle(ownerDocument: Document): void {
       display: none;
       width: 0;
       height: 0;
+    }
+    [data-codexhost-model-row] {
+      display: flex;
+      align-items: center;
+      border-radius: 8px;
+    }
+    [data-codexhost-model-row][hidden] { display: none; }
+    [data-codexhost-model-row]:hover,
+    [data-codexhost-model-row]:focus-within {
+      background: var(--color-token-list-hover-background, rgba(127, 127, 127, .07));
+    }
+    [data-codexhost-model-row] > button[data-model-id] { min-width: 0; flex: 1; }
+    [data-codexhost-model-row] > button[data-favorite-model-id] {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      flex: none;
+      width: 28px;
+      height: 28px;
+      padding: 0;
+      border: 0;
+      border-radius: 999px;
+      background: transparent;
+      color: var(--color-token-text-secondary, #85858f);
+      cursor: pointer;
+    }
+    [data-codexhost-model-row] > button[data-favorite-model-id][aria-pressed="true"] {
+      color: #f59e0b;
+    }
+    [data-codexhost-model-row] button:focus-visible {
+      outline: 2px solid var(--color-token-text-secondary, #85858f);
+      outline-offset: -2px;
     }
   `;
   (ownerDocument.head ?? ownerDocument.documentElement).append(style);
@@ -260,10 +301,30 @@ function applyModelSearchFilter(control: RendererModelPickerControl): void {
   let visibleCount = 0;
   for (const option of control.options.values()) {
     const matches = query.length === 0 || option.searchText.includes(query);
-    option.button.hidden = !matches;
+    option.row.hidden = !matches;
     if (matches) visibleCount += 1;
   }
   control.searchEmpty.hidden = query.length === 0 || visibleCount > 0;
+}
+
+function updateFavoriteButton(option: ModelOptionControl, favorite: boolean): void {
+  option.favorite.setAttribute("aria-pressed", String(favorite));
+  const label = `${favorite ? "Remove favorite" : "Favorite"} ${option.label}`;
+  option.favorite.setAttribute("aria-label", label);
+  option.favorite.title = label;
+  option.favorite.textContent = favorite ? "★" : "☆";
+}
+
+function orderModelOptions(control: RendererModelPickerControl): void {
+  // Catalog order is stable inside the favorite and other partitions.
+  for (const favorite of [true, false]) {
+    for (const [id, option] of control.options) {
+      const isFavorite = control.favorites.has(id);
+      updateFavoriteButton(option, isFavorite);
+      if (isFavorite === favorite) control.modelMenu.append(option.row);
+    }
+  }
+  applyModelSearchFilter(control);
 }
 
 export function mountRendererModelPicker(
@@ -425,6 +486,16 @@ export function mountRendererModelPicker(
   };
   const openModelMenu = (standalone = false): void => {
     if ((!standalone && !popoverOpen(menu)) || popoverOpen(modelMenu)) return;
+    const latestFavorites = readModelFavorites(control.harnessId);
+    if (
+      control.currentView &&
+      JSON.stringify([...latestFavorites.keys()]) !== JSON.stringify([...control.favorites.keys()])
+    ) {
+      control.favorites = latestFavorites;
+      delete control.root.dataset.catalogSignature;
+      renderRendererModelPicker(control, control.currentView, true, control.harnessId);
+    }
+    orderModelOptions(control);
     modelMenu.showPopover();
     positionModelMenu(control, standalone);
     modelButton.setAttribute("aria-expanded", "true");
@@ -469,6 +540,29 @@ export function mountRendererModelPicker(
     }
   };
   const onModelMenuClick = (event: MouseEvent): void => {
+    const favoriteButton =
+      event.target instanceof Element
+        ? event.target.closest<HTMLButtonElement>("button[data-favorite-model-id]")
+        : null;
+    const favoriteId = favoriteButton?.dataset.favoriteModelId;
+    if (favoriteId) {
+      const option = control.options.get(favoriteId);
+      if (!option) return;
+      control.favorites = readModelFavorites(control.harnessId);
+      if (control.favorites.has(favoriteId)) control.favorites.delete(favoriteId);
+      else control.favorites.set(favoriteId, option.ref);
+      writeModelFavorites(control.harnessId, control.favorites);
+      if (option.stale) {
+        control.options.delete(favoriteId);
+        option.row.remove();
+      } else {
+        orderModelOptions(control);
+      }
+      applyModelSearchFilter(control);
+      positionModelMenu(control, !popoverOpen(menu));
+      if (!option.stale) option.favorite.focus({ preventScroll: true });
+      return;
+    }
     const target =
       event.target instanceof Element
         ? event.target.closest<HTMLButtonElement>("button[data-model-id]")
@@ -531,6 +625,8 @@ export function mountRendererModelPicker(
     searchInput,
     searchHeader,
     searchEmpty,
+    harnessId: "",
+    favorites: new Map(),
     options,
     thinkingOptions,
     close,
@@ -618,13 +714,53 @@ function rebuildOptions(control: RendererModelPickerControl, view: RendererModel
     text.title = model.label;
     const check = createCheck();
     button.append(text, check);
+    const row = document.createElement("div");
+    row.dataset.codexhostModelRow = "true";
+    row.setAttribute("role", "presentation");
+    const favorite = document.createElement("button");
+    favorite.type = "button";
+    favorite.dataset.favoriteModelId = model.ref.id;
+    row.append(button, favorite);
     control.options.set(model.ref.id, {
+      ref: model.ref,
+      label: model.label,
+      row,
       button,
+      favorite,
       check,
       searchText: `${model.label} ${model.ref.id}`.toLowerCase(),
+      stale: false,
     });
-    control.modelMenu.append(button);
+    control.modelMenu.append(row);
   }
+  for (const [id, ref] of control.favorites) {
+    if (control.options.has(id)) continue;
+    const row = document.createElement("div");
+    row.dataset.codexhostModelRow = "true";
+    row.setAttribute("role", "presentation");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.disabled = true;
+    button.className = OPTION_CLASSES;
+    button.textContent = `Unavailable model: ${id}`;
+    button.title = id;
+    const favorite = document.createElement("button");
+    favorite.type = "button";
+    favorite.dataset.favoriteModelId = id;
+    row.append(button, favorite);
+    control.options.set(id, {
+      ref,
+      label: `Unavailable model: ${id}`,
+      row,
+      button,
+      favorite,
+      check: createCheck(),
+      searchText: `${id} unavailable model`.toLowerCase(),
+      stale: true,
+    });
+    control.modelMenu.append(row);
+  }
+  orderModelOptions(control);
   applyModelSearchFilter(control);
   // rebuildOptions replaced the submenu children above, which moves the focused
   // search input out and back in and therefore drops focus; restore it while
@@ -636,7 +772,15 @@ export function renderRendererModelPicker(
   control: RendererModelPickerControl,
   view: RendererModelControlView,
   visible: boolean,
+  harnessId = "",
 ): void {
+  control.currentView = view;
+  if (control.harnessId !== harnessId) {
+    control.close();
+    control.harnessId = harnessId;
+    control.favorites = readModelFavorites(harnessId);
+    delete control.root.dataset.catalogSignature;
+  }
   control.root.style.display = visible ? "inline-flex" : "none";
   control.root.style.alignItems = "center";
   control.root.style.alignSelf = "center";
@@ -678,11 +822,17 @@ export function renderRendererModelPicker(
     "aria-busy",
     String(view.status === "loading" || view.status === "selecting"),
   );
-  control.trigger.disabled = isRendererModelPickerDisabled(view);
+  control.trigger.disabled =
+    isRendererModelPickerDisabled(view) && !(view.status === "empty" && control.favorites.size > 0);
   // Once a selected Model has no usable Thinking choice, the parent menu only
   // duplicates the standalone Model menu. Close it so the next trigger opens
   // the direct Model menu; keep it open when refreshed Thinking choices exist.
-  if ((shouldCloseRendererModelPicker(view) || !presentation.showThinkingSection) && !keepOpenMenu)
+  if (
+    ((shouldCloseRendererModelPicker(view) &&
+      !(view.status === "empty" && control.favorites.size > 0)) ||
+      (!presentation.showThinkingSection && popoverOpen(control.menu))) &&
+    !keepOpenMenu
+  )
     control.close();
   control.modelButton.disabled = control.trigger.disabled;
   // The search input must not mirror the trigger's disabled state: disabling a
@@ -690,6 +840,7 @@ export function renderRendererModelPicker(
   // transient states (e.g. "selecting"). Filtering is client-side and safe.
 
   for (const [modelId, option] of control.options) {
+    if (option.stale) continue;
     const selected = modelId === view.selected?.id;
     option.button.setAttribute("aria-checked", String(selected));
     option.button.classList.toggle("bg-token-list-hover-background", selected);

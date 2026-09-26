@@ -58,6 +58,22 @@ describe("Renderer combined Model and Thinking picker presentation", () => {
         180,
       ).left,
     ).toBe(8);
+    expect(
+      rendererModelPickerMainMenuPlacement(
+        { left: 0, right: 50, top: 820 },
+        { width: 240, height: 900 },
+      ),
+    ).toMatchObject({ left: 8, width: 224 });
+  });
+
+  it("keeps Model choices usable on a narrow viewport", () => {
+    const placement = rendererModelPickerModelMenuPlacement(
+      { left: 8, right: 268, top: 100 },
+      { width: 360, height: 600 },
+    );
+    expect(placement.width).toBe(280);
+    expect(placement.left).toBeGreaterThanOrEqual(8);
+    expect(placement.left + placement.width).toBeLessThanOrEqual(352);
   });
 
   it("opens the model-only picker directly above the model trigger", () => {
