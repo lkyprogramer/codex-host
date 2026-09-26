@@ -42,6 +42,8 @@ export type MappingStoreErrorCode =
   | "DUPLICATE_CREATE_REQUEST"
   | "DUPLICATE_NATIVE_SESSION"
   | "MAPPING_CONFLICT"
+  /** A write made from a record that changed since it was read. */
+  | "STALE_RECORD"
   | "INVALID_RECORD"
   | "IO_ERROR";
 
@@ -491,6 +493,24 @@ export class MappingStore {
     });
   }
 
+  /**
+   * Removes exactly these pending Host Turns, inside the store's serialized
+   * update: an id another writer added since the caller read the record
+   * survives, where replacing the whole list would drop it.
+   */
+  async removePendingHostTurnIds(
+    hostThreadId: HostThreadId,
+    removed: readonly HostTurnId[],
+  ): Promise<StoredThreadRecordV1> {
+    return this.#update(hostThreadId, (current) => {
+      const drop = new Set<string>(removed);
+      const pending = current.pendingHostTurnIds ?? [];
+      const next = pending.filter((id) => !drop.has(id));
+      if (next.length === pending.length) return null;
+      return { ...current, pendingHostTurnIds: next.length > 0 ? next : undefined };
+    });
+  }
+
   async setPendingHostTurnIds(
     hostThreadId: HostThreadId,
     pendingHostTurnIds: readonly HostTurnId[],
@@ -702,11 +722,24 @@ export class MappingStore {
     }));
   }
 
+  /**
+   * Replaces the whole mapping list with a Snapshot's order. With
+   * `expectedRevision` it refuses a record that changed since the caller
+   * computed that list (a mapping added by a live Turn meanwhile would be
+   * lost), so the caller re-reads and reconciles again.
+   */
   async reconcileTurnMappings(
     hostThreadId: HostThreadId,
     mappings: StoredTurnMappingV1[],
+    expectedRevision?: number,
   ): Promise<StoredThreadRecordV1> {
     return this.#update(hostThreadId, (current) => {
+      if (expectedRevision !== undefined && current.revision !== expectedRevision) {
+        throw new MappingStoreError(
+          "STALE_RECORD",
+          "Snapshot reconciliation was computed from a record that has since changed",
+        );
+      }
       if (current.state !== "ready" || !current.nativeSessionRef) {
         throw new MappingStoreError(
           "MAPPING_CONFLICT",
