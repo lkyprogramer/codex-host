@@ -323,6 +323,9 @@ describe("actual Adapter conformance receipt", () => {
                     },
                     configuration: {
                       ...target.capabilities.configuration,
+                      selectModel: false,
+                      selectThinkingOption: false,
+                      selectPermissionMode: false,
                       permissionModeScope: "live",
                     },
                     subagents: undefined,
@@ -344,6 +347,7 @@ describe("actual Adapter conformance receipt", () => {
         rollback: { status: "skipped" },
         permissionAtCreate: { status: "skipped" },
         subagents: { status: "skipped" },
+        configurationTimeout: { status: "skipped" },
       },
     });
   });

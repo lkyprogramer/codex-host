@@ -3,6 +3,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   closedSessionRefusesWork,
+  configurationTimeout,
+  type ConfigurationWrite,
   suspendAborted,
   suspendIdle,
   suspendWhileBusy,
@@ -124,5 +126,77 @@ describe("resource lifecycle scenarios", () => {
     await expect(
       closedSessionRefusesWork(withLifecycle({ status: "unsupported" }, true), bounded),
     ).resolves.toEqual({ status: "passed" });
+  });
+});
+
+function configurable(
+  selectModel: boolean,
+  answer: () => Promise<{ ok: boolean }>,
+): HarnessSession {
+  return {
+    capabilities: {
+      configuration: {
+        selectModel,
+        selectThinkingOption: false,
+        selectPermissionMode: false,
+        permissionModeScope: "live",
+      },
+    },
+    execute: answer,
+  } as unknown as HarnessSession;
+}
+
+const write = { type: "model.select", model: "fixture" } as unknown as ConfigurationWrite;
+const faulted = event({
+  type: "session.faulted",
+  error: { code: "processExited", message: "configuration timed out", retryable: true },
+});
+const refused = async () => ({ ok: false });
+
+describe("configuration timeout scenario", () => {
+  it("skips a Session with no live configuration write", async () => {
+    const collector = new OutputCollector(sessionWith([]));
+    await expect(
+      configurationTimeout(configurable(false, refused), collector, undefined, bounded, 200),
+    ).resolves.toMatchObject({ status: "skipped" });
+  });
+
+  it("reports a writable Session without a stall probe as not covered", async () => {
+    const collector = new OutputCollector(sessionWith([]));
+    await expect(
+      configurationTimeout(configurable(true, refused), collector, undefined, bounded, 200),
+    ).resolves.toMatchObject({ status: "notCovered" });
+  });
+
+  it("fails a write the native side never answered but the Session reported applied", async () => {
+    const collector = new OutputCollector(sessionWith([faulted]));
+    await expect(
+      configurationTimeout(
+        configurable(true, async () => ({ ok: true })),
+        collector,
+        async () => write,
+        bounded,
+        200,
+      ),
+    ).rejects.toThrow("reported applied");
+  });
+
+  it("passes a refused write that retires the Session", async () => {
+    const collector = new OutputCollector(sessionWith([faulted]));
+    await expect(
+      configurationTimeout(configurable(true, refused), collector, async () => write, bounded, 200),
+    ).resolves.toEqual({ status: "passed" });
+  });
+
+  it("fails a Session that keeps running after its write timed out", async () => {
+    const running = {
+      outputs: (async function* () {
+        await new Promise(() => undefined);
+      })(),
+    } as unknown as HarnessSession;
+    const collector = new OutputCollector(running);
+    await expect(
+      configurationTimeout(configurable(true, refused), collector, async () => write, bounded, 100),
+    ).rejects.toThrow("kept running after a configuration write timed out");
   });
 });

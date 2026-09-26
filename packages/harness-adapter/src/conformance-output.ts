@@ -118,6 +118,19 @@ export class OutputCollector {
     this.#assertHealthy();
   }
 
+  /** Waits until the Session faulted or its outputs ended. */
+  async retired(timeoutMs: number): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    while (Date.now() < deadline) {
+      const faulted = this.outputs.some(
+        (output) => output.kind === "event" && output.event.type === "session.faulted",
+      );
+      if (faulted || this.#ended) return;
+      await new Promise<void>((resolve) => scheduleTimeout(resolve, 5));
+    }
+    throw new Error("the Session kept running after a configuration write timed out");
+  }
+
   async started(turnId: string, timeoutMs: number): Promise<void> {
     await this.#waitFor(
       () =>

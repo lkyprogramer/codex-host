@@ -2,7 +2,17 @@ import { hostTurnIdSchema } from "@codexhost/shared-contracts";
 
 import type { OutputCollector } from "./conformance-output.js";
 import type { ConformanceScenarioReceipt } from "./conformance-receipt.js";
-import type { HarnessIdleSuspendResult, HarnessSession } from "./text-session.js";
+import type {
+  HarnessIdleSuspendResult,
+  HarnessSession,
+  ModelSelectCommand,
+  PermissionModeSelectCommand,
+  ThinkingSelectCommand,
+} from "./text-session.js";
+
+/** A live configuration write a Session may be asked to apply. */
+export type ConfigurationWrite =
+  ModelSelectCommand | ThinkingSelectCommand | PermissionModeSelectCommand;
 
 /**
  * Resource-lifecycle scenarios. Each checks one promise the Host relies on
@@ -96,5 +106,46 @@ export async function closedSessionRefusesWork(
     accepted = false;
   }
   if (accepted) throw new Error("a closed Session accepted a new Turn");
+  return { status: "passed" };
+}
+
+/**
+ * A configuration write the native side never answers must neither hang nor
+ * be reported as applied, and the Session must then be retired (faulted or
+ * ended): its native configuration is no longer known.
+ */
+export async function configurationTimeout(
+  session: HarnessSession,
+  collector: OutputCollector,
+  stall: ((session: HarnessSession) => Promise<ConfigurationWrite>) | undefined,
+  bounded: Bounded,
+  timeoutMs: number,
+): Promise<ConformanceScenarioReceipt> {
+  const configuration = session.capabilities.configuration;
+  const writable =
+    configuration.selectModel ||
+    configuration.selectThinkingOption ||
+    (configuration.selectPermissionMode && configuration.permissionModeScope !== "atCreate");
+  if (!writable) return { status: "skipped", detail: "Session has no live configuration write" };
+  if (!stall) return { status: "notCovered", detail: "no native configuration-stall probe" };
+  const command = await bounded("stallConfiguration", () => stall(session));
+  let applied: boolean;
+  // `execute` is overloaded per command; any configuration write returns a
+  // result with the same `ok` shape.
+  try {
+    applied = (
+      await bounded("execute:stalledConfiguration", () =>
+        session.execute(command as ModelSelectCommand),
+      )
+    ).ok;
+  } catch (error) {
+    if (error instanceof Error && error.name === "ConformanceTimeout")
+      throw new Error("a stalled configuration write never answered", { cause: error });
+    // Throwing refuses the write too.
+    applied = false;
+  }
+  if (applied)
+    throw new Error("a configuration write the native side never answered was reported applied");
+  await collector.retired(timeoutMs);
   return { status: "passed" };
 }

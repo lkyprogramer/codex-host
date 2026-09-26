@@ -14,6 +14,8 @@ import type {
 } from "./text-session.js";
 import {
   closedSessionRefusesWork,
+  configurationTimeout,
+  type ConfigurationWrite,
   suspendAborted,
   suspendIdle,
   suspendWhileBusy,
@@ -86,6 +88,12 @@ export interface ConformanceProbes {
   }) => Promise<void>;
   /** Runs after every known Session and Adapter close attempt. */
   readonly readCleanup?: () => Promise<ConformanceCleanupReadback>;
+  /**
+   * Makes the native side stop answering configuration writes for `session`
+   * and returns the write to send: a selection the Session advertises. The
+   * adapter's own configuration timeout must be shorter than the plan's.
+   */
+  readonly stallConfiguration?: (session: HarnessSession) => Promise<ConfigurationWrite>;
 }
 
 export interface AdapterConformancePlan {
@@ -690,6 +698,16 @@ export async function runAdapterConformance(
     );
     terminalTurns.push(followup.nativeTurnRef);
     scenarios.followup = { status: "passed" };
+
+    // Last: a stalled configuration write retires the Session it runs on.
+    activeScenario = "configurationTimeout";
+    scenarios.configurationTimeout = await configurationTimeout(
+      resumedSessionValue,
+      resumedCollector,
+      plan.probes?.stallConfiguration,
+      bounded,
+      timeoutMs,
+    );
   } catch (error) {
     lifecycleFailure = true;
     scenarios[activeScenario] = {
