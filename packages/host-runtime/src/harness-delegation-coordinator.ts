@@ -182,6 +182,25 @@ function validateStart(input: DelegationStartInput): void {
   }
 }
 
+/**
+ * The Host Turn id of a send. With a request id it is derived from it, so a
+ * retry finds the Turn its first attempt recorded even after the in-memory
+ * duplicate check is gone. The digest is shaped as a UUID, like the ids of
+ * sends without a request id.
+ */
+function recordsTurn(record: StoredThreadRecordV1, turnId: string): boolean {
+  return (
+    record.turnMappings.some((mapping) => mapping.hostTurnId === turnId) ||
+    (record.pendingHostTurnIds ?? []).some((pending) => pending === turnId)
+  );
+}
+
+function sendTurnId(threadId: string, requestId: string | undefined): string {
+  if (!requestId) return randomUUID();
+  const hex = createHash("sha256").update(`${threadId}\u0000${requestId}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 export class HarnessDelegationCoordinator {
   readonly #adapters: Map<ExternalHarnessId, HarnessAdapter>;
   readonly #environment: NodeJS.ProcessEnv;
@@ -572,6 +591,19 @@ export class HarnessDelegationCoordinator {
     if (location.kind === "error") {
       throw new DelegationControlError("THREAD_NOT_FOUND", location.error.message);
     }
+    // A retried send whose Turn was already recorded (the Thread was
+    // unloaded, or the Host restarted, since) answers with that Turn and
+    // wakes nothing.
+    if (input.requestId) {
+      const turnId = sendTurnId(input.threadId, input.requestId);
+      if (recordsTurn(location.record, turnId)) {
+        return this.#turnResult(
+          input.threadId,
+          turnId,
+          location.record.harnessId as RoutedHarnessId,
+        );
+      }
+    }
     const resolution = await this.#externalRuntime.resolve(input.threadId);
     if (resolution.kind !== "external") {
       throw new DelegationControlError("THREAD_NOT_FOUND", "Thread was not found");
@@ -605,7 +637,10 @@ export class HarnessDelegationCoordinator {
     if (thread.running || thread.activeTurnId) {
       throw new DelegationControlError("THREAD_BUSY", "Thread already has an active Turn");
     }
-    const turnId = hostTurnIdSchema.parse(randomUUID());
+    const turnId = hostTurnIdSchema.parse(sendTurnId(thread.id, input.requestId));
+    if (input.requestId && recordsTurn(thread.record, turnId)) {
+      return this.#turnResult(thread.id, turnId, thread.harnessId);
+    }
     thread.record = await this.#repository.addPendingHostTurn(thread.record.hostThreadId, turnId);
     try {
       await this.#startExternalTurn(thread, input.message, turnId);
@@ -1125,6 +1160,29 @@ export class HarnessDelegationCoordinator {
   }
 
   async release(input: ThreadReleaseInput): Promise<ThreadReleaseResult> {
+    // A Thread this Host has not loaded holds no native process here:
+    // resolving it would start one only to suspend it again.
+    const location = await this.#externalRuntime.locate(input.threadId);
+    if (location.kind === "external" && !location.thread && location.record.state === "ready") {
+      const latest = location.record.turnMappings.at(-1)?.hostTurnId;
+      if (input.expectedTurnId && latest && latest !== input.expectedTurnId) {
+        throw new DelegationControlError(
+          "STALE_TURN",
+          "expected-turn does not match the latest Turn",
+          { expectedTurnId: input.expectedTurnId, latestTurnId: latest },
+        );
+      }
+      // As after an idle suspension: nothing is held, but owned jobs a
+      // previous Host session left cannot be proven gone.
+      return {
+        threadId: input.threadId,
+        released: false,
+        resourcesReleased: true,
+        busy: false,
+        quiescence: "unknown",
+        proof: { scope: "thread-not-loaded" },
+      };
+    }
     const resolution = await this.#externalRuntime.resolve(input.threadId);
     if (resolution.kind !== "external") {
       throw new DelegationControlError("THREAD_NOT_FOUND", "Thread was not found");

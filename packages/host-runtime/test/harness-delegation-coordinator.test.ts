@@ -1395,7 +1395,43 @@ describe("HarnessDelegationCoordinator", () => {
     }
   });
 
-  it("does not return a cached send after the Session is released", async () => {
+  it("releases a Thread this Host has not loaded without waking it", async () => {
+    const adapter = new FakeHarnessAdapter(harnessIdSchema.parse("pi"));
+    Object.assign(adapter, {
+      stopOwnedJobs: async () => ({ quiescence: "confirmed" as const }),
+    });
+    const value = await fixture(adapter);
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      value.adapter.sessions[0]?.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      await value.coordinator.release({ threadId: started.threadId });
+      expect(value.runtime.get(started.threadId)).toBeUndefined();
+
+      const sessionsBefore = value.adapter.sessions.length;
+      await expect(value.coordinator.release({ threadId: started.threadId })).resolves.toEqual({
+        threadId: started.threadId,
+        released: false,
+        resourcesReleased: true,
+        busy: false,
+        quiescence: "unknown",
+        proof: { scope: "thread-not-loaded" },
+      });
+      expect(value.adapter.sessions).toHaveLength(sessionsBefore);
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("answers a retried send with its recorded Turn after the Session is released", async () => {
     const adapter = new FakeHarnessAdapter(harnessIdSchema.parse("pi"));
     Object.assign(adapter, {
       stopOwnedJobs: async () => ({ quiescence: "confirmed" as const }),
@@ -1425,12 +1461,16 @@ describe("HarnessDelegationCoordinator", () => {
       await expect(
         value.coordinator.release({ threadId: started.threadId }),
       ).resolves.toMatchObject({ released: true, quiescence: "confirmed" });
+      const sessionsBefore = value.adapter.sessions.length;
       const retry = await value.coordinator.send({
         threadId: started.threadId,
         message: "follow-up",
         requestId: "send-1",
       });
-      expect(retry.turnId).not.toBe(first.turnId);
+      // The Turn the first attempt recorded answers the retry: no duplicate
+      // Turn, and the released Thread is not even woken for it.
+      expect(retry.turnId).toBe(first.turnId);
+      expect(value.adapter.sessions).toHaveLength(sessionsBefore);
     } finally {
       await value.close();
     }
