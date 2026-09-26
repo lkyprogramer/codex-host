@@ -29,6 +29,25 @@ function source(rows: Record<string, JsonObject[]>) {
 }
 
 describe("Multi-Account official Thread list", () => {
+  it("rejects section position sorting before contacting Accounts", async () => {
+    const decoded = decodeThreadListRequest({
+      id: 1,
+      method: "thread/list",
+      params: { sectionId: "section-1", sortKey: "section_position" },
+    });
+    if (!decoded) throw new Error("Expected thread/list query");
+    await expect(
+      aggregateOfficialAccountThreadListPage({
+        query: decoded,
+        accountIds: ["a", "b"],
+        params: decoded.params,
+        requestAccountPage: async () => {
+          throw new Error("Account source should not be queried");
+        },
+      }),
+    ).rejects.toThrow("cannot be merged across Accounts");
+  });
+
   it("honors a smaller prefix request without changing the outer query limit", async () => {
     const decoded = query();
     const requestAccountPage = source({

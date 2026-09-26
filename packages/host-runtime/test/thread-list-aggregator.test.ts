@@ -13,6 +13,7 @@ import {
 import { describe, expect, it } from "vitest";
 
 import { aggregateOfficialAccountThreadListPage } from "../src/multi-account-thread-list.js";
+import { listExternalThreadMetadata } from "../src/external-thread-list.js";
 import {
   aggregateThreadList,
   officialThreadListPageFromResponse,
@@ -94,6 +95,33 @@ function directionalOfficialSource(rowsAscending: JsonObject[]) {
 }
 
 describe("aggregated Thread list", () => {
+  it("does not merge section position requests into External pagination", async () => {
+    const decoded = query({
+      cursor: "official-section-cursor",
+      limit: 2,
+      sectionId: "section-1",
+      sortKey: "section_position",
+    });
+    expect(decoded.supportsExternal).toBe(false);
+    expect(
+      listExternalThreadMetadata({
+        query: decoded,
+        records: [external("external-1", 10)],
+        runtimeFor: () => null,
+      }),
+    ).toEqual({ data: [], hasMore: false });
+    await expect(
+      aggregateThreadList({
+        query: decoded,
+        records: [external("external-1", 10)],
+        runtimeFor: () => null,
+        requestOfficialPage: async () => {
+          throw new Error("official page must be forwarded by AppServerHost");
+        },
+      }),
+    ).rejects.toThrow("External aggregation is not supported");
+  });
+
   it("resolves a partially consumed official batch sourced through Account aggregation", async () => {
     // `thread list` reaches the official source through the Account aggregator.
     // An external Thread sorted ahead of the official rows leaves that batch
