@@ -34,6 +34,25 @@ describe("bounded renderer update requests", () => {
     await assertion;
   });
 
+  it("does not turn a late response into a second result after timeout", async () => {
+    vi.useFakeTimers();
+    let resolveOperation!: (value: string) => void;
+    const operation = new Promise<string>((resolve) => {
+      resolveOperation = resolve;
+    });
+    const request = runBoundedRendererUpdateRequest(
+      () => operation,
+      new AbortController().signal,
+      10,
+    );
+    const assertion = expect(request).rejects.toBeInstanceOf(RendererUpdateRequestTimeoutError);
+    await vi.advanceTimersByTimeAsync(10);
+    await assertion;
+    resolveOperation("prepared");
+    await vi.advanceTimersByTimeAsync(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("rejects when the settings page is disposed", async () => {
     const controller = new AbortController();
     const request = runBoundedRendererUpdateRequest(
