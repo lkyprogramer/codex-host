@@ -65,7 +65,7 @@ spawnOwnedProcess(command, args, {
 - anchor 的 `spawnError` 转成 `child` 上的 `error` 事件（带 `code`），保留 Adapter 现有的 ENOENT 等启动错误处理。
 - anchor 不可用（Windows、找不到二进制的开发 / 测试环境）时回退到现有 `detached` + `trackOwnedProcessTree`，语义与现在相同（失败不重试，fail-closed）。
 - 一次性的短命令（模型目录、额度、版本探测）使用 `runOwnedProcess`：超时、超出输出上限或被中止时，整棵进程树停止后才 reject。
-- Adapter 不再直接对任何 pid 发信号：`packages/*/src` 中除 `harness-discovery` 的回退 tracker 外禁止 `process.kill(-pid)`，由 `tools/check-boundaries.mjs` 按语法树检查。Windows 的 `taskkill` 目前只存在于该回退 tracker，阶段 D 由 Windows anchor 取代。
+- Adapter 不再直接对任何 pid 发信号：`packages/*/src` 中除 `harness-discovery` 的回退 tracker 外禁止 `process.kill(-pid)`，由 `tools/check-boundaries.mjs` 按语法树检查。Windows 的 `taskkill` 目前只存在于该回退 tracker；Windows anchor 不在计划内（见 4.10）。
 
 ### 3.4 打包与定位
 
@@ -114,7 +114,7 @@ spawnOwnedProcess(command, args, {
   - Host 没能按时退出、Shim 进入强制阶段时，Shim 会结束 Host 进程树里除 anchor 之外的所有进程，其中也包括它们；
   - Linux 上，做了双 fork 的守护进程会被 subreaper 模式的 anchor 收养，或者处在 anchor 的 pid namespace 里，都会随 Harness 一起结束，所以该开关在 Linux 上基本不起作用。
 - macOS 上每个 anchor 平时每秒扫描一次进程表，被追踪的进程 fork 时立即扫描（两次扫描至少间隔 20ms）。实测：Harness 每秒 fork 约 300 次时，anchor 约占 5% 单核（release 构建）。
-- Windows 首版不启用 anchor，保持现状，Job Object 版本见第 5 节阶段 D。
+- Windows 不启用 anchor，保持现状；Job Object 版本不在计划内（见 4.10）。
 - 每个存活 Harness 多一个很小的原生进程。
 
 ### 3.7 兜底机制：协调关闭、逃逸追踪、记录文件与 PID namespace
@@ -331,6 +331,21 @@ spawnOwnedProcess(command, args, {
 
 阶段 C 已全部完成。
 
+### 4.10 阶段 D 完成情况（仅 macOS）
+
+阶段 D 只做 macOS 相关的部分；Windows 条目按决定不做。
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| PL-9 | 已修（broker 部分） | broker 启动时，旧 descriptor 的 owner 只有在 pid 存活、并且其 socket 仍接受连接时才算存活。owner 在监听之后才发布 descriptor，所以仍在服务的 owner 一定能连上；pid 被无关进程复用的陈旧 descriptor 不再挡住启动。descriptor 格式不变。Windows 仍只看 pid。mapping-store 在 Windows 上同步调用 PowerShell 的那一半属于 Windows，未做 |
+| PL-11 | 已修 | 见 3.7 |
+| RS-2 | 已修 | 用一次 `renamex_np(RENAME_SWAP)` 原子交换新旧 app，任何时刻 app 路径都有一个完整版本；交换后校验失败，就再交换回去。旧版本保留到新版本 relaunch 就绪后才删除；relaunch 失败时保留旧版本，并在失败状态里写明位置。下次更新开始前，清理 app 旁边上次留下的 `.codexhost-update-*` / `.codexhost-backup-*` 目录（不跟随符号链接）。新版未就绪时不自动回滚：无法确认新进程已经退出，这时换回 bundle 风险更大 |
+| RS-5 | 已修（killpg）/ 接受（按 pid） | Shim 在 macOS 上用 `waitid(WEXITED \| WNOHANG \| WNOWAIT)` 观察 root 退出，但不回收，直到整棵进程树结束、Shim 返回前才回收。僵尸状态的 root 仍占着自己的 pid，也就是它所在进程组的 id，因此后续的 killpg 不会打到被复用的进程组。按 pid 杀逃逸后代的部分，发信号前已经核对 pid 加启动时间，剩下的窗口只有“核对到 kill”之间的几微秒；macOS 按顺序分配 pid，要在这个窗口内复用，得走完一整圈 pid 空间，因此作为已知残留接受。Linux 本来就经 pidfd 逐个发信号，未改 |
+| RS-6 | 已修 | 更新器在第一次看到 launcher 时记录它的启动时间，之后只在同一 pid、同一启动时间的进程仍在运行时继续等待；pid 被复用时立即判定原 launcher 已退出，不再等满 180 秒超时 |
+| PL-7（Windows）、PL-10、RS-3、RS-4 | 不做 | 仅涉及 Windows |
+
+实测：`waitid(WNOWAIT)` 在本机 macOS 上能读取退出状态且保留僵尸，可以重复读取；对仍在运行的子进程返回空记录；之后 `waitpid` 能正常回收，退出码一致。Shim 测试（lib 24 个、proxy 44 个）在本机通过，测试前后做了进程快照对比，真实的进程账本没有被改动。
+
 ## 5. 修复顺序
 
 | 阶段 | 内容 | 覆盖条目 |
@@ -338,7 +353,7 @@ spawnOwnedProcess(command, args, {
 | **A（当前分支）** | Rust anchor crate 与集成测试；`spawnOwnedProcess`；Shim 注入路径；打包；全部 POSIX Adapter 迁移；删除手写回收实现；边界检查禁止直接发信号 | PL-1 … PL-8 |
 | **B** | Host 稳健性与门禁：进程级异常处理、调用期限与关闭预算、退役屏障、挂起失败语义、conformance 资源与 Turn 语法；Shim CPU | HC-1 … HC-5、AD-16、RS-1 |
 | **C** | Adapter 与 Host 局部缺陷 | AD-1 … AD-8、AD-11、AD-12、HC-6、HC-7、HC-10、HC-11 |
-| **D** | Windows anchor（Job Object）、broker anchor、更新器与 Shim 原生问题 | PL-7（Windows）、PL-9 … PL-11、RS-2 … RS-6 |
+| **D** | broker anchor、更新器与 Shim 原生问题（仅 macOS，见 4.10）；Windows anchor（Job Object）不做 | PL-9、PL-11、RS-2、RS-5、RS-6 |
 | **E** | 结构升级：SessionKernel 与 `workLevel` / `release` 合同（需升级插件合同版本）、`acp-core`、Pi-family 核心、大模块拆分、能力声明 | HC-4（长期）、HC-8、HC-9、AD-9、AD-10、AD-13 … AD-15 |
 
 ## 6. 阶段 A 验收
