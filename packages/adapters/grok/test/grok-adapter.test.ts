@@ -804,6 +804,64 @@ describe("Grok Adapter ACP projection", () => {
     await adapter.close();
   });
 
+  it("lets a cancellation that failed be sent again", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const turnId = hostTurnIdSchema.parse("turn-cancel-retry");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "run" }] });
+    transport.cancel.mockRejectedValueOnce(new Error("stdin closed"));
+
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toMatchObject({
+      ok: false,
+    });
+    // Not reported done without reaching Grok: the second one is sent.
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(transport.cancel).toHaveBeenCalledTimes(2);
+    transport.finish({ stopReason: "cancelled" });
+    await adapter.close();
+  });
+
+  it("refuses to resend an interjection whose outcome is unknown", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const turnId = hostTurnIdSchema.parse("turn-interject-unknown");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "run" }] });
+    transport.interject.mockRejectedValueOnce(
+      new GrokTransportError(
+        "unavailable",
+        "Grok did not confirm the interjection in time; it may already be queued",
+        { outcomeUnknown: true },
+      ),
+    );
+    await expect(
+      session.steering?.interject({ expectedTurnId: turnId, text: "steer", interjectionId: "i-1" }),
+    ).resolves.toMatchObject({ ok: false, error: { retryable: false } });
+    transport.finish();
+    await adapter.close();
+  });
+
+  it("reports a configuration write that retired the connection as final", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    transport.setModel.mockImplementationOnce(async () => {
+      (
+        session as unknown as { handleTransportFault(error: GrokTransportError): void }
+      ).handleTransportFault(
+        new GrokTransportError("processExited", "Grok Model configuration did not answer"),
+      );
+      throw new GrokTransportError("unavailable", "Grok Model configuration timed out");
+    });
+    await expect(
+      session.execute({ type: "model.select", model: { id: "grok-4.6" } } as never),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "processExited", retryable: false },
+    });
+    await adapter.close();
+  });
+
   it("closes a cancelled Turn's pending Approval and refuses a later response", async () => {
     const transport = new FakeGrokTransport();
     const { adapter, session } = await openedSession(transport);

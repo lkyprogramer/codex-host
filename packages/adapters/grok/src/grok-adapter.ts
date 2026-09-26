@@ -805,7 +805,7 @@ class GrokHarnessSession implements HarnessSession {
       this.#currentModeId = nativeId;
       return { ok: true, value: undefined };
     } catch (error) {
-      const normalized = normalizeError(error, "nativeFailure");
+      const normalized = this.#configurationError(error);
       if (normalized.message.includes("session/set_mode")) {
         return { ok: false, error: { ...normalized, code: "unsupported" } };
       }
@@ -870,6 +870,10 @@ class GrokHarnessSession implements HarnessSession {
       const normalized = normalizeError(error, "unavailable");
       if (normalized.message.includes(GROK_INTERJECT_METHOD)) {
         return { ok: false, error: { ...normalized, code: "unsupported" } };
+      }
+      // Resending an interjection Grok may already hold would add it twice.
+      if (error instanceof GrokTransportError && error.outcomeUnknown) {
+        return { ok: false, error: { ...normalized, retryable: false } };
       }
       return { ok: false, error: normalized };
     }
@@ -938,7 +942,7 @@ class GrokHarnessSession implements HarnessSession {
       this.#event({ type: "session.state.changed", state: this.#state });
       return { ok: true, value: { completed: true } };
     } catch (error) {
-      return { ok: false, error: normalizeError(error, "nativeFailure") };
+      return { ok: false, error: this.#configurationError(error) };
     } finally {
       this.#configuring = false;
     }
@@ -992,6 +996,9 @@ class GrokHarnessSession implements HarnessSession {
       await this.#transport.cancel();
       return { ok: true, value: { cancellationRequested: true } };
     } catch (error) {
+      // The Turn still runs: a later cancel must reach Grok again rather
+      // than be reported done. The approvals closed above stay closed.
+      active.cancellationRequested = false;
       return { ok: false, error: normalizeError(error, "nativeFailure") };
     }
   }
@@ -1690,6 +1697,17 @@ class GrokHarnessSession implements HarnessSession {
   }> {
     if (typeof this.#transport.stopOwnedJobs !== "function") return { quiescence: "unsupported" };
     return this.#transport.stopOwnedJobs();
+  }
+
+  /**
+   * A configuration write that retired the connection has already faulted
+   * this Session: retrying it here cannot succeed.
+   */
+  #configurationError(error: unknown): HarnessError {
+    const normalized = normalizeError(error, "nativeFailure");
+    return this.#phase === "open"
+      ? normalized
+      : { ...normalized, code: "processExited", retryable: false };
   }
 
   #fault(error: GrokTransportError): void {

@@ -56,14 +56,17 @@ export type GrokTransportFaultKind =
 
 export class GrokTransportError extends Error {
   readonly diagnostic: string | undefined;
+  /** The native side may have applied the request although it never answered. */
+  readonly outcomeUnknown: boolean;
 
   constructor(
     readonly kind: GrokTransportFaultKind,
     message: string,
-    options?: ErrorOptions & { diagnostic?: string },
+    options?: ErrorOptions & { diagnostic?: string; outcomeUnknown?: boolean },
   ) {
     super(message, options);
     this.diagnostic = options?.diagnostic;
+    this.outcomeUnknown = options?.outcomeUnknown ?? false;
     this.name = "GrokTransportError";
   }
 }
@@ -147,6 +150,10 @@ export interface GrokAcpTransportOptions {
   command?: string;
   environment?: NodeJS.ProcessEnv;
   commandTimeoutMs?: number;
+  /** Bounds Model and Session-mode writes; defaults to commandTimeoutMs. */
+  configurationTimeoutMs?: number;
+  /** Bounds a native Compact; defaults to COMPACT_TIMEOUT_MS. */
+  compactTimeoutMs?: number;
   closeTimeoutMs?: number;
   onFault?: (error: GrokTransportError) => void;
 }
@@ -566,6 +573,8 @@ export class GrokAcpTransport {
   #ownedTree: OwnedProcessTree | null = null;
   #shutdownPromise: Promise<void> | null = null;
   #shutdownMode: ShutdownMode | null = null;
+  /** A write went unanswered: the native side is not asked for anything more. */
+  #retired = false;
 
   constructor(options: GrokAcpTransportOptions) {
     this.#options = {
@@ -927,14 +936,14 @@ export class GrokAcpTransport {
         raw = await this.#retiringOnTimeout(
           connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_METHOD, params),
           "Grok Native Compact",
-          COMPACT_TIMEOUT_MS,
+          this.#options.compactTimeoutMs ?? COMPACT_TIMEOUT_MS,
         );
       } catch (error) {
         if (!isGrokMethodNotFound(error)) throw error;
         raw = await this.#retiringOnTimeout(
           connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_FALLBACK_METHOD, params),
           "Grok Native Compact",
-          COMPACT_TIMEOUT_MS,
+          this.#options.compactTimeoutMs ?? COMPACT_TIMEOUT_MS,
         );
       }
       await yieldToEventLoop();
@@ -988,7 +997,15 @@ export class GrokAcpTransport {
         }),
         this.#options.commandTimeoutMs,
         "Grok Native Interject",
-      );
+      ).catch((error: unknown) => {
+        if (!(error instanceof GrokTransportError) || !error.message.endsWith("timed out"))
+          throw error;
+        throw new GrokTransportError(
+          "unavailable",
+          "Grok did not confirm the interjection in time; it may already be queued",
+          { cause: error, outcomeUnknown: true },
+        );
+      });
       const parsed = parseGrokInterjectResponse(raw);
       if (!parsed) {
         throw new GrokTransportError("protocolError", "Grok Interject returned an invalid result");
@@ -1117,13 +1134,21 @@ export class GrokAcpTransport {
   async #performShutdown(mode: ShutdownMode): Promise<void> {
     const child = this.#child;
     const connection = this.#connection;
+    // A retired connection already failed to answer; asking it to close the
+    // Session would only wait again. Otherwise the request is bounded too:
+    // a native side that stopped answering must not keep its process alive.
     if (
       mode === "close" &&
+      !this.#retired &&
       connection &&
       this.#sessionId &&
       this.#initialize?.agentCapabilities?.sessionCapabilities?.close
     ) {
-      await connection.closeSession({ sessionId: this.#sessionId }).catch(() => undefined);
+      await withTimeout(
+        connection.closeSession({ sessionId: this.#sessionId }),
+        this.#options.closeTimeoutMs,
+        "Grok ACP session/close",
+      ).catch(() => undefined);
     }
     const owned = this.#ownedTree;
     if (!child || !owned) {
@@ -1209,9 +1234,10 @@ export class GrokAcpTransport {
   #retiringOnTimeout<T>(
     request: Promise<T>,
     operation: string,
-    timeoutMs = this.#options.commandTimeoutMs,
+    timeoutMs = this.#options.configurationTimeoutMs ?? this.#options.commandTimeoutMs,
   ): Promise<T> {
     return withTimeout(request, timeoutMs, operation, (error) => {
+      this.#retired = true;
       this.#fault(
         new GrokTransportError(
           "processExited",
@@ -1221,6 +1247,8 @@ export class GrokAcpTransport {
           },
         ),
       );
+      // Close at once too, so nothing reuses it before the Session faults.
+      void this.close().catch(() => undefined);
     });
   }
 }

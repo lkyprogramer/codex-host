@@ -55,7 +55,9 @@ async function withSilentAgent(
   const transport = new GrokAcpTransport({
     command,
     cwd: directory,
-    commandTimeoutMs: 1_500,
+    // Opening gets a generous bound; only configuration writes a short one.
+    commandTimeoutMs: 10_000,
+    configurationTimeoutMs: 200,
     closeTimeoutMs: 500,
     environment: { ...process.env, HOME: directory, GROK_FIXTURE_SILENT: silent },
     onFault: (error) => faults.push(error),
@@ -86,6 +88,24 @@ describe.skipIf(process.platform === "win32")("Grok configuration writes", () =>
     await withSilentAgent("session/set_mode", async (transport, faults) => {
       await expect(transport.setSessionMode("plan")).rejects.toThrow("timed out");
       await vi.waitFor(() => expect(faults).toHaveLength(1));
+    });
+  });
+
+  it("finishes closing within its bound when session/close never answers", async () => {
+    await withSilentAgent("session/close", async (transport) => {
+      const started = Date.now();
+      await transport.close();
+      // closeTimeoutMs is 500; the process group is reclaimed after it.
+      expect(Date.now() - started).toBeLessThan(5_000);
+    });
+  });
+
+  it("does not ask a retired connection to close its Session", async () => {
+    await withSilentAgent("session/set_model,session/close", async (transport) => {
+      await expect(transport.setModel("grok-4.6")).rejects.toThrow("timed out");
+      const started = Date.now();
+      await transport.close();
+      expect(Date.now() - started).toBeLessThan(2_500);
     });
   });
 });
