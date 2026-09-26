@@ -14,6 +14,10 @@
 - 详细源码对照：[Native / 更新](/Users/luo/Documents/github/codex-host/docs/upstream-comparison-20260926/native-update.md)、[协议 / Runtime](/Users/luo/Documents/github/codex-host/docs/upstream-comparison-20260926/protocol-runtime.md)、[Desktop / Renderer](/Users/luo/Documents/github/codex-host/docs/upstream-comparison-20260926/desktop-renderer.md)、[既有 Harness](/Users/luo/Documents/github/codex-host/docs/upstream-comparison-20260926/existing-harnesses.md)。分域报告的初始局部排序服从本页统一排序。
 - [独立复核](/Users/luo/Documents/github/codex-host/docs/upstream-comparison-20260926/review.md)、[研究工作记录](/Users/luo/Documents/github/codex-host/docs/upstream-comparison-20260926/workflow.md)。
 
+## 后续实施记录
+
+研究基线与建议保持为当时快照；实际实现、验证范围和评审结论分别见 [R1](../upstream-r1/RESULT.md)、[R2](../upstream-r2/RESULT.md)、[R3](../upstream-r3/RESULT.md)。本地分批提交记录见 [R3 执行计划](../upstream-r3/plan.md)。实现记录中的未验收边界仍然有效，不因代码提交而视为原生验收通过。
+
 ## 1. 比较结论
 
 双方共同基线为 `v0.7.0 / 7cc4db87`。fork 有 106 个独有提交，上游有 428 个独有提交，含 merge、文档、测试和已回退的尝试。上游本地仓库已通过远程 main/tag 核验，确为本次查询时的最新代码。最新发布说明为 [v0.10.1](https://github.com/BytePioneer-AI/codex-host/releases/tag/v0.10.1)；此前 [v0.9.0](https://github.com/BytePioneer-AI/codex-host/releases/tag/v0.9.0)、[v0.9.2](https://github.com/BytePioneer-AI/codex-host/releases/tag/v0.9.2)、[v0.10.0](https://github.com/BytePioneer-AI/codex-host/releases/tag/v0.10.0) 贡献了多数本轮高价值候选。
