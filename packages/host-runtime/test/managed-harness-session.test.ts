@@ -574,4 +574,49 @@ describe("ManagedHarnessSession", () => {
     expect(onFault).not.toHaveBeenCalled();
     await managed.close();
   });
+
+  it("retries a failed native close in the background until it succeeds", async () => {
+    const current = session();
+    const close = current.close.bind(current);
+    const attempts = vi
+      .spyOn(current, "close")
+      .mockRejectedValueOnce(new Error("process group is still alive"))
+      .mockImplementation(close);
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault,
+      closeRetryDelaysMs: [10, 10],
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+
+    await expect(managed.close()).resolves.toBeUndefined();
+    expect(attempts).toHaveBeenCalledTimes(2);
+    expect(onFault).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("retrying in 10 ms") }),
+    );
+    await expect(outputs.next()).resolves.toMatchObject({ done: true });
+  });
+
+  it("gives up after the last retry and reports the failure", async () => {
+    const current = session();
+    const attempts = vi
+      .spyOn(current, "close")
+      .mockRejectedValue(new Error("process group is still alive"));
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+      closeRetryDelaysMs: [10, 10],
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+    const closing = managed.close();
+    // Outputs end after the first attempt, not after every retry.
+    await expect(outputs.next()).resolves.toMatchObject({ done: true });
+    await expect(closing).rejects.toThrow("process group is still alive");
+    expect(attempts).toHaveBeenCalledTimes(3);
+  });
 });

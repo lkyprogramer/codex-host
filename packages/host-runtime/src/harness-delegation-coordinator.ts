@@ -1,3 +1,4 @@
+import { openWithin } from "./bounded-open.js";
 import { awaitWithSignal, isAbortError } from "./abortable-read.js";
 import { setTimeout as cancellableDelay } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -184,6 +185,7 @@ function validateStart(input: DelegationStartInput): void {
 export class HarnessDelegationCoordinator {
   readonly #adapters: Map<ExternalHarnessId, HarnessAdapter>;
   readonly #environment: NodeJS.ProcessEnv;
+  readonly #openTimeoutMs: number | undefined;
   readonly #externalRuntime: ExternalThreadRuntime;
   readonly #repository: ExternalThreadRepository;
   readonly #registerExternalThread: (input: {
@@ -250,9 +252,12 @@ export class HarnessDelegationCoordinator {
     listOfficial(input: ThreadListInput): Promise<DelegationThreadListResult>;
     officialThreadCwd(threadId: string): Promise<string | undefined>;
     activeOfficialParents(): string[];
+    /** Bounds opening a child Session; defaults to the Harness operation deadline. */
+    openTimeoutMs?: number;
   }) {
     this.#adapters = input.adapters;
     this.#environment = input.environment;
+    this.#openTimeoutMs = input.openTimeoutMs;
     this.#externalRuntime = input.externalRuntime;
     this.#repository = input.repository;
     this.#registerExternalThread = input.registerExternalThread;
@@ -409,14 +414,18 @@ export class HarnessDelegationCoordinator {
       createdHere = !created.reused;
       if (created.reused) return this.#existingResult(delegation);
       record = await this.#repository.addPendingHostTurn(record.hostThreadId, turnId);
-      const opened = await adapter.open({
-        kind: "create",
-        cwd: record.cwd,
-        environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
-        ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
-        ...(input.model ? { model: input.model } : {}),
-        ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
-      });
+      const opened = await openWithin(
+        adapter,
+        {
+          kind: "create",
+          cwd: record.cwd,
+          environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
+          ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
+        },
+        this.#openTimeoutMs,
+      );
       if (!opened.ok) throw new DelegationControlError("DELEGATION_FAILED", opened.error.message);
       const validated = await validateOpenedHarnessSession(record.harnessId, opened.value);
       if (!validated.ok) {

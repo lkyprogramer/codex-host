@@ -1,3 +1,4 @@
+import { openWithin } from "./bounded-open.js";
 import { DesktopRequestDispatcher } from "./desktop-request-dispatcher.js";
 import { AccountRateLimits } from "./codex-runtime/account-rate-limits.js";
 import { inspectHarnessAccounts } from "./harness-accounts.js";
@@ -237,6 +238,8 @@ export interface AppServerHostOptions {
   stockCodexPath: string;
   /** Overrides DEFAULT_SHUTDOWN_BUDGET_MS. */
   shutdownBudgetMs?: number;
+  /** Bounds opening a new Session; defaults to the Harness operation deadline. */
+  openTimeoutMs?: number;
   arguments: string[];
   defaultAgent: "codex" | "pi";
   environment?: NodeJS.ProcessEnv;
@@ -674,6 +677,7 @@ export class AppServerHost {
       listOfficial: (input) => this.#listDelegationThreads(input),
       officialThreadCwd: (threadId) => this.#readOfficialThreadCwd(threadId),
       activeOfficialParents: () => [...this.#activeOfficialTurns.keys()],
+      ...(options.openTimeoutMs !== undefined ? { openTimeoutMs: options.openTimeoutMs } : {}),
     });
     const unregisterDelegationApi = options.onDelegationApi?.({
       listHarnesses: () => this.#delegationCoordinator.listHarnesses(),
@@ -3302,17 +3306,22 @@ export class AppServerHost {
       return;
     }
 
-    const sessionResult = await adapter.open({
-      kind: "create",
-      cwd,
-      environment: {
-        ...(this.#options.environment ?? process.env),
-        [DELEGATION_THREAD_ID_ENV]: record.hostThreadId,
+    const sessionResult = await openWithin(
+      adapter,
+      {
+        kind: "create",
+        cwd,
+        environment: {
+          ...(this.#options.environment ?? process.env),
+          [DELEGATION_THREAD_ID_ENV]: record.hostThreadId,
+        },
+        ...(requestedModel ? { model: requestedModel } : {}),
+        ...(requestedThinkingOptionId ? { thinkingOptionId: requestedThinkingOptionId } : {}),
+        ...(requestedPermissionModeId ? { permissionModeId: requestedPermissionModeId } : {}),
       },
-      ...(requestedModel ? { model: requestedModel } : {}),
-      ...(requestedThinkingOptionId ? { thinkingOptionId: requestedThinkingOptionId } : {}),
-      ...(requestedPermissionModeId ? { permissionModeId: requestedPermissionModeId } : {}),
-    });
+      this.#options.openTimeoutMs,
+      (error) => this.#diagnose(error),
+    );
     if (!sessionResult.ok) {
       this.#routeObservationTracker.rejectCreate(request.id);
       await this.#repository.removeProvisional(record.hostThreadId).catch(() => undefined);

@@ -48,6 +48,13 @@ export const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
  */
 export const DEFAULT_RELEASE_TIMEOUT_MS = 5 * 60_000;
 
+/**
+ * Delays before retrying a native close that failed. Adapters keep what they
+ * could not release owned and retry it on the next close, so a transient
+ * failure (a process slow to exit) usually clears on a later attempt.
+ */
+export const DEFAULT_CLOSE_RETRY_DELAYS_MS: readonly number[] = [1_000, 5_000, 30_000];
+
 const SUSPEND_STATUSES = new Set(["suspended", "busy", "unknown", "releaseFailed", "unsupported"]);
 
 /**
@@ -131,6 +138,7 @@ export class ManagedHarnessSession {
   readonly #outputEndTimeoutMs: number;
   readonly #operationTimeoutMs: number;
   readonly #releaseTimeoutMs: number;
+  readonly #closeRetryDelaysMs: readonly number[];
   readonly #initialCapabilities: HarnessSessionCapabilities;
   readonly #requiresResourceLifecycle: boolean;
   #admissionClosed = false;
@@ -154,6 +162,7 @@ export class ManagedHarnessSession {
     outputEndTimeoutMs?: number;
     operationTimeoutMs?: number;
     releaseTimeoutMs?: number;
+    closeRetryDelaysMs?: readonly number[];
   }) {
     this.harnessId = input.session.harnessId;
     this.initialUsage = input.session.initialUsage;
@@ -167,6 +176,7 @@ export class ManagedHarnessSession {
     this.#outputEndTimeoutMs = input.outputEndTimeoutMs ?? 5_000;
     this.#operationTimeoutMs = input.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
     this.#releaseTimeoutMs = input.releaseTimeoutMs ?? DEFAULT_RELEASE_TIMEOUT_MS;
+    this.#closeRetryDelaysMs = input.closeRetryDelaysMs ?? DEFAULT_CLOSE_RETRY_DELAYS_MS;
     this.#deferredLive = input.session.executionReady === false;
     this.outputs = this.#channel.outputs;
     this.#attach(input.session);
@@ -269,22 +279,52 @@ export class ManagedHarnessSession {
   /**
    * Resolves once the native Session confirmed its release, however long that
    * takes: callers that must not start a second native process for the same
-   * Session wait on it. Callers with a budget bound their own wait.
+   * Session wait on it. Callers with a budget bound their own wait. A failed
+   * close is retried in the background on DEFAULT_CLOSE_RETRY_DELAYS_MS, each
+   * failure reported; the promise rejects only when every attempt failed.
+   * Outputs end after the first attempt, as before.
    */
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     this.#admissionClosed = true;
     this.#closePromise = this.#enqueue(async () => {
+      let failure: unknown;
       try {
         await this.#current.close();
+        return;
+      } catch (error) {
+        failure = error;
       } finally {
         this.#pumpCompletions.clear();
         this.#pendingPumpEnds.clear();
         this.#suspendedOutputs.clear();
         this.#channel.end();
       }
+      await this.#retryClose(failure);
     }, null);
     return this.#closePromise;
+  }
+
+  async #retryClose(failure: unknown): Promise<void> {
+    let last = failure;
+    for (const delay of this.#closeRetryDelaysMs) {
+      const message = last instanceof Error ? last.message : String(last);
+      this.#onFault(
+        new Error(`Closing the native Session failed; retrying in ${delay} ms: ${message}`, {
+          cause: last,
+        }),
+      );
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, delay).unref?.();
+      });
+      try {
+        await this.#current.close();
+        return;
+      } catch (error) {
+        last = error;
+      }
+    }
+    throw last instanceof Error ? last : new Error(String(last));
   }
 
   /** Internal Host lease for legacy destructive release hooks. It never wakes a suspended Session. */
