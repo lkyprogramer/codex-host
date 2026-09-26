@@ -262,12 +262,12 @@ spawnOwnedProcess(command, args, {
 
 | ID | 状态 | 实现 |
 | --- | --- | --- |
-| HC-1 | 已修 | `process-guard.ts`：`unhandledRejection` 只报告，Host 继续运行；`uncaughtException` 让已注册的 Host（含 remote listener 与 Aqua broker）有序关闭，并以失败码退出，最长等待 30 秒；`run()` 结束后若仍有泄漏的句柄，5 秒后退出 |
-| HC-2 | 已修 | `ManagedHarnessSession` 每个排队操作默认 120 秒期限，超时即判故障并释放队列；超时后才完成的 resume 会关闭它新开的原生 Session，而不是挂到已关闭的 Session 上；Host 退出时关闭 Session 与 Adapter 受 20 秒总预算约束，超出后由 anchor / Shim 回收剩余进程 |
+| HC-1 | 已修 | `process-guard.ts`：`unhandledRejection` 只报告，Host 继续运行；`uncaughtException` 让已注册的 Host（含 remote listener 与 Aqua broker）有序关闭，并以失败码退出，最长等待 30 秒；`run()` 结束后若仍有泄漏的句柄，5 秒后退出（仍有输出未写完时最多再等 6 个宽限期）。与计划的差异：`unhandledRejection` 不触发有序关闭，因为一个无人等待的失败 Promise 不会留下写了一半的状态，不值得为它关掉 Host 和官方代理；计划中“长期将插件移到独立进程”未做，留待阶段 E |
+| HC-2 | 已修 | `ManagedHarnessSession` 的排队操作都有期限：读取、命令、resume 默认 120 秒，挂起与 owned-job 停止默认 5 分钟。超时即判故障并释放队列；超时后才完成的 resume 会关闭它新开的原生 Session，而不是挂到已关闭的 Session 上。新建 Session 的 `adapter.open`（Desktop `thread/start`、委派启动）也限时 120 秒（`openWithin`），超时返回可重试的 `unavailable`，事后才打开的 Session 立即关闭。原生 close 失败时按 1 秒、5 秒、30 秒在后台重试并逐次报告，全部失败才拒绝；输出在第一次尝试后即结束，退役屏障一直等到重试有结果。Host 退出时，关闭 Session 与 Adapter 受 20 秒总预算约束，超出后由 anchor / Shim 回收剩余进程。第一版漏了新建时的 open 和 close 重试，后已补上 |
 | HC-3 | 已修 | `ExternalThreadRuntime.retire()`：故障的 Thread 在旧 Session 真正关闭前不会被恢复，同一原生会话不会同时存在两个进程 |
 | HC-4 | 已修 | 合同新增 `releaseFailed`（向后兼容的新增状态）：`unknown` 只表示“这次没有尝试释放”；Claude Code、Grok、OpenCode、Cursor、Kiro 释放失败时统一返回 `releaseFailed`，Host 每次都报告并按退避重试 |
 | HC-5 | 已修 | conformance 增加四个资源场景：中止的挂起不释放资源、活动 Turn 期间的挂起不释放资源、空闲挂起要么拒绝要么结束输出、关闭后的 Session 再次 close 正常且拒绝新 Turn、不挂起；计划中的“8 个资源场景”落地为这四项加上既有的 cleanup 与残留回读 |
-| AD-16 | 已修 | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次 |
+| AD-16 | 已修（门禁） | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次（Turn 结束后才到的 `interaction.closed` 视为合法）。cancel 场景原本就有。新增 `configurationTimeout` 场景：Adapter 夹具通过探针 `stallConfiguration` 让原生端不再响应配置写入，要求这次写入不挂住、不被报告为已生效，随后 Session 被判故障或结束输出。声明了实时配置写入却没有提供探针的 Adapter 记为 `notCovered`。目前所有 Adapter 都还没有提供探针，因为 Adapter 侧“配置写入超时后退役连接”属于阶段 C 的 AD-3 / AD-7；第一版漏了这个场景，后已补上 |
 | 关闭预算 | 说明 | 超出关闭预算后，Host 仍继续关闭 repository；尚未关完的 Session 如果之后才写入状态，这些最后的更新会丢失（只记诊断）。这是预算的代价：进程由 anchor / Shim 保证结束，状态以原生历史为准，下次恢复时会重新对齐 |
 | RS-1 | 已修 | Shim 每轮只读取所有进程的 pid / ppid / pgid / 启动时间，可执行文件路径只对 root 与自己拥有的进程读取；实测单轮从约 1.8ms 降到约 0.6ms（debug 构建） |
 
