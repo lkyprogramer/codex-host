@@ -84,7 +84,7 @@ dependencies = [
 
 [[package]]
 name = "codexhost-anchor"
-version = "0.7.0-local.13"
+version = "0.7.0-local.14"
 dependencies = [
  "libc",
  "libproc",
@@ -95,7 +95,7 @@ dependencies = [
 
 [[package]]
 name = "codexhost-gate-a-native"
-version = "0.7.0-local.13"
+version = "0.7.0-local.14"
 dependencies = [
  "codexhost-platform",
  "codexhost-shim",
@@ -103,7 +103,7 @@ dependencies = [
 
 [[package]]
 name = "codexhost-launcher"
-version = "0.7.0-local.13"
+version = "0.7.0-local.14"
 dependencies = [
  "codexhost-platform",
  "fs2",
@@ -117,7 +117,7 @@ dependencies = [
 
 [[package]]
 name = "codexhost-platform"
-version = "0.7.0-local.13"
+version = "0.7.0-local.14"
 dependencies = [
  "libc",
  "libproc",
@@ -133,7 +133,7 @@ dependencies = [
 
 [[package]]
 name = "codexhost-shim"
-version = "0.7.0-local.13"
+version = "0.7.0-local.14"
 dependencies = [
  "codexhost-platform",
  "fs2",
@@ -143,7 +143,7 @@ dependencies = [
 
 [[package]]
 name = "codexhost-updater"
-version = "0.7.0-local.13"
+version = "0.7.0-local.14"
 dependencies = [
  "codexhost-platform",
  "serde",
