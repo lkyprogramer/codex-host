@@ -168,6 +168,8 @@ export interface PiRpcSessionOptions {
   commandTimeoutMs?: number;
   cancelTimeoutMs?: number;
   closeTimeoutMs?: number;
+  /** Overrides MAX_FRAME_BYTES; tests use a small one. */
+  maxFrameBytes?: number;
   onFault?: (error: PiRpcFaultError) => void;
 }
 
@@ -233,6 +235,17 @@ interface ActiveTurn {
 }
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+/**
+ * One RPC frame (a full history can be one) is never larger than this; a
+ * stream that sends more without a newline is broken, not slow.
+ */
+const MAX_FRAME_BYTES = 128 * 1024 * 1024;
+/**
+ * Writes whose timeout leaves the native Session in an unknown state: was
+ * the Model switched, the branch taken? The connection is retired rather
+ * than reused. A read that times out is only refused.
+ */
+const RETIRING_COMMANDS = new Set(["set_model", "set_thinking_level", "clone"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -593,18 +606,24 @@ export class PiRpcSession {
         );
       }
     });
-    await Promise.race([
-      new Promise<void>((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      }),
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(
-          () => reject(new Error("Pi RPC start timed out")),
-          this.#options.commandTimeoutMs,
-        ),
-      ),
-    ]);
+    let startTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          child.once("spawn", resolve);
+          child.once("error", reject);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          startTimer = setTimeout(
+            () => reject(new Error("Pi RPC start timed out")),
+            this.#options.commandTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      // A timer that outlives a started process would keep the Host alive.
+      clearTimeout(startTimer);
+    }
     try {
       this.#state = parseSessionState(await this.#send("get_state", {}));
     } catch (error) {
@@ -935,6 +954,13 @@ export class PiRpcSession {
         );
       }
       newline = this.#buffer.indexOf(0x0a);
+    }
+    const maxFrameBytes = this.#options.maxFrameBytes ?? MAX_FRAME_BYTES;
+    if (this.#buffer.length > maxFrameBytes) {
+      this.#buffer = Buffer.alloc(0);
+      this.#fail(
+        new PiRpcFaultError("protocolError", `Pi RPC frame exceeds ${maxFrameBytes} bytes`),
+      );
     }
   }
 
@@ -1516,7 +1542,7 @@ export class PiRpcSession {
       if (this.#pending.get(id) !== pending) return;
       pending.timeout = null;
       const error = new Error(`Pi RPC '${pending.command}' command timed out`);
-      if (pending.command !== "prompt") {
+      if (pending.command !== "prompt" && !RETIRING_COMMANDS.has(pending.command)) {
         this.#pending.delete(id);
         pending.reject(error);
         return;

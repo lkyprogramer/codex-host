@@ -263,6 +263,18 @@ interface ActiveTurn {
 }
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+/**
+ * OMP sends larger payloads as rpc_chunk frames (see omp-protocol.ts), so a
+ * single line stays near 1 MiB; one far beyond that without a newline is a
+ * broken stream, not a slow one.
+ */
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+/**
+ * Writes whose timeout leaves the native Session in an unknown state: was
+ * the Model switched, the branch taken? The connection is retired rather
+ * than reused. A read that times out is only refused.
+ */
+const RETIRING_COMMANDS = new Set(["set_model", "set_thinking_level", "branch"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -1059,6 +1071,12 @@ export class OmpRpcSession {
       }
       newline = this.#buffer.indexOf(0x0a);
     }
+    if (this.#buffer.length > MAX_FRAME_BYTES) {
+      this.#buffer = Buffer.alloc(0);
+      this.#fail(
+        new OmpRpcFaultError("protocolError", `Omp RPC frame exceeds ${MAX_FRAME_BYTES} bytes`),
+      );
+    }
   }
 
   #handle(value: Record<string, unknown>): void {
@@ -1650,7 +1668,7 @@ export class OmpRpcSession {
       if (this.#pending.get(id) !== pending) return;
       pending.timeout = null;
       const error = new Error(`Omp RPC '${pending.command}' command timed out`);
-      if (pending.command !== "prompt") {
+      if (pending.command !== "prompt" && !RETIRING_COMMANDS.has(pending.command)) {
         this.#pending.delete(id);
         pending.reject(error);
         return;

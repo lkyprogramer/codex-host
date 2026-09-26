@@ -26,6 +26,8 @@ class FakeOmpProcess extends EventEmitter {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   readonly commands: Record<string, unknown>[] = [];
+  /** Commands the native side receives but never answers. */
+  readonly silent = new Set<string>();
   #buffer = "";
   #sessionId = "omp-session";
 
@@ -84,6 +86,7 @@ class FakeOmpProcess extends EventEmitter {
 
   #handle(command: Record<string, unknown>): void {
     this.commands.push(command);
+    if (typeof command.type === "string" && this.silent.has(command.type)) return;
     if (command.type === "extension_ui_response") {
       if (this.terminalMessageMode === "approval") {
         const message = {
@@ -293,6 +296,28 @@ describe("OMP RPC session", () => {
         },
       ),
     ).toMatchObject({ arguments: ["--mode", "rpc", "--fork", "/tmp/omp.jsonl"] });
+  });
+
+  it("retires the connection when a Model write never answers", async () => {
+    const process = new FakeOmpProcess();
+    process.silent.add("set_model");
+    const onFault = vi.fn();
+    const session = new OmpRpcSession(
+      { cwd: "/synthetic", commandTimeoutMs: 50, onFault },
+      { spawn: () => owned(process) },
+    );
+    try {
+      await session.start();
+      await expect(session.selectModel({ provider: "synthetic", id: "omp-model" })).rejects.toThrow(
+        "'set_model' command timed out",
+      );
+      expect(onFault).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "Omp RPC 'set_model' command timed out" }),
+      );
+      await expect(session.runTurn("after", () => undefined)).rejects.toThrow();
+    } finally {
+      await session.close();
+    }
   });
 
   it("starts through ready/negotiation and settles a streamed text turn on agent_end", async () => {

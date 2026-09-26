@@ -17,6 +17,8 @@ import {
 } from "../src/pi-rpc-session.js";
 
 type Scenario =
+  | "silent-set-model"
+  | "oversized-frame"
   | "final-only"
   | "reasoning"
   | "reasoning-multiple-blocks"
@@ -196,6 +198,11 @@ class FakePiRpcProcess extends EventEmitter {
     if (typeof value !== "object" || value === null || Array.isArray(value)) return;
     const command = value as Record<string, unknown>;
     if (typeof command.id !== "string" || typeof command.type !== "string") return;
+    if (command.type === "get_entries" && this.#scenario === "oversized-frame") {
+      // A frame that never ends.
+      this.stdout.write("x".repeat(4096));
+      return;
+    }
     if (command.type === "extension_ui_response") {
       if (
         (this.#scenario === "interaction" &&
@@ -332,6 +339,7 @@ class FakePiRpcProcess extends EventEmitter {
       });
       return;
     }
+    if (command.type === "set_model" && this.#scenario === "silent-set-model") return;
     if (command.type === "set_model") {
       if (typeof command.provider === "string" && typeof command.modelId === "string") {
         this.#provider = command.provider;
@@ -726,6 +734,7 @@ function session(
     commandTimeoutMs?: number;
     nativeCompactionDelayMs?: number;
     cancelTimeoutMs?: number;
+    maxFrameBytes?: number;
   } = {},
 ): PiRpcSession {
   const processAdapter: PiRpcProcessAdapter = {
@@ -739,6 +748,7 @@ function session(
       commandTimeoutMs: options.commandTimeoutMs ?? 2_000,
       cancelTimeoutMs: options.cancelTimeoutMs ?? 500,
       closeTimeoutMs: 500,
+      ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),
       onFault,
     },
     processAdapter,
@@ -1319,6 +1329,36 @@ describe("Pi RPC Turn aggregation", () => {
     } finally {
       await rpc.close();
       vi.useRealTimers();
+    }
+  });
+
+  it("retires the connection when a Model write never answers", async () => {
+    const onFault = vi.fn();
+    const rpc = session("silent-set-model", onFault, { commandTimeoutMs: 50 });
+    try {
+      await rpc.start();
+      await expect(rpc.selectModel({ provider: "family", id: "model" })).rejects.toThrow(
+        "'set_model' command timed out",
+      );
+      expect(onFault).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "Pi RPC 'set_model' command timed out" }),
+      );
+      // The native Model is unknown now: the connection is not reused.
+      await expect(rpc.runTurn("after", () => undefined)).rejects.toThrow("unavailable");
+    } finally {
+      await rpc.close();
+    }
+  });
+
+  it("faults a stream that sends a frame past the size bound", async () => {
+    const onFault = vi.fn();
+    const rpc = session("oversized-frame", onFault, { maxFrameBytes: 1024 });
+    try {
+      await rpc.start();
+      await expect(rpc.getEntries()).rejects.toThrow("frame exceeds 1024 bytes");
+      expect(onFault).toHaveBeenCalledWith(expect.objectContaining({ kind: "protocolError" }));
+    } finally {
+      await rpc.close();
     }
   });
 
