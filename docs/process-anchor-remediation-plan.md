@@ -340,14 +340,14 @@ spawnOwnedProcess(command, args, {
 | PL-9 | 已修（broker 部分） | broker 启动时，旧 descriptor 的 owner 只有在 pid 存活、并且其 socket 仍接受连接时才算存活。owner 在监听之后才发布 descriptor；pid 被无关进程复用、或 socket 文件还在却无人监听的陈旧 descriptor，不再挡住启动。descriptor 格式不变。关闭时，owner 先断开所有连接再停止监听；停止监听时 libuv 同步删除 socket 文件，此后另一个 broker 可能已经接管，所以 owner 只删除仍是自己 generation 的 descriptor（socket 也只在仍是自己绑定的 inode 时才删）。Windows 仍只看 pid。mapping-store 在 Windows 上同步调用 PowerShell 的那一半属于 Windows，未做 |
 | PL-11 | 已修 | 见 3.7 |
 | RS-2 | 已修 | 用一次 `renamex_np(RENAME_SWAP)` 原子交换新旧 app，任何时刻 app 路径都有一个完整版本。不支持交换的卷（exFAT、SMB，实测 exFAT 返回 ENOTSUP）退回两次 rename，只有这种卷上仍存在两次 rename 之间的窗口。交换后校验失败，就再换回去；换回也失败时，把唯一完好的旧版本改名为不会被清理的 `codexhost-previous-*.app`，并在错误里写明位置。旧版本保留到新版本 relaunch 就绪后才删除；relaunch 失败时保留旧版本，并在失败状态里写明位置。下次更新开始前，尽力清理 app 旁边上次留下的 `.codexhost-update-*` / `.codexhost-backup-*` / `.codexhost-rejected-*` 目录（不跟随符号链接；删不掉的只记录，不阻止更新）。更新器的诊断写入本次更新操作目录下的 `updater.log`（此前 stderr 被丢弃）。新版未就绪时不自动回滚：无法确认新进程已经退出，这时换回 bundle 风险更大 |
-| RS-5 | 已修（killpg）/ 接受（按 pid） | Shim 在 macOS 上用 `waitid(WEXITED \| WNOHANG \| WNOWAIT)` 观察 root 退出，但不回收；正常路径上直到整棵进程树结束、Shim 返回前才回收（出错返回时不回收，Shim 随即退出，由系统回收）。僵尸状态的 root 仍占着自己的 pid，也就是它所在进程组的 id，因此后续的 killpg 不会打到被复用的进程组。组里只剩僵尸 root 时，macOS 的 killpg 返回 EPERM（实测），与空组的 ESRCH 一样视为组已清空；第一版漏了这一点，会让 Shim 报错退出，评审发现后已修。按 pid 杀逃逸后代的部分，发信号前已经核对 pid 加启动时间，剩下的窗口只有“核对到 kill”之间的几微秒；macOS 按顺序分配 pid，要在这个窗口内复用，得走完一整圈 pid 空间，因此作为已知残留接受。Linux 本来就经 pidfd 逐个发信号，未改 |
+| RS-5 | 接受（撤回了保留僵尸 root 的做法） | 曾尝试让 Shim 在 macOS 上用 `waitid(WNOWAIT)` 把已退出的 root 保留为僵尸，直到整棵进程树结束才回收，以防进程组 id 在发信号期间被复用。实际引出两个回归，已整体撤回：其一，组里只剩僵尸 root 时 killpg 返回 EPERM，Shim 报错退出；其二，Mapping Store 在 POSIX 上用 `kill(pid, 0)` 判断锁的持有者是否存活，而它对僵尸也返回成功，于是 Desktop 启动时最先拉起、随后退出的那个 Host 仍被当作锁的持有者，主 app-server 的 Host 报 “Another codexhost process owns Mapping Store”，无法启动（本地 0.7.0-local.13 实测）。现在的处理：killpg 与按 pid 发信号前都基于刚取得的快照，并核对 pid 加启动时间，剩下的窗口只有几微秒；macOS 按顺序分配 pid，要在窗口内复用得走完一整圈 pid 空间，因此作为已知残留接受。保留的改进：进程组只剩僵尸（EPERM）时与空组（ESRCH）同样不算失败，与 anchor 一致 |
 | CLI 发现 | 已修 | 当前 Desktop 把 CLI 放在 `Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`（旁边的 `codex-package.json` 为 `layoutVersion: 1`），不再有 `Resources/codex`。发现逻辑优先用新布局，并要求 `layoutVersion` 为 1，其他版本直接拒绝，不去猜路径；旧布局仍可用。Shim 判断调用是否来自 Desktop helper 时，按新旧两种布局向上定位外层 Desktop bundle（旧布局上 3 级、新布局上 7 级）。第一版只按旧布局向上 3 级，在新布局下所有 helper 都识别失败，评审发现后已修 |
 | RS-6 | 已修 | 更新器在第一次看到 launcher 时记录它的启动时间，之后只在同一 pid、同一启动时间的进程仍在运行时继续等待；pid 被复用时立即判定原 launcher 已退出，不再等满 180 秒超时 |
 | PL-7（Windows）、PL-10、RS-3、RS-4 | 不做 | 仅涉及 Windows |
 
-实测：`waitid(WNOWAIT)` 在本机 macOS 上能读取退出状态且保留僵尸，可以重复读取；对仍在运行的子进程返回空记录；之后 `waitpid` 能正常回收，退出码一致。Shim 测试（lib 24 个、proxy 44 个）在本机通过，测试前后做了进程快照对比，真实的进程账本没有被改动。
+实测：macOS 上 `kill(pid, 0)` 对僵尸返回成功；只剩僵尸组长的进程组，killpg 返回 EPERM，回收后返回 ESRCH。Shim 测试（lib 24 个、proxy 44 个）在本机通过，测试前后做了进程快照对比，真实的进程账本没有被改动。
 
-阶段 D 评审（Opus 子代理）的发现已同批修复，见上表 PL-9、RS-2、RS-5 与 CLI 发现各行；另有 `waitid` 遇 EINTR 重试。评审中唯一未做的一项只涉及 Windows：更新器在 Windows 上等待 launcher 时，把一次读取进程快照失败当作 launcher 已退出。
+阶段 D 评审（Opus 子代理）的发现已同批修复，见上表 PL-9、RS-2、RS-5 与 CLI 发现各行。评审中唯一未做的一项只涉及 Windows：更新器在 Windows 上等待 launcher 时，把一次读取进程快照失败当作 launcher 已退出。
 
 ## 5. 修复顺序
 

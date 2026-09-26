@@ -18,9 +18,6 @@ mod linux_installation;
 #[allow(unsafe_code)]
 mod macos_exchange;
 mod macos_native_harness_broker;
-#[cfg(target_os = "macos")]
-#[allow(unsafe_code)]
-mod macos_wait;
 mod process;
 mod process_supervision;
 mod process_termination;

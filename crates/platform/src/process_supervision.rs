@@ -110,8 +110,8 @@ impl ChildProcessGuard {
 
 /// Signals a process group whose members were just observed. They may all
 /// exit before the signal: an empty group is ESRCH, and one left with only
-/// an unreaped leader (the Shim keeps its exited root unreaped) is EPERM on
-/// macOS. Neither is a failure; the caller counts live members.
+/// unreaped zombies is EPERM on macOS. Neither is a failure; the caller
+/// counts live members.
 #[cfg(target_os = "macos")]
 fn signal_macos_group(
     process_group: i32,
@@ -183,20 +183,6 @@ impl SupervisedChild {
 
     pub fn try_wait(&mut self) -> io::Result<Option<ExitStatus>> {
         self.child.try_wait()
-    }
-
-    /// Like [`SupervisedChild::try_wait`], but an exited child stays
-    /// unreaped until [`SupervisedChild::wait`]. Its pid, which is also the
-    /// id of the process group it leads, cannot be reused meanwhile, so a
-    /// group signal sent while the rest of the tree winds down never reaches
-    /// an unrelated process.
-    #[cfg(target_os = "macos")]
-    pub fn try_wait_retaining(&mut self) -> io::Result<Option<ExitStatus>> {
-        match crate::macos_wait::exit_status_retaining(self.child.id()) {
-            // Already reaped: the recorded status stands.
-            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => self.child.try_wait(),
-            result => result,
-        }
     }
 
     pub fn terminate(&mut self) -> Result<(), PlatformError> {
@@ -408,35 +394,27 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
-    fn a_group_left_with_only_its_unreaped_leader_is_not_a_signal_failure() {
+    fn a_group_left_with_only_zombies_is_not_a_signal_failure() {
+        use nix::errno::Errno;
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
         use std::os::unix::process::CommandExt;
 
+        // An exited, not yet reaped leader: the group holds only a zombie.
         let mut leader = Command::new("/usr/bin/true")
             .process_group(0)
             .spawn()
             .expect("spawn group leader");
+        let group = i32::try_from(leader.id()).expect("pid fits i32");
         let deadline = Instant::now() + Duration::from_secs(10);
-        while crate::macos_wait::exit_status_retaining(leader.id())
-            .expect("peek leader")
-            .is_none()
-        {
-            assert!(Instant::now() < deadline, "leader did not exit");
+        while killpg(Pid::from_raw(group), None) != Err(Errno::EPERM) {
+            assert!(Instant::now() < deadline, "leader did not become a zombie");
             std::thread::sleep(Duration::from_millis(10));
         }
-        let group = i32::try_from(leader.id()).expect("pid fits i32");
-        // The raw call reports EPERM for a group holding only a zombie.
-        assert_eq!(
-            nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(group),
-                nix::sys::signal::Signal::SIGTERM
-            ),
-            Err(nix::errno::Errno::EPERM)
-        );
-        super::signal_macos_group(group, nix::sys::signal::Signal::SIGTERM)
+        super::signal_macos_group(group, Signal::SIGTERM)
             .expect("zombie-only group is not a failure");
         leader.wait().expect("reap leader");
-        super::signal_macos_group(group, nix::sys::signal::Signal::SIGTERM)
-            .expect("empty group is not a failure");
+        super::signal_macos_group(group, Signal::SIGTERM).expect("empty group is not a failure");
     }
     use std::fs;
     use std::os::unix::fs::PermissionsExt;

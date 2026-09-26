@@ -181,18 +181,7 @@ fn wait_for_child(
     let mut last_process_tree_refresh = None;
     loop {
         if root_status.is_none() {
-            // On macOS the root stays unreaped until the tree is gone: its
-            // pid is the group id every group signal below targets, and a
-            // zombie keeps it from naming another group (Linux signals each
-            // group member through its own pidfd instead).
-            #[cfg(target_os = "macos")]
-            {
-                root_status = child.try_wait_retaining()?;
-            }
-            #[cfg(target_os = "linux")]
-            {
-                root_status = child.try_wait()?;
-            }
+            root_status = child.try_wait()?;
         }
         // `has_live_processes` takes a full system process snapshot so escaped descendants can
         // still be attributed to this launch. Preserve the responsive macOS observation needed
@@ -222,8 +211,6 @@ fn wait_for_child(
         if let Some(status) = root_status.as_ref()
             && !has_live_processes
         {
-            #[cfg(target_os = "macos")]
-            child.wait()?;
             return Ok(ChildOutcome {
                 status: *status,
                 forwarded_signal,
