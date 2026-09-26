@@ -545,17 +545,14 @@ describe("ManagedHarnessSession", () => {
 
   it("gives a native release its own, longer bound than interactive operations", async () => {
     const current = session();
-    lifecycle(current);
-    const release = current.resourceLifecycle;
-    if (!release) throw new Error("Missing idle lifecycle");
-    const suspend = release.suspend.bind(release);
     Object.defineProperty(current, "resourceLifecycle", {
       configurable: true,
       value: {
-        suspend: async (signal: { aborted: boolean }) => {
+        suspend: async () => {
           // Longer than the interactive deadline, as an anchor's grace can be.
           await new Promise((resolve) => setTimeout(resolve, 60));
-          return suspend(signal);
+          await current.close();
+          return { status: "suspended", scope: "native-session" };
         },
       },
     });

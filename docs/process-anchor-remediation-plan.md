@@ -267,7 +267,7 @@ spawnOwnedProcess(command, args, {
 | HC-3 | 已修 | `ExternalThreadRuntime.retire()`：故障的 Thread 在旧 Session 真正关闭前不会被恢复，同一原生会话不会同时存在两个进程 |
 | HC-4 | 已修 | 合同新增 `releaseFailed`（向后兼容的新增状态）：`unknown` 只表示“这次没有尝试释放”；Claude Code、Grok、OpenCode、Cursor、Kiro 释放失败时统一返回 `releaseFailed`，Host 每次都报告并按退避重试 |
 | HC-5 | 已修 | conformance 增加四个资源场景：中止的挂起不释放资源、活动 Turn 期间的挂起不释放资源、空闲挂起要么拒绝要么结束输出、关闭后的 Session 再次 close 正常且拒绝新 Turn、不挂起；计划中的“8 个资源场景”落地为这四项加上既有的 cleanup 与残留回读 |
-| AD-16 | 已修（门禁） | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次（Turn 结束后才到的 `interaction.closed` 视为合法）。cancel 场景原本就有。新增 `configurationTimeout` 场景：Adapter 夹具通过探针 `stallConfiguration` 让原生端不再响应配置写入，要求这次写入不挂住、不被报告为已生效，随后 Session 被判故障或结束输出。声明了实时配置写入却没有提供探针的 Adapter 记为 `notCovered`。目前所有 Adapter 都还没有提供探针，因为 Adapter 侧“配置写入超时后退役连接”属于阶段 C 的 AD-3 / AD-7；第一版漏了这个场景，后已补上 |
+| AD-16 | 已修（门禁） | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次（Turn 结束后才到的 `interaction.closed` 视为合法）。cancel 场景原本就有。新增 `configurationTimeout` 场景：Adapter 夹具通过探针 `stallConfiguration` 让原生端不再响应配置写入，要求这次写入不挂住、不被报告为已生效，随后 Session 被判故障或结束输出。声明了实时配置写入却没有提供探针的 Adapter 记为 `notCovered`。Grok 已在阶段 C 接入探针，其余 Adapter 仍记为 `notCovered`；第一版漏了这个场景，后已补上 |
 | 关闭预算 | 说明 | 超出关闭预算后，Host 仍继续关闭 repository；尚未关完的 Session 如果之后才写入状态，这些最后的更新会丢失（只记诊断）。这是预算的代价：进程由 anchor / Shim 保证结束，状态以原生历史为准，下次恢复时会重新对齐 |
 | RS-1 | 已修 | Shim 每轮只读取所有进程的 pid / ppid / pgid / 启动时间，可执行文件路径只对 root 与自己拥有的进程读取；实测单轮从约 1.8ms 降到约 0.6ms（debug 构建） |
 
@@ -304,7 +304,7 @@ spawnOwnedProcess(command, args, {
 | AD-2 | 已修 | Kiro transport 的 `cancel` 在取消通知送不出去时报错，Adapter 原有的失败分支得以生效；用内存 ACP 对端测试 |
 | AD-3 | 已修 | Grok 的 `session/set_model`、`session/set_mode` 限时（`commandTimeoutMs`，默认 30 秒），原生 Compact 限时 10 分钟，超时即让连接退役（Session 判故障并关闭）；interject 超时只拒绝本次调用，所在的 Turn 仍可取消；用真实 transport 加不响应的假 ACP 进程测试 |
 | AD-4 | 已修 | Antigravity 取消后清理失败时，先把 Turn 以失败结束，再发出 `session.faulted` 并结束输出，与 Turn 结束后清理失败的处理一致 |
-| AD-5 | 未修（待真机核对） | `num_turns` 究竟是整个对话累计的轮数，还是单次 `agy` 运行内的迭代次数，只能用真实 CLI 跑两轮对话来核对，而这会消耗额度，需要确认后再做；仓库夹具与本机的 `agy` 数据里都没有真实记录 |
+| AD-5 | 已修（已真机核对） | 用 `agy` 1.2.10 在同一 conversation 里跑了两轮：第一轮含一次工具调用和两段模型回复，`num_turns` 为 1；第二轮用 `--conversation` 续接，`num_turns` 为 2。可见它是整个对话累计的用户轮数，不是单次运行内的迭代次数。但失败的运行报告 `num_turns: 0`（实测账号资格检查失败时就是如此），fork 与 rollback 之后原生计数也不再和本地历史一一对应，仍会覆盖历史。原生 Turn key 与 checkpoint id 只由本 Adapter 的历史文件读回（fork、rollback 按它查找），`agy` 不读取，因此改为每个 Turn 生成一个 UUID；已有历史里的 `turn:N` 照原值读写，旧数据仍可用。新增回归测试：两轮都报告同一个 `num_turns` 时两个 Turn 都保留，且能在第一轮处 fork |
 | AD-6 | 已修 | Kiro 只接收当前 Session 的更新；load 回放期间只接收正在加载的那个 Session 的更新；新 Session 的 id 确定之前全部放行 |
 | AD-7 | 已修 | 统一为“只读命令超时只拒绝、配置写入超时则退役连接”：Pi / OMP 的 `set_model`、`set_thinking_level`，以及 Pi `clone`、OMP `branch` 超时时终止连接（原先只拒绝）；Grok 见 AD-3 |
 | AD-8 | 已修 | Cursor 只在 `session/load` 期间收集回放；两个 Turn 之间到达的更新不再保存；回放超过 10 万条时 load 失败，不再在 ACP 处理函数里抛异常 |
@@ -327,9 +327,9 @@ spawnOwnedProcess(command, args, {
   - 新建和 fork 的过程中也按 sessionId 过滤更新；
   - 其他 Session 的审批和用户输入请求不再交给当前 Turn。
 
-尚未完成：
-- AD-5，待真机核对；
-- Grok 尚未接入 AD-16 `configurationTimeout` 场景的探针。
+- Grok 接入 AD-16 `configurationTimeout` 探针：恢复后 Session 的 transport 夹具不再应答 `session/set_model`，超时后按 `GrokAcpTransport` 的契约拒绝写入并通知连接已退役（真实进程上的这一契约由 `acp-configuration-timeout.test.ts` 证明）；场景验证写入不被报告为已生效、Session 随后退役。夹具的残留判断改为每个 transport 至少关闭或释放过一次：故障已发起关闭后，`session.close()` 再次调用只是等待同一次关闭完成（transport 的关闭是共享且幂等的），不算残留。
+
+阶段 C 已全部完成。
 
 ## 5. 修复顺序
 
