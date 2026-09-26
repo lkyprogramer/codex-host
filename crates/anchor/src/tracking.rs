@@ -193,6 +193,17 @@ impl Tracker {
         }
     }
 
+    /// Escapees the user keeps. A reclaim must exclude them explicitly:
+    /// leaving them out of `recorded` is not enough while a recorded parent
+    /// still links to them.
+    pub fn kept(&self) -> HashSet<Identity> {
+        if self.release_escapees || self.dry_run {
+            HashSet::new()
+        } else {
+            self.escapees.clone()
+        }
+    }
+
     pub fn signal(&self, signal: Signal) {
         if !self.release_escapees {
             return;

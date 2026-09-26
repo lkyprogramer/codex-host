@@ -37,6 +37,10 @@ pub struct Record {
     pub leader: Identity,
     /// Every owned process as of the last write, the leader included.
     pub owned: Vec<Identity>,
+    /// Escapees the user keeps (CODEXHOST_PROCESS_ESCAPEES=keep): a reclaim
+    /// never ends them or anything below them, even when a recorded parent
+    /// still links to them.
+    pub kept: Vec<Identity>,
 }
 
 /// What a reader can tell about a file it found in the directory.
@@ -60,6 +64,7 @@ impl Record {
             "anchor": identity(&self.anchor),
             "leader": identity(&self.leader),
             "owned": self.owned.iter().map(identity).collect::<Vec<_>>(),
+            "kept": self.kept.iter().map(identity).collect::<Vec<_>>(),
         })
     }
 
@@ -97,6 +102,12 @@ impl Record {
                 .iter()
                 .map(identity)
                 .collect::<Option<_>>()?,
+            kept: value
+                .get("kept")?
+                .as_array()?
+                .iter()
+                .map(identity)
+                .collect::<Option<_>>()?,
         })
     }
 }
@@ -120,6 +131,7 @@ impl Ledger {
                 anchor,
                 leader,
                 owned: vec![leader],
+                kept: Vec::new(),
             },
             dirty: true,
             last_write: Instant::now(),
@@ -128,9 +140,19 @@ impl Ledger {
         Ok(ledger)
     }
 
-    /// Follows the owned set; writes when it changed and the last write is
-    /// old enough, or later through `flush_if_due`.
-    pub fn record_owned(&mut self, owned: &HashSet<Identity>) -> Result<(), String> {
+    /// Follows the owned and kept sets; writes when they changed and the
+    /// last write is old enough, or later through `flush_if_due`.
+    pub fn record_owned(
+        &mut self,
+        owned: &HashSet<Identity>,
+        kept: &HashSet<Identity>,
+    ) -> Result<(), String> {
+        let mut kept: Vec<Identity> = kept.iter().copied().collect();
+        kept.sort_by_key(|identity| (identity.pid, identity.instance));
+        if kept != self.record.kept {
+            self.record.kept = kept;
+            self.dirty = true;
+        }
         let mut owned: Vec<Identity> = owned.iter().copied().collect();
         // The leader stays recorded until the group is released: it is the
         // root its unrecorded descendants are found from.
@@ -303,6 +325,10 @@ mod tests {
                     instance: u64::MAX,
                 },
             ],
+            kept: vec![Identity {
+                pid: 10,
+                instance: 100,
+            }],
         }
     }
 

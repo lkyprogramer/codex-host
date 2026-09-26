@@ -137,7 +137,11 @@ fn stale_records(directory: &std::path::Path, boot: &str, dry_run: bool) -> Vec<
 fn targets(record: &Record, table: &[Entry]) -> HashSet<Identity> {
     let recorded = Boundary::new(record.anchor.pid, record.leader, table);
     let me = Boundary::new(std::process::id() as i32, record.leader, table);
-    let admits = |entry: &Entry| recorded.admits(entry) && me.admits(entry);
+    // A kept escapee is never a target, and nothing is found through it.
+    let kept: HashSet<Identity> = record.kept.iter().copied().collect();
+    let admits = |entry: &Entry| {
+        recorded.admits(entry) && me.admits(entry) && !kept.contains(&entry.identity())
+    };
     let mut roots: HashSet<Identity> = record.owned.iter().copied().collect();
     roots.insert(record.leader);
     let owned = process_table::descendants(table, &roots, admits);
@@ -207,6 +211,7 @@ mod tests {
             },
             leader,
             owned: vec![leader, member],
+            kept: Vec::new(),
         };
         let table = [
             // The recorded member still runs and forked once.
@@ -227,5 +232,64 @@ mod tests {
                 }
             ])
         );
+    }
+
+    #[test]
+    fn a_kept_escapee_and_its_children_survive_a_reclaim() {
+        let leader = Identity {
+            pid: 600,
+            instance: 600,
+        };
+        let kept = Identity {
+            pid: 610,
+            instance: 610,
+        };
+        let record = Record {
+            boot: "boot".into(),
+            anchor: Identity {
+                pid: 500,
+                instance: 500,
+            },
+            leader,
+            owned: vec![leader],
+            kept: vec![kept],
+        };
+        let table = [
+            // The leader outlived its anchor (macOS has no parent-death
+            // signal) and still parents the escapee the user keeps.
+            entry(600, 1, 600),
+            entry(610, 600, 610),
+            entry(611, 610, 610),
+            entry(620, 600, 600),
+        ];
+        assert_eq!(
+            targets(&record, &table),
+            HashSet::from([
+                leader,
+                Identity {
+                    pid: 620,
+                    instance: 620
+                }
+            ])
+        );
+    }
+
+    #[test]
+    fn records_of_another_version_stay_and_other_boots_go() {
+        let directory =
+            std::env::temp_dir().join(format!("codexhost-reclaim-records-{}", std::process::id()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let newer = directory.join("1-1.json");
+        let stale_boot = directory.join("2-2.json");
+        let garbage = directory.join("3-3.json");
+        std::fs::write(&newer, r#"{"version":3,"boot":"this boot"}"#).unwrap();
+        std::fs::write(&stale_boot, r#"{"version":2,"boot":"an earlier boot"}"#).unwrap();
+        std::fs::write(&garbage, "not a record").unwrap();
+
+        assert!(stale_records(&directory, "this boot", false).is_empty());
+        // A newer anchor may still be using what this reader cannot parse.
+        assert!(newer.exists() && garbage.exists());
+        assert!(!stale_boot.exists());
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

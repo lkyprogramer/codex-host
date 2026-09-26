@@ -27,9 +27,11 @@ const CONTROL_FD: i32 = 3;
 const DEFAULT_GRACE: Duration = Duration::from_secs(2);
 /// `1`: track and report escapees but never signal them or write a ledger.
 const DRY_RUN_ENV: &str = "CODEXHOST_PROCESS_ANCHOR_DRY_RUN";
-/// `keep`: processes that left the Harness group (a tmux server, gpg-agent,
-/// an ssh ControlMaster, a build daemon) outlive the Harness instead of
-/// ending with it. The group itself, and on Linux a pid namespace, still end.
+/// `keep`: on macOS, processes that left the Harness group (a tmux server,
+/// gpg-agent, an ssh ControlMaster, a build daemon) outlive the Harness
+/// instead of ending with it, and a reclaim leaves them alone. The group
+/// itself still ends. On Linux such daemons are adopted by the subreaper
+/// anchor, or live in its pid namespace, and end with it regardless.
 const ESCAPEES_ENV: &str = "CODEXHOST_PROCESS_ESCAPEES";
 /// A KILL is never followed by a shorter wait than this.
 const MIN_KILL_WAIT: Duration = Duration::from_millis(500);
@@ -345,8 +347,9 @@ impl Anchor {
         let identity =
             |pid: i32| process_table::instance(pid).map(|instance| Identity { pid, instance });
         // A leader that already exited cannot be identified, and without its
-        // instance there is no boundary to own escapees by. Its group is
-        // still reclaimed through the pinned group id, as always.
+        // instance there is no boundary to own escapees by. The anchor still
+        // ends its group through the pinned group id before it exits; only
+        // the record for a later reclaim is skipped.
         let Some(anchor_identity) = identity(anchor) else {
             // Its own identity is always readable; failing here means the
             // platform layout changed, and nothing below would work either.
@@ -386,10 +389,11 @@ impl Anchor {
         let failure = match tracker.refresh() {
             Ok(report) => {
                 let recorded = tracker.recorded();
+                let kept = tracker.kept();
                 let failure = self
                     .ledger
                     .as_mut()
-                    .and_then(|ledger| ledger.record_owned(&recorded).err());
+                    .and_then(|ledger| ledger.record_owned(&recorded, &kept).err());
                 if let Some(report) = report
                     && self.dry_run
                 {

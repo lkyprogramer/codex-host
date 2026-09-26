@@ -590,8 +590,15 @@ fn a_dry_run_reports_escapees_and_never_signals_them() {
     anchor.terminate(100);
     // A dry run changes nothing about release: the group ends and the
     // anchor exits without waiting for an escapee it would not signal.
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        if anchor.message()["type"] == "released" {
+        assert!(Instant::now() < deadline, "a dry run held the group open");
+        let message = anchor.message();
+        assert_ne!(
+            message["type"], "unconfirmed",
+            "a dry run waited for its escapee"
+        );
+        if message["type"] == "released" {
             break;
         }
     }
@@ -665,9 +672,8 @@ fn kept_escapees_outlive_the_group_and_leave_the_record() {
     );
     anchor.expect("ready");
     let escaped_pid = read_pid(&escaped);
-    // While it was still a group member it was recorded; once it leaves the
-    // group, the next scan and throttled write drop it from the record.
-    let recorded = || {
+    // Recorded as kept, so a reclaim leaves it alone, and not as owned.
+    let listed = |field: &str| {
         std::fs::read_dir(ledger_directory())
             .unwrap()
             .flatten()
@@ -675,13 +681,12 @@ fn kept_escapees_outlive_the_group_and_leave_the_record() {
                 serde_json::from_str::<Value>(&std::fs::read_to_string(entry.path()).ok()?).ok()
             })
             .any(|record| {
-                record["owned"]
+                record[field]
                     .as_array()
-                    .is_some_and(|owned| owned.iter().any(|e| e["pid"] == escaped_pid))
+                    .is_some_and(|list| list.iter().any(|e| e["pid"] == escaped_pid))
             })
     };
-    std::thread::sleep(Duration::from_millis(1_500));
-    wait_until(|| !recorded());
+    wait_until(|| listed("kept") && !listed("owned"));
     anchor.terminate(100);
     anchor.expect("exit");
     anchor.expect("released");
