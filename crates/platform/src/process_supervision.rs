@@ -177,6 +177,20 @@ impl SupervisedChild {
         self.child.try_wait()
     }
 
+    /// Like [`SupervisedChild::try_wait`], but an exited child stays
+    /// unreaped until [`SupervisedChild::wait`]. Its pid, which is also the
+    /// id of the process group it leads, cannot be reused meanwhile, so a
+    /// group signal sent while the rest of the tree winds down never reaches
+    /// an unrelated process.
+    #[cfg(target_os = "macos")]
+    pub fn try_wait_retaining(&mut self) -> io::Result<Option<ExitStatus>> {
+        match crate::macos_wait::exit_status_retaining(self.child.id()) {
+            // Already reaped: the recorded status stands.
+            Err(error) if error.raw_os_error() == Some(libc::ECHILD) => self.child.try_wait(),
+            result => result,
+        }
+    }
+
     pub fn terminate(&mut self) -> Result<(), PlatformError> {
         #[cfg(target_os = "windows")]
         if let Some(guard) = &self.guard {
