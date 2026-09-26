@@ -218,9 +218,7 @@ describe("Empirical Adversarial Challenges: Fork & Rollback", () => {
         const cp1 = parentSnap.value.turns[0]?.checkpoint;
         const cp2 = parentSnap.value.turns[1]?.checkpoint;
         const cp3 = parentSnap.value.turns[2]?.checkpoint;
-        expect(cp1?.checkpointId).toBe("turn:1");
-        expect(cp2?.checkpointId).toBe("turn:2");
-        expect(cp3?.checkpointId).toBe("turn:3");
+        expect(new Set([cp1?.checkpointId, cp2?.checkpointId, cp3?.checkpointId]).size).toBe(3);
         if (!cp1 || !cp2 || !cp3) return;
 
         // 1A. Fork at First Turn (checkpoint turn:1)

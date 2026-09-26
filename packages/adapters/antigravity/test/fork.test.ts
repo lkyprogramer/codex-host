@@ -245,7 +245,9 @@ describe("Antigravity Fork Session Branching", () => {
       const turn1Checkpoint = parentSnapshot.value.turns[0]?.checkpoint;
       expect(turn1Checkpoint).toBeDefined();
       if (!turn1Checkpoint) return;
-      expect(turn1Checkpoint.checkpointId).toBe("turn:1");
+      expect(turn1Checkpoint.checkpointId).not.toBe(
+        parentSnapshot.value.turns[1]?.checkpoint?.checkpointId,
+      );
 
       const parentRef = parentSnapshot.value.state?.nativeRef;
       expect(parentRef).toBeDefined();
@@ -288,6 +290,84 @@ describe("Antigravity Fork Session Branching", () => {
 
       await forkedSession.close();
       await parentSession.close();
+    } finally {
+      await adapter.close();
+      await cleanup();
+      await rm(dataDir, { recursive: true, force: true });
+    }
+  });
+
+  it("keeps every Turn when the CLI reports the same num_turns twice", async () => {
+    const run = (response: string) => [
+      JSON.stringify({ event: "init", init: {}, conversation_id: "conv-repeat" }),
+      JSON.stringify({
+        event: "result",
+        result: { conversation_id: "conv-repeat", status: "SUCCESS", num_turns: 1, response },
+      }),
+    ];
+    const { command, cwd, cleanup } = await fakeMultiTurnAgy([run("A1"), run("A2")]);
+    const dataDir = await mkdtemp(path.join(os.tmpdir(), "codexhost-agy-repeat-data-"));
+    const adapter = new AntigravityAdapter({
+      command,
+      environment: { ...process.env, CODEXHOST_DATA_DIR: dataDir },
+    });
+    try {
+      const opened = await adapter.open({
+        kind: "create",
+        cwd,
+        environment: { CODEXHOST_DATA_DIR: dataDir, CODEXHOST_THREAD_ID: "thread-repeat" },
+      });
+      expect(opened.ok).toBe(true);
+      if (!opened.ok) return;
+      const session = opened.value;
+      const iterator = session.outputs[Symbol.asyncIterator]();
+      for (const text of ["question 1", "question 2"]) {
+        const started = await session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse(`turn-${text}`),
+          input: [{ type: "text", text }],
+        });
+        expect(started.ok).toBe(true);
+        for (;;) {
+          const next = await iterator.next();
+          if (
+            next.done ||
+            (next.value.kind === "event" && next.value.event.type === "turn.completed")
+          )
+            break;
+        }
+      }
+
+      const snapshot = await session.readSnapshot();
+      expect(snapshot.ok).toBe(true);
+      if (!snapshot.ok) return;
+      const turns = snapshot.value.turns;
+      expect(turns.map((turn) => turn.input)).toEqual([
+        [{ type: "text", text: "question 1" }],
+        [{ type: "text", text: "question 2" }],
+      ]);
+      const first = turns[0]?.checkpoint;
+      expect(first).toBeDefined();
+      if (!first) return;
+      expect(first.checkpointId).not.toBe(turns[1]?.checkpoint?.checkpointId);
+
+      const parentRef = snapshot.value.state?.nativeRef;
+      if (!parentRef) throw new Error("missing parent ref");
+      const forked = await adapter.open({
+        kind: "fork",
+        cwd,
+        sourceRef: parentRef,
+        checkpoint: first,
+        environment: { CODEXHOST_DATA_DIR: dataDir, CODEXHOST_THREAD_ID: "thread-repeat-fork" },
+      });
+      expect(forked.ok).toBe(true);
+      if (!forked.ok) return;
+      const forkedSnapshot = await forked.value.readSnapshot();
+      expect(forkedSnapshot.ok && forkedSnapshot.value.turns.map((turn) => turn.input)).toEqual([
+        [{ type: "text", text: "question 1" }],
+      ]);
+      await forked.value.close();
+      await session.close();
     } finally {
       await adapter.close();
       await cleanup();

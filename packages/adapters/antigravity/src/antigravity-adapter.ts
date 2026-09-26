@@ -987,10 +987,12 @@ class AntigravitySession implements HarnessSession {
     if (event.result.response) {
       this.#appendOrSyncAgentText(active, event.result.response, false);
     }
-    const safeTurnId =
-      event.result.num_turns !== undefined && event.result.num_turns !== null
-        ? `turn:${event.result.num_turns}`
-        : `turn:${this.#history.snapshot().length + 1}`;
+    // The CLI names no Turn. `num_turns` counts the conversation's user
+    // Turns (agy 1.2.10), but a failed run reports 0 and a fork or rollback
+    // leaves it out of step with this history, so keying by it can overwrite
+    // an earlier Turn. Each Turn gets its own identity; only this adapter's
+    // history reads it back.
+    const safeTurnId = `turn:${randomUUID()}`;
     const safeSessionId = convId || this.#nativeRef?.nativeSessionId || "unknown-session";
 
     const nativeTurnRef = nativeTurnRefSchema.parse({
