@@ -1375,15 +1375,20 @@ class AntigravitySession implements HarnessSession {
     try {
       await this.#stopProcess(active);
     } catch (error) {
-      this.#closed = true;
-      return {
-        ok: false,
-        error: {
-          code: "nativeFailure",
-          message: `Antigravity cancellation cleanup failed: ${errorMessage(error)}`,
-          retryable: false,
-        },
+      // The native process may still run, so this Session cannot continue:
+      // end its Turn, fault it and end its outputs, as a failed cleanup after
+      // a Turn does, instead of leaving the Host waiting on a closed Session.
+      const failure = {
+        code: "nativeFailure" as const,
+        message: `Antigravity cancellation cleanup failed: ${errorMessage(error)}`,
+        retryable: false,
       };
+      this.#closed = true;
+      this.#completeTurn(active, { status: "failed", error: failure });
+      this.#event({ type: "session.faulted", error: failure });
+      this.#channel.end();
+      this.#onClosed();
+      return { ok: false, error: failure };
     }
     return { ok: true, value: { cancellationRequested: true } };
   }
