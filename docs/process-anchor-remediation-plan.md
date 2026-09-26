@@ -315,6 +315,22 @@ spawnOwnedProcess(command, args, {
 | HC-10 | 已修 | `ManagedHarnessSession` 显式 `implements HarnessSession`，合同里的可选能力允许读出 `undefined`；故障按原因报告（超时 `unavailable`，非法或未结束的挂起 `protocolError`，挂起期间的活动或恢复不兼容 `invalidState`，其余 `nativeFailure`）；恢复时的能力比较改为结构化比较 |
 | HC-11 | 已修 | `turn.cancel` 不再进入 `ManagedHarnessSession` 的操作队列，直接交给当前的原生 Session |
 
+阶段 C 评审（Opus 子代理）发现的问题已同批修复：
+- Grok：
+  - 关闭时的 `session/close` 原本没有期限，原生端失联会导致进程泄漏；现已加期限，已退役的连接直接跳过这一步；
+  - 超时退役时，transport 自己立即开始关闭；
+  - 配置写入改用独立期限；
+  - 结果未知的 interject 不可重试；
+  - 取消失败后可以再次发出；
+  - 配置写入导致 Session 故障时，返回不可重试的 `processExited`。
+- Kiro：
+  - 新建和 fork 的过程中也按 sessionId 过滤更新；
+  - 其他 Session 的审批和用户输入请求不再交给当前 Turn。
+
+尚未完成：
+- AD-5，待真机核对；
+- Grok 尚未接入 AD-16 `configurationTimeout` 场景的探针。
+
 ## 5. 修复顺序
 
 | 阶段 | 内容 | 覆盖条目 |
