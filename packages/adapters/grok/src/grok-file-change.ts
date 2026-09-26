@@ -29,7 +29,7 @@ function displayPath(nativePath: string, cwd: string): { path: string; absolute:
   const relative = path.relative(resolvedCwd, resolvedPath);
   const inside = relative.length > 0 && relative !== ".." && !relative.startsWith(`..${path.sep}`);
   const selected = inside ? relative : resolvedPath;
-  const normalized = selected.replaceAll("\\", "/");
+  const normalized = process.platform === "win32" ? selected.replaceAll("\\", "/") : selected;
   if (normalized.length === 0 || normalized === ".") return null;
   return { path: normalized, absolute: !inside };
 }

@@ -45,10 +45,22 @@ function error(code: HarnessError["code"], message: string, retryable: boolean):
 }
 
 function comparableTurn(turn: HostTurnSnapshot): unknown {
+  const itemPositions = new Map(turn.items.map(({ item }, index) => [item.itemId, index]));
   return {
     input: turn.input,
     items: turn.items.map(({ item, outcome }) => ({
-      item: { ...item, itemId: undefined },
+      item: {
+        ...item,
+        itemId: undefined,
+        ...(item.type === "fileChange" && item.sourceItemIds
+          ? {
+              sourceItemIds: item.sourceItemIds.map((sourceId) => {
+                const position = itemPositions.get(sourceId);
+                return position === undefined ? sourceId : `item-${position}`;
+              }),
+            }
+          : {}),
+      },
       outcome,
     })),
     outcome: turn.outcome,
@@ -87,7 +99,7 @@ async function readSnapshot(
     };
   }
   try {
-    return { ok: true, value: mapClaudeSnapshot(messages, sessionId) };
+    return { ok: true, value: mapClaudeSnapshot(messages, sessionId, cwd) };
   } catch {
     return {
       ok: false,

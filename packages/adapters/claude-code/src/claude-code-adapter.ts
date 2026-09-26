@@ -729,7 +729,7 @@ class ClaudeHarnessSession implements HarnessSession {
       try {
         return {
           ok: true,
-          value: { ...mapClaudeSnapshot(messages, this.#sessionId), state: this.#state },
+          value: { ...mapClaudeSnapshot(messages, this.#sessionId, this.#cwd), state: this.#state },
         };
       } catch {
         return {

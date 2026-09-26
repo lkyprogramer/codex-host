@@ -21,6 +21,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import { encodePiModelRef, type PiNativeModelRef } from "./pi-model-catalog.js";
+import { nativePatchFileChange } from "./pi-file-change.js";
 
 export interface PiSessionHistory {
   entries: JsonObject[];
@@ -30,6 +31,7 @@ export interface PiSessionHistory {
 export interface PiHistoryState {
   sessionId: string;
   model: PiNativeModelRef | null;
+  cwd?: string;
 }
 
 interface PiEntry extends JsonObject {
@@ -159,7 +161,11 @@ function toolOutput(value: unknown): HostToolOutput | undefined {
   return text.length > 0 ? { content: [{ type: "text", text }] } : undefined;
 }
 
-function snapshotItems(entries: PiEntry[], outcome: HistoricalTurnOutcome): HostItemSnapshot[] {
+function snapshotItems(
+  entries: PiEntry[],
+  outcome: HistoricalTurnOutcome,
+  cwd?: string,
+): HostItemSnapshot[] {
   const snapshots: HostItemSnapshot[] = [];
   const toolCalls = new Map<
     string,
@@ -245,6 +251,20 @@ function snapshotItems(entries: PiEntry[], outcome: HistoricalTurnOutcome): Host
             },
           },
     });
+    if (toolSucceeded && cwd) {
+      const changes = nativePatchFileChange(call.name, nativeMessage, cwd);
+      if (changes) {
+        snapshots.push({
+          item: {
+            type: "fileChange",
+            itemId: itemId(entry.id, "file-change", 0),
+            changes,
+            sourceItemIds: [item.itemId],
+          },
+          outcome: { status: "succeeded" },
+        });
+      }
+    }
   }
   return snapshots;
 }
@@ -297,7 +317,7 @@ export function mapPiSnapshot(
       nativeTurnRef,
       checkpoint,
       input: [{ type: "text", text: userText }],
-      items: snapshotItems(entries, outcome),
+      items: snapshotItems(entries, outcome, state.cwd),
       outcome,
       ...(effectiveModel ? { model: encodePiModelRef(effectiveModel) } : {}),
     });

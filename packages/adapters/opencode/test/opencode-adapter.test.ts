@@ -1989,6 +1989,82 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
+  it("covers only verified same-file previews in live and restored partial native Diffs", async () => {
+    const { adapter, session, transport } = await openFixture();
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await session.execute(turn("turn-partial-file-diff"));
+    await nextEvent(iterator);
+    const promptID = transport.promptCalls.at(-1)?.messageID;
+    if (!promptID) throw new Error("OpenCode prompt has no Message ID");
+    transport.emit({
+      id: "assistant-partial-file-diff",
+      type: "message.updated",
+      properties: {
+        sessionID: "session-1",
+        info: assistantMessage("assistant-live", promptID).info,
+      },
+    });
+    const tools: Part[] = ["a.txt", "b.txt"].map((file, index) => ({
+      id: `tool-${index}`,
+      sessionID: "session-1",
+      messageID: "assistant-live",
+      type: "tool",
+      callID: `call-${index}`,
+      tool: "edit",
+      state: {
+        status: "completed",
+        input: { path: file, old_string: "old\n", new_string: "preview\n" },
+        output: "",
+        title: `Edit ${file}`,
+        metadata: {},
+        time: { start: 1, end: 2 },
+      },
+    }));
+    for (const tool of tools) {
+      transport.emit({
+        id: `event-${tool.id}`,
+        type: "message.part.updated",
+        properties: { sessionID: "session-1", part: tool, time: 2 },
+      });
+      expect(await nextEvent(iterator)).toMatchObject({
+        type: "item.started",
+        item: { type: "toolExecution" },
+      });
+      expect(await nextEvent(iterator)).toMatchObject({ type: "item.completed" });
+    }
+    transport.diffs.set(promptID, [
+      {
+        file: "a.txt",
+        patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+native\n",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+      },
+    ]);
+    appendTerminal(transport, tools);
+    await completeAfterBusy(transport);
+    const started = await nextEvent(iterator);
+    expect(started).toMatchObject({
+      type: "item.started",
+      item: {
+        type: "fileChange",
+        changes: [{ path: "/synthetic/a.txt", coveredToolItemIds: ["tool-0"] }],
+      },
+    });
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    const restored = await session.readSnapshot();
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) throw new Error("Missing restored snapshot");
+    expect(
+      restored.value.turns[0]?.items.find(({ item }) => item.type === "fileChange")?.item,
+    ).toMatchObject({
+      changes: [{ coveredToolItemIds: ["tool-0"] }],
+    });
+    await session.close();
+    await adapter.close();
+  });
+
   it("cancels an active Turn and reports the native aborted terminal", async () => {
     const { adapter, session, transport } = await openFixture();
     const iterator = session.outputs[Symbol.asyncIterator]();

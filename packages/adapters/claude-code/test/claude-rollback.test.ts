@@ -23,7 +23,15 @@ afterEach(async () => {
   for (const cleanup of cleanups.splice(0).reverse()) await cleanup();
 });
 
-function messages(sessionId: string, text: string) {
+interface NativeMessage {
+  type: "user" | "assistant";
+  uuid: string;
+  session_id: string;
+  message: { role: "user" | "assistant"; content: unknown };
+  toolUseResult?: unknown;
+}
+
+function messages(sessionId: string, text: string): NativeMessage[] {
   return [
     {
       type: "user",
@@ -49,7 +57,7 @@ async function fixture(turns = 1) {
     nativeSessionId: randomUUID(),
     formatVersion: 1,
   });
-  const histories = new Map([
+  const histories = new Map<string, NativeMessage[]>([
     [
       sourceRef.nativeSessionId,
       Array.from({ length: turns }, (_, i) =>
@@ -265,6 +273,78 @@ describe("Claude last-Turn rollback", () => {
     });
     expect(f.histories.get(f.sourceRef.nativeSessionId)).toEqual(before);
     expect(f.dependencies.forkSession).toHaveBeenCalledOnce();
+  });
+
+  it("compares file-change provenance by retained Tool position after native Fork rekeys IDs", async () => {
+    const f = await fixture(2);
+    const original = f.histories.get(f.sourceRef.nativeSessionId);
+    if (!original || original.length !== 4) throw new Error("Missing two-Turn Claude fixture");
+    f.histories.set(f.sourceRef.nativeSessionId, [
+      original[0] as NativeMessage,
+      {
+        type: "assistant",
+        uuid: randomUUID(),
+        session_id: f.sourceRef.nativeSessionId,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "edit-1", name: "Edit", input: { file_path: "sample.txt" } },
+          ],
+        },
+      },
+      {
+        type: "user",
+        uuid: randomUUID(),
+        session_id: f.sourceRef.nativeSessionId,
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "edit-1", content: "edited" }],
+        },
+        toolUseResult: {
+          filePath: path.join(f.directory, "sample.txt"),
+          structuredPatch: [
+            { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-old", "+new"] },
+          ],
+        },
+      },
+      ...original.slice(1),
+    ]);
+    const replacement = await unwrap(
+      f.adapter().open({
+        kind: "rollbackLastTurn",
+        cwd: f.directory,
+        sourceRef: f.sourceRef,
+        model,
+      }),
+    );
+    const source = await unwrap(
+      f.adapter().open({ kind: "resume", cwd: f.directory, nativeRef: f.sourceRef }),
+    );
+    const sourceSnapshot = await source.readSnapshot();
+    const forkSnapshot = await replacement.readSnapshot();
+    if (!sourceSnapshot.ok || !forkSnapshot.ok) throw new Error("Missing Claude Fork history");
+    const sourceItems = sourceSnapshot.value.turns[0]?.items.map(({ item }) => item);
+    const forkItems = forkSnapshot.value.turns[0]?.items.map(({ item }) => item);
+    expect(sourceItems?.map(({ type }) => type)).toEqual([
+      "toolExecution",
+      "fileChange",
+      "agentMessage",
+    ]);
+    expect(forkItems?.map(({ type }) => type)).toEqual(sourceItems?.map(({ type }) => type));
+    const sourceTool = sourceItems?.[0];
+    const sourceChange = sourceItems?.[1];
+    const forkTool = forkItems?.[0];
+    const forkChange = forkItems?.[1];
+    if (
+      !sourceTool ||
+      sourceChange?.type !== "fileChange" ||
+      !forkTool ||
+      forkChange?.type !== "fileChange"
+    )
+      throw new Error("Missing Claude File Change provenance");
+    expect(sourceChange.sourceItemIds).toEqual([sourceTool.itemId]);
+    expect(forkChange.sourceItemIds).toEqual([forkTool.itemId]);
+    expect(forkTool.itemId).not.toBe(sourceTool.itemId);
   });
 
   it("persists configuration changes made before the first resend", async () => {

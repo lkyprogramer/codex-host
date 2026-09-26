@@ -118,6 +118,8 @@ import {
   turnNativePatchFiles,
   type OpenCodeSnapshotProjection,
 } from "./history-projection.js";
+import { coverOpenCodeFileChanges } from "./file-change-coverage.js";
+import { verifiedOpenCodeWorktree } from "./file-change-verification.js";
 import { deriveOpenCodeHistory } from "./history-derivation.js";
 
 export interface OpenCodeAdapterOptions extends OpenCodeServerOptions {
@@ -1336,13 +1338,24 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       }
       active.terminalAssistant = terminal;
       const userMessageID = active.userMessageID as string;
-      const changes = reliableOpenCodeFileChanges(
+      const nativeChanges = reliableOpenCodeFileChanges(
         await readTurnDiff(
           this.#transport,
           this.#session.id,
           userMessageID,
           turnNativePatchFiles(messages, userMessageID),
         ),
+      );
+      const paths =
+        nativeChanges.length > 0
+          ? await this.#transport.getPaths().catch(() => undefined)
+          : undefined;
+      const worktree = paths ? verifiedOpenCodeWorktree(this.#session.directory, paths) : undefined;
+      const changes = coverOpenCodeFileChanges(
+        nativeChanges,
+        [...active.items.values()].map(({ item }) => item),
+        this.#session.directory,
+        worktree,
       );
       if (changes.length > 0) {
         const id = `opencode-live-diff:${active.userMessageID}`;

@@ -22,6 +22,7 @@ import {
   runAdapterConformance,
   type ConformanceOutputObserver,
 } from "@codexhost/harness-adapter/conformance";
+import { CodexTurnProjector, projectHistoricalTurn } from "@codexhost/protocol-core";
 import {
   PiAdapter,
   type PiAdapterDependencies,
@@ -2063,6 +2064,127 @@ describe("Pi HarnessAdapter Session", () => {
     await session.close();
   });
 
+  it("uses the same native Edit patch in live projection and persisted history", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("native-edit-consistency");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "edit" }] });
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Pi transport was not created");
+    const arguments_ = { path: "sample.txt", old_string: "old\n", new_string: "preview\n" };
+    const result = {
+      content: [{ type: "text", text: "edited" }],
+      details: { patch: "--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-old\n+native\n" },
+    };
+    const projector = new CodexTurnProjector({
+      threadId: "thread",
+      turnId,
+      cwd: "/synthetic",
+      startedAtMs: 1000,
+    });
+    projector.project({ type: "turn.started", turnId });
+    transport.event({
+      type: "tool.started",
+      callId: "edit-1",
+      toolName: "edit",
+      arguments: arguments_,
+    });
+    const toolStarted = await nextEvent(iterator);
+    if (toolStarted.type !== "item.started") throw new Error("Missing tool Item start");
+    projector.project(toolStarted);
+    transport.event({
+      type: "tool.completed",
+      callId: "edit-1",
+      toolName: "edit",
+      result,
+      isError: false,
+    });
+    const toolCompleted = await nextEvent(iterator);
+    const fileStarted = await nextEvent(iterator);
+    const fileCompleted = await nextEvent(iterator);
+    if (
+      toolCompleted.type !== "item.completed" ||
+      fileStarted.type !== "item.started" ||
+      fileCompleted.type !== "item.completed"
+    )
+      throw new Error("Missing native file-change Item lifecycle");
+    expect(fileStarted.item).toMatchObject({
+      type: "fileChange",
+      sourceItemIds: [toolStarted.item.itemId],
+      changes: [{ unifiedDiff: result.details.patch }],
+    });
+    projector.project(toolCompleted);
+    projector.project(fileStarted);
+    projector.project(fileCompleted);
+
+    transport.succeed("done");
+    let turnCompleted = false;
+    for (let index = 0; index < 6; index += 1) {
+      if ((await nextEvent(iterator)).type === "turn.completed") {
+        turnCompleted = true;
+        break;
+      }
+    }
+    expect(turnCompleted).toBe(true);
+    const user = transport.history.entries[0];
+    const assistant = transport.history.entries[1];
+    if (!user || !assistant) throw new Error("Missing persisted Turn");
+    if (typeof user.id !== "string") throw new Error("Missing persisted User identity");
+    const toolCallId = "persisted-tool-call";
+    const toolResultId = "persisted-tool-result";
+    assistant.parentId = toolResultId;
+    transport.history.entries.splice(
+      1,
+      0,
+      {
+        id: toolCallId,
+        parentId: user.id,
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "edit-1", name: "edit", arguments: arguments_ }],
+        },
+      },
+      {
+        id: toolResultId,
+        parentId: toolCallId,
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "edit-1",
+          toolName: "edit",
+          isError: false,
+          ...result,
+        },
+      },
+    );
+    const read = await session.readSnapshot();
+    if (!read.ok) throw new Error(read.error.message);
+    const turn = read.value.turns[0];
+    if (!turn) throw new Error("Missing restored Turn");
+    const live = projector.project({
+      type: "turn.completed",
+      turnId,
+      outcome: { status: "succeeded" },
+    }).completedTurn;
+    const replay = projectHistoricalTurn({ turnId, cwd: "/synthetic", snapshot: turn });
+    const fileCards = (value: typeof replay | undefined) =>
+      (value?.items as Array<{ type: string; changes?: unknown[] }>).filter(
+        (item) => item.type === "fileChange",
+      );
+    expect(fileCards(live)).toHaveLength(1);
+    expect(fileCards(replay)).toHaveLength(1);
+    expect(fileCards(live)[0]?.changes).toEqual(fileCards(replay)[0]?.changes);
+    expect(JSON.stringify(fileCards(live)[0])).toContain("+native");
+    expect(JSON.stringify(fileCards(live)[0])).not.toContain("+preview");
+    await session.close();
+    await adapter.close();
+  });
+
   it("maps interleaved Bash, Generic Tool, bounded output, and reliable Edit Patch", async () => {
     const { adapter, transports } = fixture({ toolOutputLimit: 10 });
     const session = await openSession(adapter);
@@ -2169,7 +2291,8 @@ describe("Pi HarnessAdapter Session", () => {
       toolName: "edit",
       arguments: { path: "sample.txt" },
     });
-    await nextEvent(iterator);
+    const startedEdit = await nextEvent(iterator);
+    if (startedEdit.type !== "item.started") throw new Error("Missing Edit item");
     transport?.event({
       type: "tool.completed",
       callId: "edit-1",
@@ -2190,6 +2313,7 @@ describe("Pi HarnessAdapter Session", () => {
       type: "item.started",
       item: {
         type: "fileChange",
+        sourceItemIds: [startedEdit.item.itemId],
         changes: [
           { path: "sample.txt", kind: "update", unifiedDiff: expect.stringContaining("@@") },
         ],

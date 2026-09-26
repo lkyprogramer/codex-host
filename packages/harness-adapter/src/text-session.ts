@@ -350,12 +350,18 @@ export interface HostFileChange {
   path: string;
   kind: "add" | "update" | "delete";
   unifiedDiff: string;
+  /** A local edit fragment without stable file-wide coordinates. */
+  diffScope?: "fragment";
+  /** Tool previews for this path covered by a native file result; not causal source IDs. */
+  coveredToolItemIds?: HostItemId[];
 }
 
 export interface HostFileChangeItem {
   type: "fileChange";
   itemId: HostItemId;
   changes: HostFileChange[];
+  /** Original tool Item IDs represented by this native file-change Item. */
+  sourceItemIds?: HostItemId[];
 }
 
 export type HostSubagentStatus = "pending" | "running" | "completed" | "failed" | "interrupted";

@@ -20,6 +20,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import { encodeOmpModelRef, type OmpNativeModelRef } from "./omp-model-catalog.js";
+import { fileMutatingKind, reliableFileChange, synthesizeFileChange } from "./omp-file-change.js";
 import { projectOmpToolItem } from "./omp-tool-presentation.js";
 
 export interface OmpSessionHistory {
@@ -30,6 +31,7 @@ export interface OmpSessionHistory {
 export interface OmpHistoryState {
   sessionId: string;
   model: OmpNativeModelRef | null;
+  cwd?: string;
 }
 
 interface OmpEntry extends JsonObject {
@@ -159,7 +161,11 @@ function toolOutput(value: unknown): HostToolOutput | undefined {
   return text.length > 0 ? { content: [{ type: "text", text }] } : undefined;
 }
 
-function snapshotItems(entries: OmpEntry[], outcome: HistoricalTurnOutcome): HostItemSnapshot[] {
+function snapshotItems(
+  entries: OmpEntry[],
+  outcome: HistoricalTurnOutcome,
+  cwd?: string,
+): HostItemSnapshot[] {
   const snapshots: HostItemSnapshot[] = [];
   const toolCalls = new Map<
     string,
@@ -246,6 +252,24 @@ function snapshotItems(entries: OmpEntry[], outcome: HistoricalTurnOutcome): Hos
             },
           },
     });
+    const kind = fileMutatingKind(call.name);
+    if (toolSucceeded && cwd && kind && !synthesizeFileChange(kind, call.arguments, cwd)) {
+      const nativeResult = jsonValueSchema.safeParse(nativeMessage);
+      const changes = nativeResult.success
+        ? reliableFileChange(call.name, call.arguments, nativeResult.data, cwd)
+        : null;
+      if (changes) {
+        snapshots.push({
+          item: {
+            type: "fileChange",
+            itemId: itemId(entry.id, "file-change", 0),
+            sourceItemIds: [item.itemId],
+            changes,
+          },
+          outcome: { status: "succeeded" },
+        });
+      }
+    }
   }
   return snapshots;
 }
@@ -298,7 +322,7 @@ export function mapOmpSnapshot(
       nativeTurnRef,
       checkpoint,
       input: [{ type: "text", text: userText }],
-      items: snapshotItems(entries, outcome),
+      items: snapshotItems(entries, outcome, state.cwd),
       outcome,
       ...(effectiveModel ? { model: encodeOmpModelRef(effectiveModel) } : {}),
     });
