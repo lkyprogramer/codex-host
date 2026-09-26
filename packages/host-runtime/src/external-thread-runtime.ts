@@ -390,7 +390,7 @@ export class ExternalThreadRuntime {
         this.#clearIdleTimer(externalThread);
         this.#diagnose(error);
       },
-    }) as unknown as HarnessSession;
+    });
     externalThread.outputTask = this.#consumeOutputs(externalThread);
     this.#threads.set(externalThread.id, externalThread);
     this.#touchIdleTimer(externalThread);

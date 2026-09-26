@@ -563,15 +563,18 @@ export interface HarnessSession {
   readonly initialState: HarnessSessionState;
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
-  readonly commands?: HarnessCommandCapability;
-  readonly workMode?: HarnessWorkModeControl;
-  readonly steering?: HarnessSteeringControl;
-  readonly resourceLifecycle?: HarnessResourceLifecycle;
+  // Optional capabilities may also read as undefined: a wrapper that
+  // forwards another Session's capabilities (the Host's managed Session)
+  // exposes them through getters.
+  readonly commands?: HarnessCommandCapability | undefined;
+  readonly workMode?: HarnessWorkModeControl | undefined;
+  readonly steering?: HarnessSteeringControl | undefined;
+  readonly resourceLifecycle?: HarnessResourceLifecycle | undefined;
   /**
    * False when the Session can replay history but cannot start native work.
    * Host replaces it with a live resume before execute. Omitted means ready.
    */
-  readonly executionReady?: boolean;
+  readonly executionReady?: boolean | undefined;
 
   refreshUsage?(): Promise<void>;
   readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>>;

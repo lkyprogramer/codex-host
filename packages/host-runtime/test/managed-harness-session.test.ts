@@ -619,4 +619,88 @@ describe("ManagedHarnessSession", () => {
     await expect(closing).rejects.toThrow("process group is still alive");
     expect(attempts).toHaveBeenCalledTimes(3);
   });
+
+  it("delivers a cancellation while a slow operation holds the queue", async () => {
+    const current = session();
+    Object.defineProperty(current, "readSnapshot", {
+      configurable: true,
+      value: () => new Promise(() => undefined),
+    });
+    const cancel = vi.fn(async () => ({
+      ok: true as const,
+      value: { cancellationRequested: true },
+    }));
+    const execute = current.execute.bind(current);
+    Object.defineProperty(current, "execute", {
+      configurable: true,
+      value: (command: { type: string }) =>
+        command.type === "turn.cancel" ? cancel() : execute(command as never),
+    });
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    void managed.readSnapshot();
+    await expect(
+      managed.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("turn-1") }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("reports why a Session faulted rather than always a lost process", async () => {
+    const hung = session();
+    Object.defineProperty(hung, "readSnapshot", {
+      configurable: true,
+      value: () => new Promise(() => undefined),
+    });
+    const timedOut = new ManagedHarnessSession({
+      session: hung,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+      operationTimeoutMs: 20,
+    });
+    const timedOutOutputs = timedOut.outputs[Symbol.asyncIterator]();
+    await expect(timedOut.readSnapshot()).rejects.toThrow("did not answer");
+    await expect(timedOutOutputs.next()).resolves.toMatchObject({
+      value: { event: { type: "session.faulted", error: { code: "unavailable" } } },
+    });
+
+    const malformed = session();
+    Object.defineProperty(malformed, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend: async () => ({ status: "suspended" }) },
+    });
+    const broken = new ManagedHarnessSession({
+      session: malformed,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    const brokenOutputs = broken.outputs[Symbol.asyncIterator]();
+    await broken.resourceLifecycle?.suspend(new AbortController().signal);
+    await expect(brokenOutputs.next()).resolves.toMatchObject({
+      value: { event: { type: "session.faulted", error: { code: "protocolError" } } },
+    });
+  });
+
+  it("accepts a resumed Session whose capabilities differ only in key order", async () => {
+    const initial = session();
+    lifecycle(initial);
+    const resumed = session();
+    lifecycle(resumed);
+    const reordered = Object.fromEntries(Object.entries(initial.capabilities).reverse());
+    Object.defineProperty(resumed, "capabilities", { configurable: true, value: reordered });
+    const managed = new ManagedHarnessSession({
+      session: initial,
+      resume: async () => resumed,
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    await managed.resourceLifecycle?.suspend(new AbortController().signal);
+    await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    await managed.close();
+  });
 });
