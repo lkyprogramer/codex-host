@@ -16,7 +16,7 @@
 
 ## 后续实施记录
 
-研究基线与建议保持为当时快照；实际实现、验证范围和评审结论分别见 [R1](../upstream-r1/RESULT.md)、[R2](../upstream-r2/RESULT.md)、[R3](../upstream-r3/RESULT.md)、[R4](../upstream-r4/RESULT.md)。本地分批提交记录见 [R3 执行计划](../upstream-r3/plan.md) 与 [R4 执行计划](../upstream-r4/plan.md)。实现记录中的未验收边界仍然有效，不因代码提交而视为原生验收通过。
+研究基线与建议保持为当时快照；实际实现、验证范围和评审结论分别见 [R1](../upstream-r1/RESULT.md)、[R2](../upstream-r2/RESULT.md)、[R3](../upstream-r3/RESULT.md)、[R4](../upstream-r4/RESULT.md)、[R5](../upstream-r5/RESULT.md)。本地分批提交记录见 [R3 执行计划](../upstream-r3/plan.md)、[R4 执行计划](../upstream-r4/plan.md) 与 [R5 执行计划](../upstream-r5/plan.md)。实现记录中的未验收边界仍然有效，不因代码提交而视为原生验收通过。
 
 ## 1. 比较结论
 
