@@ -2,8 +2,13 @@ import { existsSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { commandInvocation, resolveHarnessExecutable } from "@codexhost/harness-discovery";
 
-export function cursorInvocation(environment: NodeJS.ProcessEnv, command?: string, force = false) {
-  const arguments_ = force ? ["--force", "acp"] : ["acp"];
+export function cursorInvocation(
+  environment: NodeJS.ProcessEnv,
+  command?: string,
+  force = false,
+  interactiveArguments?: string[],
+) {
+  const arguments_ = interactiveArguments ?? (force ? ["--force", "acp"] : ["acp"]);
   const resolution = resolveHarnessExecutable(
     {
       id: "cursor-cli",

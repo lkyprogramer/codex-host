@@ -99,6 +99,8 @@ export interface ForkSessionInput {
   kind: "fork";
   sourceRef: NativeSessionRef;
   checkpoint: NativeCheckpointRef;
+  /** Saved source selection when the native source is not live in this Adapter. */
+  model?: HarnessModelRef;
   /** Execution cwd for the derived Native Session. */
   cwd: string;
   environment?: Record<string, string | undefined>;

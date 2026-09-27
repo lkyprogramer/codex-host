@@ -140,6 +140,9 @@ export async function executeExternalThreadFork(input: {
   }
 
   let opened: Awaited<ReturnType<HarnessAdapter["open"]>>;
+  const sourceModel =
+    source.stateObserver.state.effectiveModel ??
+    decodeExternalTransportSelection(source.harnessId, source.transportModelId)?.model;
   try {
     opened = await adapter.open({
       kind: "fork",
@@ -150,6 +153,7 @@ export async function executeExternalThreadFork(input: {
       },
       sourceRef: nativeSessionRef as NativeSessionRef,
       checkpoint: boundary.nativeCheckpointRef as NativeCheckpointRef,
+      ...(sourceModel ? { model: sourceModel } : {}),
       ...(source.record.executionPolicy ? { executionPolicy: source.record.executionPolicy } : {}),
     });
   } catch {
