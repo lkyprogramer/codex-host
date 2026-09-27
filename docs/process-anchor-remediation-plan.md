@@ -349,6 +349,21 @@ spawnOwnedProcess(command, args, {
 
 阶段 D 评审（Opus 子代理）的发现已同批修复，见上表 PL-9、RS-2、RS-5 与 CLI 发现各行。评审中唯一未做的一项只涉及 Windows：更新器在 Windows 上等待 launcher 时，把一次读取进程快照失败当作 launcher 已退出。
 
+### 4.11 阶段 E 完成情况
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| AD-10 | 已修 | Claude 后台任务完成时，SDK 注入一条 `<task-notification>` 用户记录，实时侧的自主 Turn 以它的 uuid 为 key；而历史读取原先把这段输出并进上一个人类 Turn，重启后两边永远对不上。现在历史在顶层 task-notification 记录处开启自主 Turn（key 为该记录 uuid，输入为空，与实时一致）；实时侧没有这条记录时，改用这段输出里第一条带 uuid 的用户或助手记录，不再用 `Date.now()`。rollback 以同一 Turn 列表为准，最后一个自主 Turn 也算一个 Turn |
+| AD-9 | Grok 已修 / Antigravity 保持 | 用真实 CLI 采样：`grok` 1.0.41 等待子代理时 `rawOutput` 为结构化的 `Result` 或 `MultiResult.results`（含 `task_id`、`status`），`content` 为空，因此删掉按文本正则判定状态的两条退路，只读结构化字段；单任务等待的 `Result` 缺少 id 时直接对应那一个任务。`agy` 1.2.10 的真实权限拒绝是 `tool_info.error = {type: "TOOL_ERROR", message: "permission check failed … user denied permission …"}`，`type` 与普通工具失败相同，没有可用的结构化字段，只能继续按消息识别 |
+| HC-9 | 已修 | 7 个 Harness 原先把选择写成各自的旧格式 token，而 Renderer 早已对所有 Harness 发送结构化的插件 route。现在 Host 对所有 Harness 都写 route（旧 token 照常读取）。没有给 Mapping Store 记录加字段：记录 schema 是 strict，旧版本遇到不认识的字段会把整条记录移进隔离区，回退后 Thread 会“丢失”；route 优先解码自 v0.6.0 起就有，回退到 v0.6.0 及以后仍可读取。三个近乎相同的 Model / Thinking / Permission Mode 选择处理合并为一个，由按类型的描述表驱动（`thread-configuration-selection.ts`） |
+| HC-8 | 已修（插件 API v2） | Session 在 `capabilities.resources` 中声明 `idleRelease` 与 `ownedJobs`，`stopOwnedJobs` 与可选的只读 `workLevel` 移到 `resourceLifecycle`；打开 Session 时校验声明与实现一致。恢复语义改为声明：Adapter 的 `permissionModeScope: "atCreate"`（Grok），Session 的 `restoresNativePermissionMode`（OpenCode）与 `resumeMayChangeConfiguration`（OpenCode、OMP）；Host 不再按 Harness 名称分支。`thread release` 先读 `workLevel`，busy 时不尝试挂起。插件 API 升到 2，Host 同时加载 1 与 2：v1 插件由加载器按实现补出声明，并把 Adapter 上的 `stopOwnedJobs(session)` 挪到它打开的 Session 上。经 broker 转发的 Session 声明自己持有的资源（无），并且不再把 `resources` 发给可能是旧版的客户端 |
+| HC-4（长期） | 部分完成 | `HarnessSessionKernel`（harness-adapter）统一 Session 阶段、输出通道与空闲释放：共享一次尝试、同步准入与阶段切换、异步确认空闲后重新准入、释放失败返回 `releaseFailed`，并让 Adapter 显式选择关闭失败的去向（`retry` / `final`）。Grok（retry）与 Cursor（final，释放即关闭）已迁移，拒绝与失败原因改用内核的统一措辞。Claude Code、Kiro 未迁移；OpenCode 的语义与内核刻意不同（释放失败判故障、确认空闲期间拒绝其他操作、关闭中也报告故障），需要先决定是否统一这些行为 |
+| AD-13 | 部分完成 | 新增 `adapter-pi-family`（不是插件，打进 Pi 与 OMP 各自的 Bundle）：模型身份与目录、会话历史映射、工具输出与文件变更推导、RPC 辅助。只抽了两边逐字相同或只差参数（Harness id、名称、持久化的 Model Ref 与条目 id 前缀、工具条目投影）的部分，Pi / OMP 共删去约 1.6k 行、新增约 0.1k 行，共享包约 0.9k 行。RPC Session 与 Adapter 中仍有约 1.2k + 1.5k 行逐函数存在真实协议差异，没有为抽取而硬套参数 |
+| AD-14 | 部分完成 | 新增 `adapter-acp-core`：`startAcpAgent`（受管进程启动、spawn 等待、ndjson 连接、故障上报、协议协商）与 `withDeadline`，Grok 与 Kiro 已迁移（两者原实现逐行一致）；错误类型、客户端回调与 Session 语义留在各 Adapter。CodeBuddy 与 Cursor 的协议版本处理与错误路径不同，暂未迁移。见 `acp-layer-follow-up.md` |
+| AD-15 | 部分完成 | `app-server-host.ts` 的 Codex Account 请求移到 `codex-account-requests.ts`（依赖显式传入，三份账户投影合一），JSON-RPC 响应辅助移到 `json-rpc-response.ts`；HC-9 的配置选择也已移出。`app-server-host.ts` 仍约 4.6k 行，其余候选（官方委派约 450 行、Harness 输出投影约 350 行）以及 `deepseek modern/session.ts`、`claude-code-adapter.ts` 未拆 |
+
+阶段 E 中改变插件合同的部分（HC-8、SessionKernel）保持对 v1 插件的兼容；持久化格式没有变化。
+
 ## 5. 修复顺序
 
 | 阶段 | 内容 | 覆盖条目 |
@@ -357,7 +372,7 @@ spawnOwnedProcess(command, args, {
 | **B** | Host 稳健性与门禁：进程级异常处理、调用期限与关闭预算、退役屏障、挂起失败语义、conformance 资源与 Turn 语法；Shim CPU | HC-1 … HC-5、AD-16、RS-1 |
 | **C** | Adapter 与 Host 局部缺陷 | AD-1 … AD-8、AD-11、AD-12、HC-6、HC-7、HC-10、HC-11 |
 | **D** | broker anchor、更新器与 Shim 原生问题（仅 macOS，见 4.10）；Windows anchor（Job Object）不做 | PL-9、PL-11、RS-2、RS-5、RS-6 |
-| **E** | 结构升级：SessionKernel 与 `workLevel` / `release` 合同（需升级插件合同版本）、`acp-core`、Pi-family 核心、大模块拆分、能力声明 | HC-4（长期）、HC-8、HC-9、AD-9、AD-10、AD-13 … AD-15 |
+| **E** | 结构升级（见 4.11）：插件 API v2 能力声明与 `workLevel`、SessionKernel、`acp-core`、Pi-family 核心、大模块拆分 | HC-4（长期）、HC-8、HC-9、AD-9、AD-10、AD-13 … AD-15 |
 
 ## 6. 阶段 A 验收
 
