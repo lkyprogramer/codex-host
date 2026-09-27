@@ -234,6 +234,7 @@ const CAPABILITIES: HarnessSessionCapabilities = {
     selectPermissionMode: true,
     permissionModeScope: "live",
   },
+  resources: { idleRelease: false, ownedJobs: false },
   history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
   turnControl: { steering: "restart", workModes: ["default"] },
   subagents: { observe: true, readTranscript: true },

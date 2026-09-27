@@ -71,7 +71,7 @@ plugins/
   "id": "sample-agent",
   "name": "Sample Agent",
   "version": "1.0.0",
-  "adapterApiVersion": 1,
+  "adapterApiVersion": 2,
   "entry": "dist/plugin.js",
   "icon": "assets/icon.svg",
   "links": {
@@ -82,7 +82,7 @@ plugins/
 ```
 
 - ID 为最长 128 字符的小写可移植标识；`codex` 保留给官方路径。
-- `manifestVersion` 当前为 `1`；`adapterApiVersion` 与 Host 的整数 API 版本精确匹配。尚未采用版本范围协商。
+- `manifestVersion` 当前为 `1`。`adapterApiVersion` 当前为 `2`，Host 同时加载 `1` 和 `2`：v2 插件在 Session 的 `capabilities.resources` 中声明可释放的原生资源；v1 插件没有这项声明，加载器按它实际实现的方法补出声明（有 `resourceLifecycle` 即可空闲释放，Adapter 上的 `stopOwnedJobs(session)` 挪到它打开的 Session 上）。其他版本号不加载。
 - `entry` 是插件内的 `.js` 或 `.mjs` ESM 文件；`.js` 需要按 Node.js ESM 规则声明所属包。Manifest 不负责安装依赖。
 - 资源只能是插件内部相对路径；拒绝目录遍历和解析后逃出根目录的符号链接。
 - 链接只接受不带用户凭据的 HTTPS 地址。
@@ -111,7 +111,7 @@ Context 包含环境变量快照、平台、是否为受管远程 Host，以及�
 加载器先校验所有可发现的 Manifest，再导入已启用模块：
 
 - 跨目录的重复 ID 一律拒绝，不按扫描顺序或启用优先级取胜；与显式注入的测试 Adapter 冲突时也拒绝目录候选。
-- 不匹配的 API 版本不执行入口，但保留 unavailable Adapter 和公开描述。
+- 不支持的 API 版本不执行入口，但保留 unavailable Adapter 和公开描述。
 - 单插件导入、工厂或资源错误转为 unavailable，不妨碍其他正常插件加载。
 - 诊断仅包含稳定错误码和公开 ID，不透传插件抛出的路径、环境值或异常正文。
 - Manifest 最大 32 KiB，图标最大 128 KiB，总候选插件最多 128；加载器 API 最多接受 8 个根目录，当前启动组合使用预装和用户两个根目录。

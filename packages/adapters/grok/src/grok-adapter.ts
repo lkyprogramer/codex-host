@@ -52,6 +52,7 @@ import {
   type TurnCancelCommand,
   type HarnessIdleSuspendResult,
   type HarnessIdleSuspendSignal,
+  type HarnessOwnedJobsResult,
   type HarnessResourceLifecycle,
   type TurnOutcome,
   type TurnStartAccepted,
@@ -247,6 +248,7 @@ function capabilitiesForModels(modelState: GrokModelState): HarnessSessionCapabi
       selectPermissionMode: true,
       permissionModeScope: "atCreate",
     },
+    resources: { idleRelease: true, ownedJobs: true },
     history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
     turnControl: { steering: "native", workModes: ["default", "plan"] },
     subagents: { observe: true, readTranscript: true },
@@ -341,6 +343,7 @@ class GrokHarnessSession implements HarnessSession {
   readonly steering: HarnessSteeringControl;
   readonly resourceLifecycle: HarnessResourceLifecycle = {
     suspend: (signal) => this.#suspendIdle(signal),
+    stopOwnedJobs: () => this.#stopOwnedJobs(),
   };
   readonly #channel = new HarnessOutputChannel<HarnessOutput>();
   readonly #closeTimeoutMs: number;
@@ -1691,10 +1694,7 @@ class GrokHarnessSession implements HarnessSession {
     this.#channel.end();
   }
 
-  async stopOwnedJobs(): Promise<{
-    quiescence: "confirmed" | "unknown" | "unsupported";
-    proof?: { pid: number; scope: string };
-  }> {
+  async #stopOwnedJobs(): Promise<HarnessOwnedJobsResult> {
     if (typeof this.#transport.stopOwnedJobs !== "function") return { quiescence: "unsupported" };
     return this.#transport.stopOwnedJobs();
   }
@@ -1728,6 +1728,8 @@ class GrokHarnessSession implements HarnessSession {
 
 export class GrokAdapter implements HarnessAdapter {
   readonly commandCatalog = grokCommandCatalog;
+  // Grok takes a Session's Permission Mode when it opens, never later.
+  readonly permissionModeScope = "atCreate" as const;
   readonly harnessId: HarnessId = grokHarnessId;
   readonly subagents: HarnessSubagentCapability = {
     readSnapshot: async (input) => {
@@ -2185,16 +2187,6 @@ export class GrokAdapter implements HarnessAdapter {
       await transport.close().catch(() => undefined);
       return { ok: false, error: normalizeError(error, "unavailable") };
     }
-  }
-
-  async stopOwnedJobs(session: HarnessSession): Promise<{
-    quiescence: "confirmed" | "unknown" | "unsupported";
-    proof?: { pid: number; scope: string };
-  }> {
-    if (!(session instanceof GrokHarnessSession)) {
-      return { quiescence: "unsupported" };
-    }
-    return session.stopOwnedJobs();
   }
 
   close(): Promise<void> {

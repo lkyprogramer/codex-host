@@ -133,6 +133,7 @@ export function modernSessionCapabilities(
       selectPermissionMode: permissionModes !== null,
       permissionModeScope: "live",
     },
+    resources: { idleRelease: false, ownedJobs: false },
     history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
     turnControl: { steering: "restart", workModes: ["default"] },
     autonomousTurns: { observe: true },

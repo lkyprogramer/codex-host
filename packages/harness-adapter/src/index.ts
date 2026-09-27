@@ -32,6 +32,8 @@ export type {
   HarnessIdleSuspendResult,
   HarnessIdleSuspendSignal,
   HarnessResourceLifecycle,
+  HarnessOwnedJobsResult,
+  HarnessWorkLevel,
   HarnessSessionCapabilities,
   HarnessSteeringControl,
   HarnessWorkMode,

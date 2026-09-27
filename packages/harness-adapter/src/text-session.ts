@@ -5,6 +5,7 @@ import type {
   HarnessInspection,
   HarnessModelRef,
   HarnessPermissionModeId,
+  HarnessPermissionModeScope,
   HarnessSessionCapabilities,
   HarnessSessionImportCandidate,
   HarnessThinkingOption,
@@ -555,6 +556,30 @@ export interface HarnessIdleSuspendSignal {
  */
 export interface HarnessResourceLifecycle {
   suspend(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult>;
+  /**
+   * What native work the Session holds right now, without touching it. A
+   * Session that reports `busy` refuses an idle release for that reason.
+   */
+  workLevel?(): HarnessWorkLevel;
+  /**
+   * Stops jobs the Session started that outlive its Turns (background
+   * shells, subagents) and reports whether they are provably gone. Declared by
+   * `capabilities.resources.ownedJobs`.
+   */
+  stopOwnedJobs?(): Promise<HarnessOwnedJobsResult>;
+}
+
+/**
+ * - `idle`: nothing native is running; an idle release may proceed.
+ * - `busy`: a Turn, an interaction, a configuration change or background
+ *   native work (for example a detached shell or subagent) is in progress.
+ */
+export type HarnessWorkLevel = { level: "idle" } | { level: "busy"; reason: string };
+
+/** Whether owned jobs are provably stopped; `proof` names what was reclaimed. */
+export interface HarnessOwnedJobsResult {
+  quiescence: "confirmed" | "unknown" | "unsupported";
+  proof?: { pid: number; scope: string };
 }
 
 export interface HarnessSession {
@@ -616,6 +641,12 @@ export interface HarnessSessionImportCapability {
 
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
+  /**
+   * Where this Harness chooses a Session's Permission Mode. `atCreate` means
+   * only when a Session opens, so the Host passes a Thread's persisted mode
+   * into a resume. Omitted means `live`.
+   */
+  readonly permissionModeScope?: HarnessPermissionModeScope;
   /** Static command metadata. Reading it must not inspect, connect to, or open a Native Session. */
   readonly commandCatalog?: HarnessCommandCatalog;
   readonly sessionImport?: HarnessSessionImportCapability;

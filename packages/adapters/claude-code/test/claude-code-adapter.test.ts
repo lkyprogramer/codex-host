@@ -928,6 +928,7 @@ describe("Claude Code HarnessAdapter", () => {
         selectPermissionMode: true,
         permissionModeScope: "live",
       },
+      resources: { idleRelease: true, ownedJobs: false },
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
       turnControl: { steering: "restart", workModes: ["default"] },
       subagents: { observe: true, readTranscript: true },

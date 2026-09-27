@@ -114,7 +114,7 @@ ACP 实现的可复用边界见[ACP 接入与复用](acp-layer-follow-up.md)。
 
 [发行清单](../scripts/release/harness-plugins.json)拥有当前十个预装插件及各自运行依赖白名单。构建为每个插件生成独立 Bundle、资源、Manifest 和 `build-receipt.json`，记录 Bundle hash、实际依赖版本/许可、API 版本和 Node target。SDK 版本不是用户安装的原生 Harness 版本；未知 native version 为 `null`。
 
-API v1 采用整数精确匹配；加性可选字段保持兼容，破坏性合同变化需要新的 API 版本。不引入插件市场、自动依赖安装、热替换或任意插件 UI。实际发行集合与 Host 运行时注册分开维护。
+插件 API 版本是整数，Host 维护一个支持集合（当前 `1` 与 `2`）；加性可选字段保持兼容，破坏性合同变化需要新的 API 版本。v2 把原生资源能力改为显式声明：Host 只依据 `capabilities.resources` 与配置语义声明行事，不再探测方法，也不按 Harness 名称分支；v1 插件由加载器补出等价声明。不引入插件市场、自动依赖安装、热替换或任意插件 UI。实际发行集合与 Host 运行时注册分开维护。
 
 Rust 负责原生启动、进程身份和更新安装。TS 更新状态目录从 runtime descriptor 推导，与 Launcher 一致；下载总期限和无进度期限释放更新锁。Remote uninstall 在验证并停止 owned listener 后清理安装文件。macOS Broker 替换失败时恢复已验证旧 plist / generation，并要求新的 readiness descriptor；这些平台路径的实机验证独立于 TypeScript 测试。
 

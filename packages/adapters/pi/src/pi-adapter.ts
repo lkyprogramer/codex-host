@@ -602,6 +602,7 @@ class PiHarnessSession implements HarnessSession {
         selectPermissionMode: false,
         permissionModeScope: "live",
       },
+      resources: { idleRelease: false, ownedJobs: false },
       history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
       autonomousTurns: { observe: true },
     };

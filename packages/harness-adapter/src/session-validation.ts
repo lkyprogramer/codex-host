@@ -63,9 +63,22 @@ export function validateHarnessSession(
     const lifecycle = value.resourceLifecycle;
     if (
       lifecycle !== undefined &&
-      (!record(lifecycle) || typeof lifecycle.suspend !== "function")
+      (!record(lifecycle) ||
+        typeof lifecycle.suspend !== "function" ||
+        (lifecycle.workLevel !== undefined && typeof lifecycle.workLevel !== "function") ||
+        (lifecycle.stopOwnedJobs !== undefined && typeof lifecycle.stopOwnedJobs !== "function"))
     ) {
       return invalid("resourceLifecycle");
+    }
+    // A declared resource capability is a promise the Host acts on without
+    // probing: it must be implemented, and nothing may be implemented undeclared.
+    const resources = capabilities.data.resources;
+    if (resources) {
+      const suspends = record(lifecycle) && typeof lifecycle.suspend === "function";
+      const stopsJobs = record(lifecycle) && typeof lifecycle.stopOwnedJobs === "function";
+      if (resources.idleRelease !== suspends || resources.ownedJobs !== stopsJobs) {
+        return invalid("capabilities.resources");
+      }
     }
     if (refreshUsage !== undefined && typeof refreshUsage !== "function") {
       return invalid("refreshUsage");

@@ -285,7 +285,7 @@ describe("Harness plugin discovery and loading", () => {
   it("keeps an incompatible plugin visible but never imports its entry", async () => {
     const directory = await root(["future-agent"]);
     await plugin(directory, "future-agent", {
-      manifest: { adapterApiVersion: 2 },
+      manifest: { adapterApiVersion: 3 },
       code: 'throw new Error("never-report-this")',
     });
     const diagnose = vi.fn();

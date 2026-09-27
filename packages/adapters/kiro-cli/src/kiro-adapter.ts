@@ -115,6 +115,7 @@ export const KIRO_SESSION_CAPABILITIES: HarnessSessionCapabilities = {
     selectPermissionMode: true,
     permissionModeScope: "live",
   },
+  resources: { idleRelease: true, ownedJobs: false },
   history: {
     fork: true,
     forkAcrossCwd: true,

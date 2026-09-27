@@ -16,11 +16,19 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 - `executionReady=false` 的 history-only Session 被挂起后，读取以 history-only 恢复；只有执行才升级为 live Session。
 - 未声明合同的旧插件保持兼容，自动回收明确不启用；不能为了统一行为而取消未知后台工作。
 
+### 能力声明（插件 API v2）
+
+Session 在 `capabilities.resources` 中声明它能交还的原生资源：`idleRelease` 表示实现了 `resourceLifecycle.suspend`，`ownedJobs` 表示实现了 `resourceLifecycle.stopOwnedJobs`。打开 Session 时 Host 校验声明与实现一致，声明了却没实现、实现了却没声明都视为协议错误；此后 Host 只依据声明决定，不再探测方法。v1 插件没有这项声明，加载器按它实际实现的方法补出等价声明。
+
+`resourceLifecycle.workLevel()` 是可选的只读查询，报告 Session 当前是否仍有原生工作（Turn、交互、配置变更或后台 shell / 子代理），不触碰任何资源。`thread release` 先读它：报告 `busy` 时直接以 busy 和原因回答，不再尝试挂起。
+
+恢复时的配置语义同样通过声明表达，而不是按 Harness 名称判断：Adapter 的 `permissionModeScope: "atCreate"` 表示权限模式只能在 Session 打开时设定，Host 恢复时随 open 传入持久化的模式；Session 的 `restoresNativePermissionMode` 表示原生 Session 自己恢复权限模式并以其为准，Host 不再补设；`resumeMayChangeConfiguration` 表示恢复可能改变配置（例如替换了不可用的模型），Host 把恢复后的实际配置写回记录。
+
 ## 释放范围与任务静默
 
 `thread release` 的 `resourcesReleased=true` 只证明返回 `proof.scope` 范围内的原生资源已释放。它可以与 `released=false`、`quiescence=unknown` 同时出现：Thread 保留可恢复状态，但不能据此删除工作树或业务资源。
 
-挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown`、`releaseFailed` 或 `unsupported` 时，具备显式 owned-job 接口的 Harness 仍走原有的停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
+挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown`、`releaseFailed` 或 `unsupported` 时，声明了 `ownedJobs` 的 Session 仍走停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
 
 `quiescence=confirmed` 与资源挂起是不同的证明。受管进程组退出不覆盖工具自行创建的独立进程组、远端任务、容器任务或外部业务处理。取消请求成功、父 Turn 结束和进程内存下降，都不能替代这些任务的静默证明。
 

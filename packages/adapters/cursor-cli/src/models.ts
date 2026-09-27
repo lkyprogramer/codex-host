@@ -16,6 +16,7 @@ export const CURSOR_CAPABILITIES: HarnessSessionCapabilities = {
     selectPermissionMode: true,
     permissionModeScope: "live",
   },
+  resources: { idleRelease: true, ownedJobs: false },
   history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
   subagents: { observe: true, readTranscript: false },
 };

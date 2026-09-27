@@ -164,6 +164,8 @@ describe("ExternalThreadRuntime register", () => {
       null,
       permissionModes,
     );
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = { resumeMayChangeConfiguration: true };
     const writeMode = harnessPermissionModeIdSchema.parse("write");
     const created = await adapter.open({
       kind: "create",
@@ -231,6 +233,8 @@ describe("ExternalThreadRuntime register", () => {
   it("does not restore persisted Thinking when live OMP state omits it", async () => {
     const ompHarnessId = harnessIdSchema.parse("omp");
     const adapter = new FakeHarnessAdapter(ompHarnessId);
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = { resumeMayChangeConfiguration: true };
     const created = await adapter.open({ kind: "create", cwd: "/synthetic" });
     if (!created.ok) throw new Error(created.error.message);
 
@@ -286,6 +290,8 @@ describe("ExternalThreadRuntime register", () => {
   it("keeps OMP restore successful when live selection persistence fails", async () => {
     const ompHarnessId = harnessIdSchema.parse("omp");
     const adapter = new FakeHarnessAdapter(ompHarnessId);
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = { resumeMayChangeConfiguration: true };
     const created = await adapter.open({ kind: "create", cwd: "/synthetic" });
     if (!created.ok) throw new Error(created.error.message);
 
@@ -365,6 +371,11 @@ describe("ExternalThreadRuntime register", () => {
       null,
       permissionModes,
     );
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = {
+      restoresNativePermissionMode: true,
+      resumeMayChangeConfiguration: true,
+    };
     const model = adapter.catalog.defaultModel;
     if (!model) throw new Error("Fake OpenCode catalog has no default Model");
     const created = await adapter.open({
@@ -493,6 +504,7 @@ describe("ExternalThreadRuntime register", () => {
       });
       const restoringAdapter: HarnessAdapter = {
         harnessId: adapter.harnessId,
+        permissionModeScope: adapter.permissionModeScope,
         inspect: (input): Promise<HarnessInspection> => adapter.inspect(input),
         open,
         close: () => adapter.close(),

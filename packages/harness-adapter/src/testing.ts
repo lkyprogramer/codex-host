@@ -1007,6 +1007,11 @@ export class FakeHarnessAdapter implements HarnessAdapter {
   readonly supportsForkAcrossCwd: boolean;
   readonly supportsRollbackLastTurn: boolean;
   readonly permissionModeScope: HarnessPermissionModeScope;
+  /** Resume semantics every Session this Adapter opens declares. */
+  configurationDeclarations: Pick<
+    HarnessSessionCapabilities["configuration"],
+    "restoresNativePermissionMode" | "resumeMayChangeConfiguration"
+  > = {};
   inspectionCalls = 0;
   #closePromise: Promise<void> | null = null;
   #sessionOrdinal = 0;
@@ -1316,6 +1321,7 @@ export class FakeHarnessAdapter implements HarnessAdapter {
       this.supportsRollbackLastTurn,
       this.permissionModeScope,
     );
+    Object.assign(session.capabilities.configuration, this.configurationDeclarations);
     this.sessions.push(session);
     this.#sessionsByNativeId.set(nativeRef.nativeSessionId, session);
     return session;

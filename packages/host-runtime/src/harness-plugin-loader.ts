@@ -11,6 +11,7 @@ import {
 import type { HarnessPluginContext, HarnessPluginModule } from "@codexhost/harness-adapter/plugin";
 import {
   HARNESS_PLUGIN_API_VERSION,
+  SUPPORTED_HARNESS_PLUGIN_API_VERSIONS,
   HARNESS_PLUGIN_LIMIT,
   HARNESS_PLUGIN_MANIFEST_MAX_BYTES,
   harnessPluginDescriptorSchema,
@@ -21,6 +22,7 @@ import {
 
 import { HarnessPluginRegistry } from "./harness-plugin-registry.js";
 import { validateOpenedHarnessSession } from "./harness-session-validation.js";
+import { legacyPluginAdapter } from "./legacy-plugin-adapter.js";
 import {
   pluginResourcePath,
   readPluginConfiguration,
@@ -326,7 +328,7 @@ export async function loadHarnessPlugins(
       });
       let adapter: HarnessAdapter;
       let failure: HarnessPluginDiagnosticCode | undefined;
-      if (manifest.adapterApiVersion !== HARNESS_PLUGIN_API_VERSION) {
+      if (!SUPPORTED_HARNESS_PLUGIN_API_VERSIONS.includes(manifest.adapterApiVersion)) {
         failure = "incompatibleVersion";
         adapter = unavailableAdapter(descriptor, failure);
       } else {
@@ -340,6 +342,9 @@ export async function loadHarnessPlugins(
             options.warmup !== false,
             options.signal,
           );
+          if (manifest.adapterApiVersion < HARNESS_PLUGIN_API_VERSION) {
+            adapter = legacyPluginAdapter(adapter);
+          }
           if (options.signal?.aborted) {
             await adapter.close().catch(() => diagnose({ id: manifest.id, code: "cleanupFailed" }));
             return;

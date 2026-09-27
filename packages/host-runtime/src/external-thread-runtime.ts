@@ -810,7 +810,10 @@ export class ExternalThreadRuntime {
       ...(restoredSelection?.thinkingOptionId
         ? { thinkingOptionId: restoredSelection.thinkingOptionId }
         : {}),
-      ...((record.executionPolicy || harnessId === "grok") && restoredSelection?.permissionModeId
+      // A Harness that fixes the Permission Mode when a Session opens can
+      // only restore it through open; others re-select it below.
+      ...((record.executionPolicy || adapter.permissionModeScope === "atCreate") &&
+      restoredSelection?.permissionModeId
         ? { permissionModeId: restoredSelection.permissionModeId }
         : {}),
       ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
@@ -829,7 +832,7 @@ export class ExternalThreadRuntime {
         session.executionReady !== false &&
         restoredSelection?.permissionModeId &&
         session.initialState.effectivePermissionModeId !== restoredSelection.permissionModeId &&
-        harnessId !== "opencode" &&
+        !session.capabilities.configuration.restoresNativePermissionMode &&
         !permissionModeFixedAtCreate(session.capabilities.configuration)
       ) {
         if (!session.capabilities.configuration.selectPermissionMode) {
@@ -886,10 +889,10 @@ export class ExternalThreadRuntime {
         ? restoredState.effectivePermissionModeId
         : restoredSelection?.permissionModeId;
       let transportModelId = aligned.record.transportModelId;
-      // OMP can silently replace an unavailable Model during resume, while OpenCode's
-      // additive Permission API cannot reliably restore a stale mode. Persist live state so the
-      // next restore does not reapply an obsolete transport token.
-      if ((harnessId === "omp" || harnessId === "opencode") && effectiveModel) {
+      // A resume that can change the configuration (a replaced Model, a mode the
+      // native Session keeps) is persisted as resumed, so the next restore does
+      // not reapply an obsolete selection.
+      if (session.capabilities.configuration.resumeMayChangeConfiguration && effectiveModel) {
         const liveSelection: ExternalConfigurationSelection = {
           model: effectiveModel,
           ...(effectiveThinkingOptionId ? { thinkingOptionId: effectiveThinkingOptionId } : {}),

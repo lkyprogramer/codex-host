@@ -1224,7 +1224,10 @@ describe("OpenCode HarnessAdapter", () => {
         selectThinkingOption: true,
         selectPermissionMode: true,
         permissionModeScope: "live",
+        restoresNativePermissionMode: true,
+        resumeMayChangeConfiguration: true,
       },
+      resources: { idleRelease: true, ownedJobs: false },
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
     });
     await expect(

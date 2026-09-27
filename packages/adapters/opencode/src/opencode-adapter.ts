@@ -436,7 +436,10 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
         selectThinkingOption: thinkingSelectable,
         selectPermissionMode: true,
         permissionModeScope: "live",
+        restoresNativePermissionMode: true,
+        resumeMayChangeConfiguration: true,
       },
+      resources: { idleRelease: true, ownedJobs: false },
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
     };
     this.commands = {

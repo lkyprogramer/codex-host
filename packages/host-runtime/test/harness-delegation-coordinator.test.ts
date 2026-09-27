@@ -10,6 +10,7 @@ import { MappingStore } from "@codexhost/mapping-store";
 import { harnessIdSchema, hostThreadIdSchema, hostTurnIdSchema } from "@codexhost/shared-contracts";
 import { describe, expect, it, vi } from "vitest";
 
+import { legacyPluginAdapter } from "../src/legacy-plugin-adapter.js";
 import { HarnessDelegationCoordinator } from "../src/harness-delegation-coordinator.js";
 import { ExternalThreadRepository } from "../src/external-thread-repository.js";
 import { ExternalThreadRuntime } from "../src/external-thread-runtime.js";
@@ -1228,6 +1229,99 @@ describe("HarnessDelegationCoordinator", () => {
     }
   });
 
+  it("stops owned jobs through the Session that declares them", async () => {
+    const stopOwnedJobs = vi.fn(async () => ({
+      quiescence: "confirmed" as const,
+      proof: { pid: 4343, scope: "declared-jobs" },
+    }));
+    class DeclaredJobsAdapter extends FakeHarnessAdapter {
+      override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+        const opened = await super.open(input);
+        if (opened.ok) {
+          const session = opened.value as FakeHarnessSession;
+          Object.defineProperty(session, "resourceLifecycle", {
+            configurable: true,
+            value: {
+              suspend: async () => ({ status: "unsupported" as const }),
+              stopOwnedJobs,
+            },
+          });
+          Object.assign(session.capabilities, {
+            resources: { idleRelease: true, ownedJobs: true },
+          });
+        }
+        return opened;
+      }
+    }
+    const value = await fixture(new DeclaredJobsAdapter(harnessIdSchema.parse("pi")));
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      value.adapter.sessions[0]?.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      await expect(
+        value.coordinator.release({ threadId: started.threadId }),
+      ).resolves.toMatchObject({
+        released: true,
+        quiescence: "confirmed",
+        proof: { scope: "declared-jobs" },
+      });
+      expect(stopOwnedJobs).toHaveBeenCalledOnce();
+    } finally {
+      await value.close();
+    }
+  });
+
+  it("answers busy from the reported work level without attempting a release", async () => {
+    const suspend = vi.fn(async () => ({ status: "suspended" as const, scope: "unexpected" }));
+    class BackgroundWorkAdapter extends FakeHarnessAdapter {
+      override async open(input: Parameters<FakeHarnessAdapter["open"]>[0]) {
+        const opened = await super.open(input);
+        if (opened.ok) {
+          Object.defineProperty(opened.value as FakeHarnessSession, "resourceLifecycle", {
+            configurable: true,
+            value: {
+              suspend,
+              workLevel: () => ({ level: "busy" as const, reason: "a background shell runs" }),
+            },
+          });
+        }
+        return opened;
+      }
+    }
+    const value = await fixture(new BackgroundWorkAdapter(harnessIdSchema.parse("pi")));
+    try {
+      const started = await value.coordinator.start({
+        harnessId: "pi",
+        task: "first",
+        cwd: "/synthetic",
+        parentThreadId: "parent-thread",
+      });
+      value.adapter.sessions[0]?.succeedTurn();
+      const thread = value.runtime.get(started.threadId);
+      if (!thread) throw new Error("Missing thread");
+      thread.running = false;
+      thread.activeTurnId = null;
+      await expect(value.coordinator.release({ threadId: started.threadId })).resolves.toEqual({
+        threadId: started.threadId,
+        released: false,
+        busy: true,
+        quiescence: "unknown",
+        reason: "a background shell runs",
+      });
+      expect(suspend).not.toHaveBeenCalled();
+    } finally {
+      await value.close();
+    }
+  });
+
   it("still runs the owned-job release when idle suspension cannot run", async () => {
     const adapter = new IdleUnknownFakeAdapter(harnessIdSchema.parse("pi"));
     const stopOwnedJobs = vi.fn(async () => ({
@@ -1235,7 +1329,8 @@ describe("HarnessDelegationCoordinator", () => {
       proof: { pid: 4242, pgid: -4242, scope: "fake-child" },
     }));
     Object.assign(adapter, { stopOwnedJobs });
-    const value = await fixture(adapter);
+    // A version 1 plugin: its Adapter stops owned jobs.
+    const value = await fixture(legacyPluginAdapter(adapter) as typeof adapter);
     try {
       const started = await value.coordinator.start({
         harnessId: "pi",
@@ -1299,7 +1394,8 @@ describe("HarnessDelegationCoordinator", () => {
     const adapter = new IdleUnknownFakeAdapter(harnessIdSchema.parse("pi"));
     const stopOwnedJobs = vi.fn(async () => ({ quiescence: "unknown" as const }));
     Object.assign(adapter, { stopOwnedJobs });
-    const value = await fixture(adapter);
+    // A version 1 plugin: its Adapter stops owned jobs.
+    const value = await fixture(legacyPluginAdapter(adapter) as typeof adapter);
     try {
       const started = await value.coordinator.start({
         harnessId: "pi",
@@ -1328,7 +1424,8 @@ describe("HarnessDelegationCoordinator", () => {
     const adapter = new IdleFaultingFakeAdapter(harnessIdSchema.parse("pi"));
     const stopOwnedJobs = vi.fn(async () => ({ quiescence: "confirmed" as const }));
     Object.assign(adapter, { stopOwnedJobs });
-    const value = await fixture(adapter);
+    // A version 1 plugin: its Adapter stops owned jobs.
+    const value = await fixture(legacyPluginAdapter(adapter) as typeof adapter);
     try {
       const started = await value.coordinator.start({
         harnessId: "pi",
@@ -1365,7 +1462,8 @@ describe("HarnessDelegationCoordinator", () => {
     const adapter = new IdleBusyFakeAdapter(harnessIdSchema.parse("pi"));
     const stopOwnedJobs = vi.fn(async () => ({ quiescence: "confirmed" as const }));
     Object.assign(adapter, { stopOwnedJobs });
-    const value = await fixture(adapter);
+    // A version 1 plugin: its Adapter stops owned jobs.
+    const value = await fixture(legacyPluginAdapter(adapter) as typeof adapter);
     try {
       const started = await value.coordinator.start({
         harnessId: "pi",
@@ -1400,7 +1498,8 @@ describe("HarnessDelegationCoordinator", () => {
     Object.assign(adapter, {
       stopOwnedJobs: async () => ({ quiescence: "confirmed" as const }),
     });
-    const value = await fixture(adapter);
+    // A version 1 plugin: its Adapter stops owned jobs.
+    const value = await fixture(legacyPluginAdapter(adapter) as typeof adapter);
     try {
       const started = await value.coordinator.start({
         harnessId: "pi",
@@ -1436,7 +1535,8 @@ describe("HarnessDelegationCoordinator", () => {
     Object.assign(adapter, {
       stopOwnedJobs: async () => ({ quiescence: "confirmed" as const }),
     });
-    const value = await fixture(adapter);
+    // A version 1 plugin: its Adapter stops owned jobs.
+    const value = await fixture(legacyPluginAdapter(adapter) as typeof adapter);
     try {
       const started = await value.coordinator.start({
         harnessId: "pi",

@@ -212,10 +212,14 @@ function sessionMetadata(record: ServerSession): object {
   ) {
     delete initialState.availableThinkingOptions;
   }
+  // Native resources stay with the broker process; the brokered Session
+  // declares its own (none), and an older client would reject the field.
+  const capabilities = { ...record.session.capabilities };
+  delete capabilities.resources;
   return {
     sessionId: record.id,
     sessionGeneration: record.generation,
-    capabilities: record.session.capabilities,
+    capabilities,
     initialState: {
       ...initialState,
       ...(record.nativeRef ? { nativeRef: record.nativeRef } : {}),

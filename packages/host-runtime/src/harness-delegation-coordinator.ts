@@ -68,7 +68,6 @@ import {
 } from "./delegation-snapshot.js";
 import { decodeThreadRevision } from "./thread-change-hub.js";
 import { validateOpenedHarnessSession } from "./harness-session-validation.js";
-import { ManagedHarnessSession } from "./managed-harness-session.js";
 import {
   createExternalThreadRecordInput,
   externalThreadValue,
@@ -79,13 +78,6 @@ import type { ExternalThread, ExternalThreadRuntime } from "./external-thread-ru
 const IMPLICIT_DEDUPLICATION_MS = 30_000;
 const NATIVE_REF_TIMEOUT_MS = 10_000;
 const DEFAULT_DELEGATION_EXECUTION_POLICY = "unattended-full-access";
-
-type OwnedJobAdapter = HarnessAdapter & {
-  stopOwnedJobs(session: HarnessSession): Promise<{
-    quiescence: JobQuiescence;
-    proof?: ThreadReleaseResult["proof"];
-  }>;
-};
 
 function normalizedExecutionPolicy(
   input: Pick<DelegationStartInput, "executionPolicy">,
@@ -1219,6 +1211,16 @@ export class HarnessDelegationCoordinator {
       };
     }
     const lifecycle = thread.session.resourceLifecycle;
+    const work = lifecycle?.workLevel?.();
+    if (work?.level === "busy") {
+      return {
+        threadId: thread.id,
+        released: false,
+        busy: true,
+        quiescence: "unknown",
+        reason: work.reason,
+      };
+    }
     let lifecycleQuiescence: JobQuiescence | undefined;
     let reason: string | undefined;
     if (lifecycle) {
@@ -1250,16 +1252,19 @@ export class HarnessDelegationCoordinator {
       lifecycleQuiescence = suspended.status === "unsupported" ? "unsupported" : "unknown";
       reason = suspended.reason;
     }
-    const adapter = this.#adapters.get(thread.harnessId);
-    const releasable = adapter ? ownedJobAdapter(adapter) : undefined;
-    let quiescence: JobQuiescence = releasable ? "unknown" : (lifecycleQuiescence ?? "unsupported");
+    const stopOwnedJobs = thread.session.capabilities.resources?.ownedJobs
+      ? lifecycle?.stopOwnedJobs
+      : undefined;
+    let quiescence: JobQuiescence = stopOwnedJobs
+      ? "unknown"
+      : (lifecycleQuiescence ?? "unsupported");
     let proof: ThreadReleaseResult["proof"];
-    if (releasable) {
+    if (stopOwnedJobs) {
       // The owned-job path now decides this release; its own outcome, not the
       // idle suspension's, is what a reason must describe.
       reason = undefined;
       try {
-        const stopped = await this.#stopLegacyOwnedJobs(releasable, thread.session);
+        const stopped = await stopOwnedJobs.call(lifecycle);
         quiescence = stopped.quiescence;
         proof = stopped.proof;
       } catch (error) {
@@ -1559,23 +1564,4 @@ export class HarnessDelegationCoordinator {
       if (key.startsWith(prefix)) this.#inflightSends.delete(key);
     }
   }
-
-  #stopLegacyOwnedJobs(
-    adapter: OwnedJobAdapter,
-    session: HarnessSession,
-  ): Promise<{
-    quiescence: JobQuiescence;
-    proof?: ThreadReleaseResult["proof"];
-  }> {
-    if (session instanceof ManagedHarnessSession) {
-      return session.withCurrentSession((current) => adapter.stopOwnedJobs(current));
-    }
-    return adapter.stopOwnedJobs(session);
-  }
-}
-
-function ownedJobAdapter(adapter: HarnessAdapter): OwnedJobAdapter | undefined {
-  return typeof (adapter as { stopOwnedJobs?: unknown }).stopOwnedJobs === "function"
-    ? (adapter as OwnedJobAdapter)
-    : undefined;
 }

@@ -256,9 +256,31 @@ export class ManagedHarnessSession implements HarnessSession {
   }
 
   get resourceLifecycle(): HarnessResourceLifecycle | undefined {
-    return this.#current.resourceLifecycle
-      ? { suspend: (signal) => this.#suspend(signal) }
-      : undefined;
+    const lifecycle = this.#current.resourceLifecycle;
+    if (!lifecycle) return undefined;
+    return {
+      suspend: (signal) => this.#suspend(signal),
+      ...(lifecycle.workLevel
+        ? {
+            // A suspended Session runs nothing native until it resumes.
+            workLevel: () =>
+              this.#suspended
+                ? { level: "idle" as const }
+                : (this.#current.resourceLifecycle?.workLevel?.() ?? { level: "idle" as const }),
+          }
+        : {}),
+      ...(lifecycle.stopOwnedJobs
+        ? {
+            // Never wakes a suspended Session only to stop its jobs.
+            stopOwnedJobs: () =>
+              this.withCurrentSession(async (current) => {
+                const stop = current.resourceLifecycle?.stopOwnedJobs;
+                if (!stop) throw new Error("Harness Session no longer stops owned jobs");
+                return stop.call(current.resourceLifecycle);
+              }),
+          }
+        : {}),
+    };
   }
 
   /** Native process was released; the next Host read or execute must resume it. */
@@ -392,7 +414,7 @@ export class ManagedHarnessSession implements HarnessSession {
     throw last instanceof Error ? last : new Error(String(last));
   }
 
-  /** Internal Host lease for legacy destructive release hooks. It never wakes a suspended Session. */
+  /** Internal Host lease on the current native Session. It never wakes a suspended Session. */
   withCurrentSession<T>(operation: (session: HarnessSession) => Promise<T>): Promise<T> {
     return this.#enqueue(async () => {
       this.#assertOpen();
