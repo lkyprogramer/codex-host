@@ -32,17 +32,18 @@ function codeOffsets(text: string): Uint8Array {
   for (const line of text.split("\n")) {
     const end = Math.min(text.length, offset + line.length + 1);
     const marker = /^ {0,3}(`{3,}|~{3,})(.*)$/u.exec(line);
+    const markerText = marker?.[1];
     if (fence) {
       code.fill(1, offset, end);
       if (
-        marker &&
-        marker[1]?.[0] === fence.character &&
-        marker[1].length >= fence.length &&
+        markerText &&
+        markerText[0] === fence.character &&
+        markerText.length >= fence.length &&
         !marker[2]?.trim()
       )
         fence = null;
-    } else if (marker && !(marker[1]?.[0] === "`" && marker[2]?.includes("`"))) {
-      fence = { character: marker[1]![0]!, length: marker[1]!.length };
+    } else if (markerText && !(markerText[0] === "`" && marker?.[2]?.includes("`"))) {
+      fence = { character: markerText[0] ?? "`", length: markerText.length };
       code.fill(1, offset, end);
     } else if (/^(?: {4}| {0,3}\t)/u.test(line)) {
       code.fill(1, offset, end);
@@ -51,12 +52,14 @@ function codeOffsets(text: string): Uint8Array {
   }
   const ticks = [...text.matchAll(/`+/gu)];
   for (let index = 0; index < ticks.length; index += 1) {
-    const open = ticks[index]!;
+    const open = ticks[index];
+    if (!open) continue;
     if (code[open.index] || escaped(text, open.index)) continue;
     let closed = false;
     let closeIndex = index + 1;
     while (closeIndex < ticks.length) {
-      const close = ticks[closeIndex]!;
+      const close = ticks[closeIndex];
+      if (!close) break;
       if (code[close.index]) break;
       if (close[0].length === open[0].length) {
         code.fill(1, open.index, close.index + close[0].length);

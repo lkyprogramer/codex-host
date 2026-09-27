@@ -205,6 +205,21 @@ export interface DelegationSkillInstallResult {
   digest: string | null;
 }
 
+/** Resolve only a Skill that the existing installer makes visible to Codex. */
+export async function resolveInstalledDelegationSkill(
+  homeDirectory = os.homedir(),
+): Promise<{ name: "codexhost-delegation"; path: string } | null> {
+  for (const root of [".agents", ".claude"]) {
+    const location = path.join(homeDirectory, root, SKILL_RELATIVE_PATH);
+    try {
+      if ((await stat(location)).isFile()) return { name: "codexhost-delegation", path: location };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  return null;
+}
+
 export async function installDelegationSkills(
   input: {
     homeDirectory?: string;

@@ -37,6 +37,8 @@ import {
   encodeHarnessPluginRoute,
   harnessPluginRouteSchema,
   harnessCommandDescriptorSchema,
+  formatDelegationMentionLink,
+  formatHarnessCommandMentionLink,
   harnessIdSchema,
   harnessModelRefSchema,
   harnessModelCatalogSchema,
@@ -62,6 +64,7 @@ import {
   type HostUpdateCoordinator,
 } from "../src/index.js";
 import { runDelegationCli } from "../src/delegation-cli.js";
+import { installDelegationSkills } from "../src/delegation-skill.js";
 import { startDelegationControlServer } from "../src/delegation-control-server.js";
 import type { OfficialAppServerConnection } from "../src/official-app-server-connection.js";
 
@@ -5685,52 +5688,55 @@ describe("AppServerHost HarnessAdapter projection", () => {
   });
 
   it.each([
-    ["bare", "/compact"],
-    ["space", "/compact "],
-    ["newline", "/compact\n"],
-    ["space before newline", "/compact \n"],
-    ["surrounding whitespace", " \n/compact\t\r\n"],
-  ])("recognizes compact without instructions: %s", async (_name, text) => {
-    const fixture = createFixture();
-    try {
-      const threadId = await startPiThread(fixture);
-      const session = fixture.adapter.sessions[0];
-      if (!session) throw new Error("Fake Pi Session was not opened");
-      session.commands = {
-        list: async () => ({
-          ok: true,
-          value: {
-            commands: [
-              harnessCommandDescriptorSchema.parse({
-                id: "fake.compact",
-                invocation: "/compact",
-                label: "Compact",
-                argumentMode: "text",
-              }),
-            ],
+    ["bare", "/compact", undefined],
+    ["space", "/compact ", undefined],
+    ["newline", "/compact\n", undefined],
+    ["space before newline", "/compact \n", { text: "\n" }],
+    ["surrounding whitespace", " \n/compact\t\r\n", { text: "\r\n" }],
+  ])(
+    "recognizes compact and preserves its argument bytes: %s",
+    async (_name, text, argumentsExpected) => {
+      const fixture = createFixture();
+      try {
+        const threadId = await startPiThread(fixture);
+        const session = fixture.adapter.sessions[0];
+        if (!session) throw new Error("Fake Pi Session was not opened");
+        session.commands = {
+          list: async () => ({
+            ok: true,
+            value: {
+              commands: [
+                harnessCommandDescriptorSchema.parse({
+                  id: "fake.compact",
+                  invocation: "/compact",
+                  label: "Compact",
+                  argumentMode: "text",
+                }),
+              ],
+            },
+          }),
+          execute: async ({ turnId, arguments: arguments_ }) => {
+            expect(arguments_).toEqual(argumentsExpected);
+            session.publishEphemeralCommand(turnId, {
+              type: "contextCompaction",
+              itemId: hostItemIdSchema.parse("compact-whitespace-test"),
+            });
+            return { ok: true, value: { turnId } };
           },
-        }),
-        execute: async ({ turnId, arguments: arguments_ }) => {
-          expect(arguments_).toBeUndefined();
-          session.publishEphemeralCommand(turnId, {
-            type: "contextCompaction",
-            itemId: hostItemIdSchema.parse("compact-whitespace-test"),
-          });
-          return { ok: true, value: { turnId } };
-        },
-      };
-      writeRequest(fixture.desktopInput, {
-        id: 2,
-        method: "turn/start",
-        params: { threadId, input: [{ type: "text", text }] },
-      });
-      await expect(
-        fixture.collector.waitFor((message) => requestId(message, 2)),
-      ).resolves.toMatchObject({ result: { turn: { status: "inProgress" } } });
-    } finally {
-      await stopFixture(fixture);
-    }
-  });
+        };
+        writeRequest(fixture.desktopInput, {
+          id: 2,
+          method: "turn/start",
+          params: { threadId, input: [{ type: "text", text }] },
+        });
+        await expect(
+          fixture.collector.waitFor((message) => requestId(message, 2)),
+        ).resolves.toMatchObject({ result: { turn: { status: "inProgress" } } });
+      } finally {
+        await stopFixture(fixture);
+      }
+    },
+  );
 
   it("projects a Harness command's native compaction Item through the existing UI lane", async () => {
     const fixture = createFixture();
@@ -9252,5 +9258,368 @@ describe("Host shutdown budget", () => {
       "closing Harness Sessions did not finish within the shutdown budget",
     );
     rmSync(fixture.mappingStoreDirectory, { recursive: true, force: true });
+  });
+});
+
+describe("R5 Host command and Composer admission", () => {
+  it("does not enqueue a workspace metadata read on an active Session", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    let releaseList: (() => void) | undefined;
+    const list = vi.fn(
+      async () =>
+        new Promise<never>((resolve) => {
+          releaseList = () => resolve({} as never);
+        }),
+    );
+    session.commands = { list, execute: async ({ turnId }) => ({ ok: true, value: { turnId } }) };
+    let releaseInspect: (() => void) | undefined;
+    const inspectCommands = vi.fn(
+      async () =>
+        new Promise((resolve) => {
+          releaseInspect = () => resolve({ ok: true, value: { source: "live", commands: [] } });
+        }),
+    );
+    Object.assign(fixture.adapter, { liveCommandCatalog: true, inspectCommands });
+    try {
+      writeRequest(fixture.desktopInput, {
+        id: 90,
+        method: "codexhost/harness/commands/inspect",
+        params: { harnessId: "pi", cwd: "/synthetic" },
+      });
+      await vi.waitFor(() => expect(inspectCommands).toHaveBeenCalledOnce());
+      const turnId = await startPiTurn(fixture, threadId, 91);
+      await fixture.collector.waitFor((message) => turnEvent(message, "turn/started", turnId));
+      expect(list).not.toHaveBeenCalled();
+      session.succeedTurn();
+      await fixture.collector.waitFor((message) => turnEvent(message, "turn/completed", turnId));
+      releaseInspect?.();
+      await fixture.collector.waitFor((message) => requestId(message, 90));
+    } finally {
+      releaseList?.();
+      releaseInspect?.();
+      await stopFixture(fixture);
+    }
+  });
+
+  it("inspects cold native metadata by cwd and refreshes it before execution", async () => {
+    const fixture = createFixture();
+    const builtin = harnessCommandDescriptorSchema.parse({
+      id: "fake.help",
+      invocation: "/help",
+      label: "Help",
+      argumentMode: "none",
+    });
+    const native = harnessCommandDescriptorSchema.parse({
+      id: "pi.native.review",
+      invocation: "/review",
+      label: "Review",
+      argumentMode: "text",
+      kind: "skill",
+    });
+    const inspectCommands = vi.fn(async () => ({
+      ok: true as const,
+      value: { source: "live" as const, commands: [native] },
+    }));
+    Object.assign(fixture.adapter, {
+      commandCatalog: { commands: [builtin] },
+      liveCommandCatalog: true,
+      inspectCommands,
+    });
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const list = vi.fn(async () => ({
+      ok: true as const,
+      value: { source: "static" as const, commands: [builtin] },
+    }));
+    const executeCommand = vi.fn(
+      async ({ turnId, arguments: args }: { turnId: string; arguments?: JsonObject }) => {
+        expect(args).toEqual({ text: "\t  inspect this  " });
+        session.publishEphemeralCommand(hostTurnIdSchema.parse(turnId), {
+          type: "contextCompaction",
+          itemId: hostItemIdSchema.parse("r5-native-command-item"),
+        });
+        return { ok: true as const, value: { turnId: hostTurnIdSchema.parse(turnId) } };
+      },
+    );
+    session.commands = { list, execute: executeCommand };
+
+    writeRequest(fixture.desktopInput, {
+      id: 91,
+      method: "codexhost/harness/commands/inspect",
+      params: { harnessId: "pi", cwd: "/synthetic" },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 91)),
+    ).resolves.toMatchObject({
+      result: { source: "live", commands: [builtin, native] },
+    });
+    expect(inspectCommands).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: path.resolve("/synthetic") }),
+    );
+
+    const chip = formatHarnessCommandMentionLink({
+      harnessId: "pi",
+      label: "Review",
+      invocation: "/review",
+    });
+    writeRequest(fixture.desktopInput, {
+      id: 92,
+      method: "turn/start",
+      params: { threadId, input: [{ type: "text", text: `${chip} \t  inspect this  ` }] },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 92)),
+    ).resolves.toMatchObject({ result: { turn: { status: "inProgress" } } });
+    expect(inspectCommands).toHaveBeenCalledTimes(2);
+    expect(executeCommand).toHaveBeenCalledOnce();
+    await fixture.collector.waitFor((message) => method(message, "turn/completed"));
+
+    writeRequest(fixture.desktopInput, {
+      id: 93,
+      method: "turn/start",
+      params: { threadId, input: [{ type: "text", text: "/absent" }] },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 93)),
+    ).resolves.toMatchObject({ error: { code: -32078 } });
+    expect(executeCommand).toHaveBeenCalledOnce();
+    await stopFixture(fixture);
+  });
+
+  it("rewrites official delegation text while retaining attachment and input metadata", async () => {
+    const skillHome = mkdtempSync(path.join(tmpdir(), "codexhost-r5-skill-home-"));
+    await installDelegationSkills({ homeDirectory: skillHome });
+    const fixture = createFixture({ environment: { HOME: skillHome } });
+    await fixture.ready;
+    await bindOfficialThread(fixture, "r5-official-thread");
+    const chip = formatDelegationMentionLink({ harnessId: "pi", label: "Pi" });
+    writeRequest(fixture.desktopInput, {
+      id: 94,
+      method: "turn/start",
+      params: {
+        threadId: "r5-official-thread",
+        input: [
+          { type: "text", text: `${chip} inspect issue`, metadata: { marker: "kept" } },
+          { type: "image", url: "synthetic-attachment" },
+        ],
+      },
+    });
+    const forwarded = await readJsonLine(fixture.official.stdin);
+    expect(forwarded).toMatchObject({
+      id: 94,
+      method: "turn/start",
+      params: {
+        input: [
+          { type: "text", metadata: { marker: "kept" } },
+          { type: "image", url: "synthetic-attachment" },
+          {
+            type: "skill",
+            name: "codexhost-delegation",
+            path: path.join(skillHome, ".agents", "skills", "codexhost-delegation", "SKILL.md"),
+          },
+        ],
+      },
+    });
+    const forwardedInput = (forwarded.params as JsonObject).input as JsonObject[];
+    expect(forwardedInput[0]?.text).toContain("inspect issue");
+    expect(forwardedInput[0]?.text).toContain("codexhost-delegation skill");
+
+    writeRequest(fixture.desktopInput, {
+      id: 95,
+      method: "turn/start",
+      params: {
+        threadId: "r5-official-thread",
+        input: [
+          {
+            type: "text",
+            text: formatHarnessCommandMentionLink({
+              harnessId: "pi",
+              label: "Review",
+              invocation: "/review",
+            }),
+          },
+        ],
+      },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 95)),
+    ).resolves.toMatchObject({ error: { code: -32602 } });
+    await stopFixture(fixture);
+    rmSync(skillHome, { recursive: true, force: true });
+  });
+
+  it("keeps official delegation text when the selected HOME has no installed Skill", async () => {
+    const skillHome = mkdtempSync(path.join(tmpdir(), "codexhost-r5-empty-home-"));
+    const fixture = createFixture({ environment: { HOME: skillHome } });
+    await fixture.ready;
+    await bindOfficialThread(fixture, "r5-official-no-skill");
+    const chip = formatDelegationMentionLink({ harnessId: "pi", label: "Pi" });
+    writeRequest(fixture.desktopInput, {
+      id: 101,
+      method: "turn/start",
+      params: {
+        threadId: "r5-official-no-skill",
+        input: [{ type: "text", text: `${chip} inspect issue` }],
+      },
+    });
+    const forwarded = await readJsonLine(fixture.official.stdin);
+    const input = (forwarded.params as JsonObject).input as JsonObject[];
+    expect(input).toHaveLength(1);
+    expect(input[0]?.text).toContain("codexhost-delegation skill");
+    await stopFixture(fixture);
+    rmSync(skillHome, { recursive: true, force: true });
+  });
+
+  it("rejects a steering command chip before cancelling the active Turn", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const turnId = await startPiTurn(fixture, threadId);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const execute = vi.spyOn(session, "execute");
+    const chip = formatHarnessCommandMentionLink({
+      harnessId: "pi",
+      label: "Review",
+      invocation: "/review",
+    });
+    writeRequest(fixture.desktopInput, {
+      id: 96,
+      method: "turn/steer",
+      params: { threadId, expectedTurnId: turnId, input: [{ type: "text", text: chip }] },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 96)),
+    ).resolves.toMatchObject({ error: { code: -32602 } });
+    expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ type: "turn.cancel" }));
+    session.succeedTurn();
+    await stopFixture(fixture);
+  });
+
+  it("cancels only the matching pending command admission and prevents a late native execution", async () => {
+    const fixture = createFixture();
+    const native = harnessCommandDescriptorSchema.parse({
+      id: "pi.native.review",
+      invocation: "/review",
+      label: "Review",
+      argumentMode: "none",
+    });
+    const pending = Promise.withResolvers<{
+      ok: true;
+      value: { source: "live"; commands: [typeof native] };
+    }>();
+    const inspectCommands = vi.fn(() => pending.promise);
+    Object.assign(fixture.adapter, { liveCommandCatalog: true, inspectCommands });
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const executeCommand = vi.fn(async ({ turnId }: { turnId: string }) => ({
+      ok: true as const,
+      value: { turnId: hostTurnIdSchema.parse(turnId) },
+    }));
+    session.commands = {
+      list: async () => ({ ok: true, value: { source: "static", commands: [] } }),
+      execute: executeCommand,
+    };
+    const turnId = hostTurnIdSchema.parse("r5-pending-command");
+    writeRequest(fixture.desktopInput, {
+      id: 97,
+      method: "codexhost/thread/command/execute",
+      params: { threadId, commandId: native.id, turnId },
+    });
+    await vi.waitFor(() => expect(inspectCommands).toHaveBeenCalledOnce());
+    writeRequest(fixture.desktopInput, {
+      id: 98,
+      method: "turn/interrupt",
+      params: { threadId, turnId: "stale-command-turn" },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 98)),
+    ).resolves.toMatchObject({ error: { code: -32074 } });
+    expect(executeCommand).not.toHaveBeenCalled();
+    writeRequest(fixture.desktopInput, {
+      id: 99,
+      method: "turn/interrupt",
+      params: { threadId, turnId },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 99)),
+    ).resolves.toMatchObject({ result: {} });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 97)),
+    ).resolves.toMatchObject({ error: { code: -32078 } });
+    pending.resolve({ ok: true, value: { source: "live", commands: [native] } });
+    await Promise.resolve();
+    expect(executeCommand).not.toHaveBeenCalled();
+    const nextTurnId = await startPiTurn(fixture, threadId, 100);
+    session.succeedTurn();
+    await fixture.collector.waitFor((message) => turnEvent(message, "turn/completed", nextTurnId));
+    await stopFixture(fixture);
+  });
+
+  it("hands off interruption to native cancellation while command acceptance is pending", async () => {
+    const fixture = createFixture();
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    const accepted = Promise.withResolvers<undefined>();
+    const executing = Promise.withResolvers<undefined>();
+    const nativeExecute = vi.spyOn(session, "execute");
+    session.commands = {
+      list: async () => ({
+        ok: true,
+        value: {
+          commands: [
+            harnessCommandDescriptorSchema.parse({
+              id: "fake.compact",
+              invocation: "/compact",
+              label: "Compact",
+              argumentMode: "none",
+            }),
+          ],
+        },
+      }),
+      execute: async ({ turnId }) => {
+        const started = await session.execute({
+          type: "turn.start",
+          turnId,
+          input: [{ type: "text", text: "native command" }],
+        });
+        if (!started.ok) return started;
+        executing.resolve(undefined);
+        await accepted.promise;
+        return { ok: true, value: { turnId } };
+      },
+    };
+    const turnId = hostTurnIdSchema.parse("r5-executing-command");
+    writeRequest(fixture.desktopInput, {
+      id: 102,
+      method: "codexhost/thread/command/execute",
+      params: {
+        threadId,
+        commandId: "fake.compact",
+        turnId,
+      },
+    });
+    await executing.promise;
+    writeRequest(fixture.desktopInput, {
+      id: 103,
+      method: "turn/interrupt",
+      params: { threadId, turnId },
+    });
+    accepted.resolve(undefined);
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 102)),
+    ).resolves.toMatchObject({ result: { accepted: true, turnId } });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 103)),
+    ).resolves.toMatchObject({ result: {} });
+    expect(nativeExecute).toHaveBeenCalledWith({ type: "turn.cancel", turnId });
+    session.completeCancellation();
+    await fixture.collector.waitFor((message) => turnEvent(message, "turn/completed", turnId));
+    await stopFixture(fixture);
   });
 });
