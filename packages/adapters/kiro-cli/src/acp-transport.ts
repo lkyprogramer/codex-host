@@ -1,20 +1,16 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
-import { Readable, Writable } from "node:stream";
 import { setTimeout as delay } from "node:timers/promises";
+import { startAcpAgent, withDeadline } from "@codexhost/adapter-acp-core";
 import {
   commandInvocation,
   runOwnedProcess,
-  spawnOwnedProcess,
   type OwnedProcessTree,
 } from "@codexhost/harness-discovery";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
 import {
-  ClientSideConnection,
-  PROTOCOL_VERSION,
   RequestError,
-  ndJsonStream,
-  type Client,
+  type ClientSideConnection,
   type InitializeResponse,
   type LoadSessionResponse,
   type NewSessionResponse,
@@ -207,18 +203,11 @@ function classifyStartupError(error: unknown): KiroTransportError {
 class KiroRequestTimeoutError extends KiroTransportError {}
 
 function withTimeout<T>(promise: Promise<T>, milliseconds: number, operation: string): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  return Promise.race([
+  return withDeadline(
     promise,
-    new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(
-        () => reject(new KiroRequestTimeoutError("unavailable", `${operation} timed out`)),
-        milliseconds,
-      );
-    }),
-  ]).finally(() => {
-    if (timeout) clearTimeout(timeout);
-  });
+    milliseconds,
+    () => new KiroRequestTimeoutError("unavailable", `${operation} timed out`),
+  );
 }
 
 function waitForLeaderExit(
@@ -722,92 +711,48 @@ export class KiroAcpTransport {
       ...(this.#options.command ? { command: this.#options.command } : {}),
       environment: this.#options.environment ?? process.env,
     });
-    const invocation = kiroInvocation(executable);
-
-    const { child, tree } = spawnOwnedProcess(invocation.command, invocation.arguments, {
+    const initialize = await startAcpAgent({
+      label: "Kiro",
+      invocation: kiroInvocation(executable),
       cwd: this.#options.cwd,
-      env: { ...process.env, ...this.#options.environment },
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      ...(this.#options.environment ? { environment: this.#options.environment } : {}),
       closeTimeoutMs: this.#closeTimeoutMs,
-      onExitCleanupFailure: (error) =>
-        this.#fault(
-          new KiroTransportError(
-            "processExited",
-            `Kiro ACP owned process cleanup failed: ${errorText(error)}`,
-          ),
-        ),
-    });
-    this.#child = child;
-    this.#ownedProcessTree = tree;
-
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
-    });
-
-    await withTimeout(
-      new Promise<void>((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      }),
-      this.#commandTimeoutMs,
-      "Kiro CLI startup",
-    );
-
-    const stream = ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-    );
-
-    const connection = new ClientSideConnection(
-      () =>
-        ({
-          sessionUpdate: (params) => this.#handleUpdate(params),
-          requestPermission: (params) => this.#handlePermission(params),
-          extMethod: (method, params) => this.#handleExtMethod(method, params),
-          extNotification: () => this.#handleExtNotification(),
-        }) satisfies Client,
-      stream,
-    );
-    this.#connection = connection;
-
-    child.once("error", (error) =>
-      this.#fault(new KiroTransportError("processExited", error.message)),
-    );
-    child.once("exit", (code, signal) => {
-      if (!this.#closing && !this.#closed) {
-        this.#fault(
-          new KiroTransportError(
-            "processExited",
-            `Kiro ACP exited (code=${code}, signal=${signal})`,
-          ),
-        );
-      }
-    });
-
-    const initialize = await withTimeout(
-      connection.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {
-          _meta: {
-            kiro: {
-              userInput: true,
-              requirementsAnalysis: true,
-              specPhaseCheckpoints: true,
-            },
+      startupTimeoutMs: this.#commandTimeoutMs,
+      clientCapabilities: {
+        _meta: {
+          kiro: {
+            userInput: true,
+            requirementsAnalysis: true,
+            specPhaseCheckpoints: true,
           },
         },
-        clientInfo: { name: "codexhost", version: "0.1.6" },
-      }),
-      this.#commandTimeoutMs,
-      "Kiro ACP initialize",
-    );
+      },
+      client: {
+        sessionUpdate: (params) => this.#handleUpdate(params),
+        requestPermission: (params) => this.#handlePermission(params),
+        extMethod: (method, params) => this.#handleExtMethod(method, params),
+        extNotification: () => this.#handleExtNotification(),
+      },
+      onSpawned: (child, tree) => {
+        this.#child = child;
+        this.#ownedProcessTree = tree;
+      },
+      onConnected: (connection) => {
+        this.#connection = connection;
+      },
+      onStderr: (chunk) => {
+        this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk}`);
+      },
+      closing: () => this.#closing || this.#closed,
+      onProcessFault: (message) => this.#fault(new KiroTransportError("processExited", message)),
+      timedOut: (operation) => new KiroRequestTimeoutError("unavailable", `${operation} timed out`),
+      unsupportedProtocol: (version) =>
+        new KiroTransportError(
+          "protocolError",
+          `Kiro ACP negotiated unsupported protocol version ${version}`,
+        ),
+    });
 
-    if (initialize.protocolVersion !== PROTOCOL_VERSION) {
-      throw new KiroTransportError(
-        "protocolError",
-        `Kiro ACP negotiated unsupported protocol version ${initialize.protocolVersion}`,
-      );
-    }
     this.#initialize = initialize;
     return initialize;
   }

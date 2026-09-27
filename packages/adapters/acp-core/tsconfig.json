@@ -9,16 +9,7 @@
   },
   "references": [
     {
-      "path": "../../shared-contracts/tsconfig.json"
-    },
-    {
-      "path": "../../harness-adapter/tsconfig.json"
-    },
-    {
       "path": "../../harness-discovery/tsconfig.json"
-    },
-    {
-      "path": "../acp-core/tsconfig.json"
     }
   ],
   "include": ["src/**/*.ts"]

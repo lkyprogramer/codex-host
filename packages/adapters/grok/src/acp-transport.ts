@@ -2,17 +2,14 @@ import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { Readable, Writable } from "node:stream";
 
+import { startAcpAgent, withDeadline } from "@codexhost/adapter-acp-core";
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
-import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import type { OwnedProcessTree } from "@codexhost/harness-discovery";
 import type { HarnessPermissionModeId } from "@codexhost/shared-contracts";
 import {
-  ClientSideConnection,
-  PROTOCOL_VERSION,
   RequestError,
-  ndJsonStream,
-  type Client,
+  type ClientSideConnection,
   type InitializeResponse,
   type NewSessionResponse,
   type LoadSessionResponse,
@@ -274,18 +271,10 @@ function withTimeout<T>(
   operation: string,
   onTimeout?: (error: GrokTransportError) => void,
 ): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  return Promise.race([
-    promise,
-    new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(() => {
-        const error = new GrokTransportError("unavailable", `${operation} timed out`);
-        onTimeout?.(error);
-        reject(error);
-      }, milliseconds);
-    }),
-  ]).finally(() => {
-    if (timeout) clearTimeout(timeout);
+  return withDeadline(promise, milliseconds, () => {
+    const error = new GrokTransportError("unavailable", `${operation} timed out`);
+    onTimeout?.(error);
+    return error;
   });
 }
 
@@ -815,75 +804,38 @@ export class GrokAcpTransport {
       ...(this.#options.command ? { command: this.#options.command } : {}),
       environment: this.#options.environment ?? process.env,
     });
-    const invocation = grokInvocation(executable, process.platform, this.#startupModelId);
-    const { child, tree } = spawnOwnedProcess(invocation.command, invocation.arguments, {
+    const initialize = await startAcpAgent({
+      label: "Grok",
+      invocation: grokInvocation(executable, process.platform, this.#startupModelId),
       cwd: this.#options.cwd,
-      env: { ...process.env, ...this.#options.environment },
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      ...(this.#options.environment ? { environment: this.#options.environment } : {}),
       closeTimeoutMs: this.#options.closeTimeoutMs,
-      onExitCleanupFailure: (error) =>
-        this.#fault(
-          new GrokTransportError(
-            "processExited",
-            `Grok ACP owned process cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
+      startupTimeoutMs: this.#options.commandTimeoutMs,
+      clientCapabilities: {},
+      client: {
+        sessionUpdate: (params) => this.#handleUpdate(params),
+        requestPermission: (params) => this.#handlePermission(params),
+        extNotification: (method, params) => this.#handleExtensionNotification(method, params),
+      },
+      onSpawned: (child, tree) => {
+        this.#child = child;
+        this.#ownedTree = tree;
+      },
+      onConnected: (connection) => {
+        this.#connection = connection;
+      },
+      onStderr: (chunk) => {
+        this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk}`);
+      },
+      closing: () => this.#closing || this.#closed,
+      onProcessFault: (message) => this.#fault(new GrokTransportError("processExited", message)),
+      timedOut: (operation) => new GrokTransportError("unavailable", `${operation} timed out`),
+      unsupportedProtocol: (version) =>
+        new GrokTransportError(
+          "protocolError",
+          `Grok ACP negotiated unsupported protocol version ${version}`,
         ),
     });
-    this.#child = child;
-    this.#ownedTree = tree;
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
-    });
-    await withTimeout(
-      new Promise<void>((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      }),
-      this.#options.commandTimeoutMs,
-      "Grok CLI startup",
-    );
-    const stream = ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-    );
-    const connection = new ClientSideConnection(
-      () =>
-        ({
-          sessionUpdate: (params) => this.#handleUpdate(params),
-          requestPermission: (params) => this.#handlePermission(params),
-          extNotification: (method, params) => this.#handleExtensionNotification(method, params),
-        }) satisfies Client,
-      stream,
-    );
-    this.#connection = connection;
-    child.once("error", (error) =>
-      this.#fault(new GrokTransportError("processExited", error.message)),
-    );
-    child.once("exit", (code, signal) => {
-      if (!this.#closing && !this.#closed) {
-        this.#fault(
-          new GrokTransportError(
-            "processExited",
-            `Grok ACP exited (code=${code}, signal=${signal})`,
-          ),
-        );
-      }
-    });
-    const initialize = await withTimeout(
-      connection.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {},
-        clientInfo: { name: "codexhost", version: "0.1.6" },
-      }),
-      this.#options.commandTimeoutMs,
-      "Grok ACP initialize",
-    );
-    if (initialize.protocolVersion !== PROTOCOL_VERSION) {
-      throw new GrokTransportError(
-        "protocolError",
-        `Grok ACP negotiated unsupported protocol version ${initialize.protocolVersion}`,
-      );
-    }
     this.#initialize = initialize;
     return initialize;
   }
