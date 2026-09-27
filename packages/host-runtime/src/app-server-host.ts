@@ -18,6 +18,7 @@ import type {
   HostSubagentState,
   HostApprovalResponse,
   HostQuestionInteraction,
+  ModelSelectCommand,
 } from "@codexhost/harness-adapter";
 import { parseHostUsage, type HostUsage } from "@codexhost/harness-adapter";
 import type { HarnessPluginContext } from "@codexhost/harness-adapter/plugin";
@@ -55,7 +56,6 @@ import {
   harnessInspectionSchema,
   harnessWebUiOpenParamsSchema,
   harnessWebUiOpenResultSchema,
-  harnessModelSelectionStateSchema,
   harnessThinkingOptionIdSchema,
   hostItemIdSchema,
   hostThreadIdSchema,
@@ -63,14 +63,10 @@ import {
   jsonValueSchema,
   threadInspectionParamsSchema,
   threadInspectionSchema,
-  threadModelSelectParamsSchema,
   threadUsageInspectionParamsSchema,
   threadUsageInspectionSchema,
-  threadPermissionModeSelectParamsSchema,
-  threadThinkingSelectParamsSchema,
   threadOwnershipListParamsSchema,
   threadOwnershipListResultSchema,
-  permissionModeFixedAtCreate,
   updateCheckResultSchema,
   updateEmptyParamsSchema,
   updateStartResultSchema,
@@ -104,6 +100,11 @@ import {
   type ExternalThreadLocation,
   type ExternalThreadResolution,
 } from "./external-thread-runtime.js";
+import {
+  confirmedThreadSelection,
+  threadConfigurationSelections,
+  type ThreadConfigurationKind,
+} from "./thread-configuration-selection.js";
 import { ExternalSteerError, ExternalTurnSteering } from "./external-turn-steering.js";
 import { applyRequestedWorkMode, requestedWorkMode } from "./external-work-mode.js";
 import {
@@ -483,7 +484,7 @@ function requestText(params: JsonObject): string {
 
 class ExternalConfigurationPersistenceError extends Error {
   constructor(
-    readonly configuration: "Model" | "Thinking" | "Permission Mode",
+    readonly configuration: ThreadConfigurationKind,
     cause: unknown,
   ) {
     super(
@@ -1010,15 +1011,15 @@ export class AppServerHost {
       return;
     }
     if (request.method === "codexhost/thread/model/select") {
-      await this.#selectThreadModel(request);
+      await this.#selectThreadConfiguration(request, "Model");
       return;
     }
     if (request.method === "codexhost/thread/thinking/select") {
-      await this.#selectThreadThinking(request);
+      await this.#selectThreadConfiguration(request, "Thinking");
       return;
     }
     if (request.method === "codexhost/thread/permission-mode/select") {
-      await this.#selectThreadPermissionMode(request);
+      await this.#selectThreadConfiguration(request, "Permission Mode");
       return;
     }
     if (request.method === "codexhost/harness/commands/inspect") {
@@ -2972,13 +2973,17 @@ export class AppServerHost {
     }
   }
 
-  async #selectThreadModel(request: JsonRpcRequest): Promise<void> {
-    const params = threadModelSelectParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      await this.#writer.json(rpcError(request, -32602, "Invalid Thread Model selection params"));
+  async #selectThreadConfiguration(
+    request: JsonRpcRequest,
+    kind: ThreadConfigurationKind,
+  ): Promise<void> {
+    const selection = threadConfigurationSelections[kind];
+    const parsed = selection.parse(request.params);
+    if (!parsed) {
+      await this.#writer.json(rpcError(request, -32602, `Invalid Thread ${kind} selection params`));
       return;
     }
-    const resolution = await this.#resolveExternalThread(params.data.threadId);
+    const resolution = await this.#resolveExternalThread(parsed.threadId);
     if (resolution.kind === "error") {
       await this.#writer.json(rpcError(request, resolution.error.code, resolution.error.message));
       return;
@@ -2986,203 +2991,19 @@ export class AppServerHost {
     const thread = resolution.kind === "external" ? resolution.thread : undefined;
     if (!thread) {
       await this.#writer.json(
-        rpcError(request, -32078, "Model selection requires a current-process external Thread"),
+        rpcError(request, -32078, `${kind} selection requires a current-process external Thread`),
       );
       return;
     }
-    if (!thread.session.capabilities.configuration.selectModel) {
-      await this.#writer.json(
-        rpcError(request, -32078, "External Harness does not support Model selection"),
-      );
-      return;
-    }
-    const beforeRevision = thread.stateObserver.revision;
-    const result = await thread.session.execute({
-      type: "model.select",
-      model: params.data.model,
-    });
-    if (!result.ok) {
-      await this.#writer.json(rpcError(request, -32078, result.error.message));
-      return;
-    }
-    try {
-      const state = await thread.stateObserver.waitForChange(beforeRevision);
-      const projected = harnessModelSelectionStateSchema.parse({
-        ...(state.effectiveModel ? { effectiveModel: state.effectiveModel } : {}),
-        ...(state.resolvedModelLabel ? { resolvedModelLabel: state.resolvedModelLabel } : {}),
-        ...(state.effectiveThinkingOptionId
-          ? { effectiveThinkingOptionId: state.effectiveThinkingOptionId }
-          : {}),
-        ...(state.availableThinkingOptions
-          ? { availableThinkingOptions: state.availableThinkingOptions }
-          : {}),
-        ...(state.effectivePermissionModeId
-          ? { effectivePermissionModeId: state.effectivePermissionModeId }
-          : {}),
-      });
-      if (!projected.effectiveModel) {
-        throw new Error("Harness Session did not report an effective Model");
-      }
-      const previousSelection = decodeExternalTransportSelection(
-        thread.harnessId,
-        thread.transportModelId,
-      );
-      const transportModelId = encodeExternalTransportSelection(thread.harnessId, {
-        ...(previousSelection ?? {}),
-        model: projected.effectiveModel,
-        ...(projected.effectiveThinkingOptionId
-          ? { thinkingOptionId: projected.effectiveThinkingOptionId }
-          : {}),
-        ...(projected.effectivePermissionModeId
-          ? { permissionModeId: projected.effectivePermissionModeId }
-          : {}),
-      });
-      await this.#persistExternalTransportSelection(thread, transportModelId, "Model");
-      thread.requestedModel = projected.effectiveModel;
-      if (projected.effectiveThinkingOptionId) {
-        thread.requestedThinkingOptionId = projected.effectiveThinkingOptionId;
-      }
-      if (projected.effectivePermissionModeId) {
-        thread.requestedPermissionModeId = projected.effectivePermissionModeId;
-      }
-      await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(projected) }));
-    } catch (error) {
-      await this.#writer.json(
-        rpcError(
-          request,
-          error instanceof ExternalConfigurationPersistenceError ? -32081 : -32078,
-          `Model state was not confirmed: ${errorMessage(error)}`,
-        ),
-      );
-    }
-  }
-
-  async #selectThreadThinking(request: JsonRpcRequest): Promise<void> {
-    const params = threadThinkingSelectParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      await this.#writer.json(
-        rpcError(request, -32602, "Invalid Thread Thinking selection params"),
-      );
-      return;
-    }
-    const resolution = await this.#resolveExternalThread(params.data.threadId);
-    if (resolution.kind === "error") {
-      await this.#writer.json(rpcError(request, resolution.error.code, resolution.error.message));
-      return;
-    }
-    const thread = resolution.kind === "external" ? resolution.thread : undefined;
-    if (!thread) {
-      await this.#writer.json(
-        rpcError(request, -32078, "Thinking selection requires a current-process external Thread"),
-      );
-      return;
-    }
-    if (!thread.session.capabilities.configuration.selectThinkingOption) {
-      await this.#writer.json(
-        rpcError(request, -32078, "External Harness does not support Thinking selection"),
-      );
+    const refusal = selection.refusal(thread.session.capabilities.configuration);
+    if (refusal) {
+      await this.#writer.json(rpcError(request, -32078, refusal));
       return;
     }
     const beforeRevision = thread.stateObserver.revision;
-    const result = await thread.session.execute({
-      type: "thinking.select",
-      thinkingOptionId: params.data.thinkingOptionId,
-    });
-    if (!result.ok) {
-      await this.#writer.json(rpcError(request, -32078, result.error.message));
-      return;
-    }
-    try {
-      const state = await thread.stateObserver.waitForChange(beforeRevision);
-      const projected = harnessModelSelectionStateSchema.parse({
-        ...(state.effectiveModel ? { effectiveModel: state.effectiveModel } : {}),
-        ...(state.resolvedModelLabel ? { resolvedModelLabel: state.resolvedModelLabel } : {}),
-        ...(state.effectiveThinkingOptionId
-          ? { effectiveThinkingOptionId: state.effectiveThinkingOptionId }
-          : {}),
-        ...(state.availableThinkingOptions
-          ? { availableThinkingOptions: state.availableThinkingOptions }
-          : {}),
-        ...(state.effectivePermissionModeId
-          ? { effectivePermissionModeId: state.effectivePermissionModeId }
-          : {}),
-      });
-      if (!projected.effectiveThinkingOptionId) {
-        throw new Error("Harness Session did not report effective Thinking");
-      }
-      const previousSelection = decodeExternalTransportSelection(
-        thread.harnessId,
-        thread.transportModelId,
-      );
-      const effectiveModel =
-        projected.effectiveModel ?? thread.requestedModel ?? previousSelection?.model;
-      const transportModelId = encodeExternalTransportSelection(thread.harnessId, {
-        ...(previousSelection ?? {}),
-        ...(effectiveModel ? { model: effectiveModel } : {}),
-        thinkingOptionId: projected.effectiveThinkingOptionId,
-        ...(projected.effectivePermissionModeId
-          ? { permissionModeId: projected.effectivePermissionModeId }
-          : {}),
-      });
-      await this.#persistExternalTransportSelection(thread, transportModelId, "Thinking");
-      if (effectiveModel) thread.requestedModel = effectiveModel;
-      thread.requestedThinkingOptionId = projected.effectiveThinkingOptionId;
-      if (projected.effectivePermissionModeId) {
-        thread.requestedPermissionModeId = projected.effectivePermissionModeId;
-      }
-      await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(projected) }));
-    } catch (error) {
-      await this.#writer.json(
-        rpcError(
-          request,
-          error instanceof ExternalConfigurationPersistenceError ? -32081 : -32078,
-          `Thinking state was not confirmed: ${errorMessage(error)}`,
-        ),
-      );
-    }
-  }
-
-  async #selectThreadPermissionMode(request: JsonRpcRequest): Promise<void> {
-    const params = threadPermissionModeSelectParamsSchema.safeParse(request.params);
-    if (!params.success) {
-      await this.#writer.json(
-        rpcError(request, -32602, "Invalid Thread Permission Mode selection params"),
-      );
-      return;
-    }
-    const resolution = await this.#resolveExternalThread(params.data.threadId);
-    if (resolution.kind === "error") {
-      await this.#writer.json(rpcError(request, resolution.error.code, resolution.error.message));
-      return;
-    }
-    const thread = resolution.kind === "external" ? resolution.thread : undefined;
-    if (!thread) {
-      await this.#writer.json(
-        rpcError(
-          request,
-          -32078,
-          "Permission Mode selection requires a current-process external Thread",
-        ),
-      );
-      return;
-    }
-    if (!thread.session.capabilities.configuration.selectPermissionMode) {
-      await this.#writer.json(
-        rpcError(request, -32078, "External Harness does not support Permission Mode selection"),
-      );
-      return;
-    }
-    if (permissionModeFixedAtCreate(thread.session.capabilities.configuration)) {
-      await this.#writer.json(
-        rpcError(request, -32078, "Permission Mode is fixed at Session creation"),
-      );
-      return;
-    }
-    const beforeRevision = thread.stateObserver.revision;
-    const result = await thread.session.execute({
-      type: "permissionMode.select",
-      permissionModeId: params.data.permissionModeId,
-    });
+    // `execute` is overloaded per command; every configuration write resolves
+    // to a result of the same shape.
+    const result = await thread.session.execute(parsed.command as ModelSelectCommand);
     if (!result.ok) {
       await this.#writer.json(rpcError(request, -32078, result.error.message));
       return;
@@ -3202,28 +3023,23 @@ export class AppServerHost {
           ? { effectivePermissionModeId: state.effectivePermissionModeId }
           : {}),
       });
-      if (!projected.effectivePermissionModeId) {
-        throw new Error("Harness Session did not report its current Permission Mode");
-      }
-      const previousSelection = decodeExternalTransportSelection(
-        thread.harnessId,
-        thread.transportModelId,
-      );
-      const effectiveModel =
-        projected.effectiveModel ?? thread.requestedModel ?? previousSelection?.model;
-      const transportModelId = encodeExternalTransportSelection(thread.harnessId, {
-        ...(previousSelection ?? {}),
-        ...(effectiveModel ? { model: effectiveModel } : {}),
-        permissionModeId: projected.effectivePermissionModeId,
-        ...(projected.effectiveThinkingOptionId
-          ? { thinkingOptionId: projected.effectiveThinkingOptionId }
-          : {}),
+      if (!selection.confirmed(projected)) throw new Error(selection.unconfirmed);
+      const confirmed = confirmedThreadSelection({
+        previous: decodeExternalTransportSelection(thread.harnessId, thread.transportModelId),
+        state: projected,
+        requestedModel: thread.requestedModel,
       });
-      await this.#persistExternalTransportSelection(thread, transportModelId, "Permission Mode");
-      if (effectiveModel) thread.requestedModel = effectiveModel;
-      thread.requestedPermissionModeId = projected.effectivePermissionModeId;
+      await this.#persistExternalTransportSelection(
+        thread,
+        encodeExternalTransportSelection(thread.harnessId, confirmed),
+        kind,
+      );
+      if (confirmed.model) thread.requestedModel = confirmed.model;
       if (projected.effectiveThinkingOptionId) {
         thread.requestedThinkingOptionId = projected.effectiveThinkingOptionId;
+      }
+      if (projected.effectivePermissionModeId) {
+        thread.requestedPermissionModeId = projected.effectivePermissionModeId;
       }
       await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(projected) }));
     } catch (error) {
@@ -3231,7 +3047,7 @@ export class AppServerHost {
         rpcError(
           request,
           error instanceof ExternalConfigurationPersistenceError ? -32081 : -32078,
-          `Permission Mode state was not confirmed: ${errorMessage(error)}`,
+          `${kind} state was not confirmed: ${errorMessage(error)}`,
         ),
       );
     }
@@ -3240,7 +3056,7 @@ export class AppServerHost {
   async #persistExternalTransportSelection(
     thread: ExternalThread,
     transportModelId: string,
-    configuration: "Model" | "Thinking" | "Permission Mode",
+    configuration: ThreadConfigurationKind,
   ): Promise<void> {
     let record: StoredThreadRecordV1;
     try {

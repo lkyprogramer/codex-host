@@ -27,6 +27,7 @@ import {
   CLAUDE_CODE_NATIVE_TRANSPORT_MODEL_ID,
   decodeExternalTransportSelection,
   encodeClaudeTransportModel,
+  encodeExternalTransportSelection,
   encodeGrokTransportModel,
   encodePiTransportModel,
   type ExternalHarnessId,
@@ -4311,11 +4312,10 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await expect(
       fixture.mappingStore.getThread(hostThreadIdSchema.parse(threadId)),
     ).resolves.toMatchObject({
-      transportModelId: encodeClaudeTransportModel(
+      transportModelId: encodeExternalTransportSelection("claude-code", {
         model,
-        undefined,
-        harnessThinkingOptionIdSchema.parse("off"),
-      ),
+        thinkingOptionId: harnessThinkingOptionIdSchema.parse("off"),
+      }),
     });
     expect(pi.sessions).toHaveLength(0);
     await stopFixture(fixture);
@@ -4370,11 +4370,11 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await expect(
       fixture.mappingStore.getThread(hostThreadIdSchema.parse(threadId)),
     ).resolves.toMatchObject({
-      transportModelId: encodeClaudeTransportModel(
+      transportModelId: encodeExternalTransportSelection("claude-code", {
         model,
-        auto,
-        harnessThinkingOptionIdSchema.parse("high"),
-      ),
+        permissionModeId: auto,
+        thinkingOptionId: harnessThinkingOptionIdSchema.parse("high"),
+      }),
     });
     expect(pi.sessions).toHaveLength(0);
 
@@ -4533,7 +4533,11 @@ describe("AppServerHost HarnessAdapter projection", () => {
     });
     await expect(mappingStore.getThread(hostThreadIdSchema.parse(threadId))).resolves.toMatchObject(
       {
-        transportModelId: encodeClaudeTransportModel(model, auto, off),
+        transportModelId: encodeExternalTransportSelection("claude-code", {
+          model,
+          permissionModeId: auto,
+          thinkingOptionId: off,
+        }),
       },
     );
     await closeFixture(fixture);
@@ -4629,7 +4633,12 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await expect(
       fixture.mappingStore.getThread(hostThreadIdSchema.parse(threadId)),
     ).resolves.toMatchObject({
-      transportModelId: encodePiTransportModel(fixture.adapter.catalog.defaultModel, off),
+      transportModelId: encodeExternalTransportSelection("pi", {
+        ...(fixture.adapter.catalog.defaultModel
+          ? { model: fixture.adapter.catalog.defaultModel }
+          : {}),
+        thinkingOptionId: off,
+      }),
     });
     expect(officialWrite).not.toHaveBeenCalled();
     await stopFixture(fixture);
@@ -8227,11 +8236,10 @@ describe("AppServerHost HarnessAdapter projection", () => {
     ).resolves.toMatchObject({
       result: {
         harnessId: "claude-code",
-        transportModelId: encodeClaudeTransportModel(
-          firstModel,
-          undefined,
-          harnessThinkingOptionIdSchema.parse("off"),
-        ),
+        transportModelId: encodeExternalTransportSelection("claude-code", {
+          model: firstModel,
+          thinkingOptionId: harnessThinkingOptionIdSchema.parse("off"),
+        }),
         effectiveModel: firstModel,
         resolvedModelLabel: "fake-runtime-primary",
       },

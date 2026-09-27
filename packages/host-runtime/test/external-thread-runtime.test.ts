@@ -17,6 +17,7 @@ import {
 } from "@codexhost/shared-contracts";
 import {
   encodeClaudeTransportModel,
+  encodeExternalTransportSelection,
   encodeGrokTransportModel,
   encodeOmpTransportModel,
   encodeOpenCodeTransportModel,
@@ -216,11 +217,11 @@ describe("ExternalThreadRuntime register", () => {
       effectiveModel: actualModel,
       effectiveThinkingOptionId: actualThinking,
     });
-    const effectiveTransportModelId = encodeOmpTransportModel(
-      actualModel,
-      actualThinking,
-      writeMode,
-    );
+    const effectiveTransportModelId = encodeExternalTransportSelection("omp", {
+      model: actualModel,
+      thinkingOptionId: actualThinking,
+      permissionModeId: writeMode,
+    });
     expect(resolved.thread.record.transportModelId).toBe(effectiveTransportModelId);
     expect(setTransportModelId).toHaveBeenCalledWith(hostThreadId, effectiveTransportModelId);
 
@@ -275,7 +276,9 @@ describe("ExternalThreadRuntime register", () => {
     });
     expect(resolved.thread.stateObserver.state.effectiveThinkingOptionId).toBeUndefined();
     expect(resolved.thread.requestedThinkingOptionId).toBeUndefined();
-    expect(resolved.thread.transportModelId).toBe(encodeOmpTransportModel(actualModel));
+    expect(resolved.thread.transportModelId).toBe(
+      encodeExternalTransportSelection("omp", { model: actualModel }),
+    );
 
     await adapter.close();
   });
@@ -332,7 +335,10 @@ describe("ExternalThreadRuntime register", () => {
     });
     expect(resolved.thread.record.transportModelId).toBe(staleTransportModelId);
     expect(resolved.thread.transportModelId).toBe(
-      encodeOmpTransportModel(actualModel, actualThinking),
+      encodeExternalTransportSelection("omp", {
+        model: actualModel,
+        thinkingOptionId: actualThinking,
+      }),
     );
     expect(setTransportModelId).toHaveBeenCalledOnce();
     expect(diagnose).toHaveBeenCalledWith(expect.any(Error));
@@ -413,13 +419,13 @@ describe("ExternalThreadRuntime register", () => {
     const liveThinking = created.value.initialState.effectiveThinkingOptionId;
     expect(execute).not.toHaveBeenCalled();
     expect(resolved.thread.stateObserver.state.effectivePermissionModeId).toBe(askMode);
-    expect(resolved.thread.transportModelId).toBe(
-      encodeOpenCodeTransportModel(model, askMode, liveThinking),
-    );
-    expect(setTransportModelId).toHaveBeenCalledWith(
-      hostThreadId,
-      encodeOpenCodeTransportModel(model, askMode, liveThinking),
-    );
+    const written = encodeExternalTransportSelection("opencode", {
+      model,
+      permissionModeId: askMode,
+      ...(liveThinking ? { thinkingOptionId: liveThinking } : {}),
+    });
+    expect(resolved.thread.transportModelId).toBe(written);
+    expect(setTransportModelId).toHaveBeenCalledWith(hostThreadId, written);
 
     await adapter.close();
   });
