@@ -1,18 +1,12 @@
 {
-  "name": "@codexhost/adapter-omp",
+  "name": "@codexhost/adapter-pi-family",
   "version": "0.0.0",
   "private": true,
   "type": "module",
   "files": [
-    "dist",
-    "manifest.json",
-    "assets"
+    "dist"
   ],
   "exports": {
-    "./plugin": {
-      "types": "./dist/plugin.d.ts",
-      "import": "./dist/plugin.js"
-    },
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
@@ -22,9 +16,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
-    "@codexhost/adapter-pi-family": "0.0.0",
     "@codexhost/harness-adapter": "0.0.0",
-    "@codexhost/harness-discovery": "0.0.0",
     "@codexhost/shared-contracts": "0.0.0",
     "diff": "8.0.2"
   }

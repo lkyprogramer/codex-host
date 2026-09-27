@@ -36,6 +36,7 @@ flowchart TD
 | `harness-adapter` | Adapter / Session / Plugin 合同、公共输出、Usage 校验、conformance 入口 | 某个 Harness 的私有协议或文件格式 |
 | `harness-discovery` | 可执行文件发现、调用参数辅助、spawn 时绑定的受管进程树关闭 | Session 权限、历史恢复和 Turn 状态 |
 | `adapters/*` | 原生通信、能力确认、交互、历史、版本 profile 与资源清理 | 修改 Desktop 私有状态或重复 Host 映射事务 |
+| `adapters/pi-family` | Pi 与 OMP 共用的模型身份与目录、会话历史映射、工具输出与文件变更推导、RPC 辅助；不是插件，打进两者各自的 Bundle | 两者行为不同的协议与 Session 逻辑（仍在各自 Adapter） |
 | `protocol-core` | 路由解码、事件身份和 Desktop 协议投影 | 解释原生 `_meta` 或调用 SDK |
 | `mapping-store` | Thread / Native Ref、配置 carrier、执行意图与委派关系 | 取代 Harness 的权威历史正文 |
 | `host-runtime` | 加载插件、编排操作、持久化提交、故障终结、恢复与委派 | 静态 import 具体 Adapter 或按名字模拟能力 |

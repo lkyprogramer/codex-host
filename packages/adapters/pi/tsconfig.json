@@ -16,6 +16,9 @@
     },
     {
       "path": "../../harness-discovery/tsconfig.json"
+    },
+    {
+      "path": "../pi-family/tsconfig.json"
     }
   ],
   "include": ["src/**/*.ts"]

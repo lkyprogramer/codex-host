@@ -1,4 +1,12 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  assistantMessageId,
+  assistantReasoning,
+  assistantText,
+  message,
+  nonBlankString,
+  waitForLeaderExit,
+} from "@codexhost/adapter-pi-family";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
@@ -28,22 +36,6 @@ import {
 } from "./pi-usage.js";
 import type { PiNativeModel, PiNativeModelRef } from "./pi-model-catalog.js";
 import { verifyPiSessionCwd } from "./pi-session-file.js";
-
-function waitForLeaderExit(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number,
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const finish = (): void => {
-      clearTimeout(timer);
-      child.removeListener("exit", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    child.once("exit", finish);
-  });
-}
 
 export interface PiSessionState {
   sessionId: string;
@@ -251,14 +243,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-function message(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
-}
-
-function nonBlankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
 function parseNativeModel(value: unknown, context: string): PiNativeModelRef | null {
   if (value === null || value === undefined) return null;
   if (!isRecord(value) || !nonBlankString(value.provider) || !nonBlankString(value.id)) {
@@ -363,40 +347,6 @@ function parseAvailableModels(response: Record<string, unknown>): PiNativeModel[
     }
     return { ...parsed, reasoning: model.reasoning };
   });
-}
-
-function assistantText(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) return null;
-  return value.content
-    .filter(
-      (content): content is Record<string, unknown> =>
-        isRecord(content) && content.type === "text" && typeof content.text === "string",
-    )
-    .map((content) => content.text as string)
-    .join("");
-}
-
-function assistantMessageId(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant") return null;
-  return nonBlankString(value.responseId) ? value.responseId : null;
-}
-
-function extractReasoningText(content: unknown): string | null {
-  if (!isRecord(content)) return null;
-  const type = String(content.type ?? "");
-  if (type === "thinking" || type === "reasoning" || type === "thought") {
-    const text = content.thinking ?? content.reasoning ?? content.text ?? content.delta;
-    return typeof text === "string" ? text : null;
-  }
-  return null;
-}
-
-function assistantReasoning(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) return null;
-  return value.content
-    .map(extractReasoningText)
-    .filter((text): text is string => typeof text === "string")
-    .join("");
 }
 
 function assistantFailure(value: unknown): Error | null | undefined {
