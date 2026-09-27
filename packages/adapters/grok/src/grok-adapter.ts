@@ -7,7 +7,6 @@ import type {
   RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
 import {
-  HarnessOutputChannel,
   validateHostApprovalResponse,
   type HarnessAdapter,
   type HarnessCommandAccepted,
@@ -50,8 +49,7 @@ import {
   type ThinkingSelectCompleted,
   type TurnCancelAccepted,
   type TurnCancelCommand,
-  type HarnessIdleSuspendResult,
-  type HarnessIdleSuspendSignal,
+  HarnessSessionKernel,
   type HarnessOwnedJobsResult,
   type HarnessResourceLifecycle,
   type TurnOutcome,
@@ -105,7 +103,7 @@ import {
 import type { GrokCompactResult } from "./grok-manual-compaction.js";
 import { projectGrokFileChanges } from "./grok-file-change.js";
 import { forkGrokSession } from "./grok-fork.js";
-import { grokIdleSuspendAdmission, type GrokSessionPhase } from "./grok-idle-suspend.js";
+import { grokReleaseUndecided, grokWorkLevel } from "./grok-idle-suspend.js";
 import { mapGrokReplay } from "./grok-history.js";
 import { rewindGrokLastTurn } from "./grok-rewind.js";
 import { GROK_INTERJECT_METHOD } from "./grok-interject.js";
@@ -341,11 +339,8 @@ class GrokHarnessSession implements HarnessSession {
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly workMode: HarnessWorkModeControl;
   readonly steering: HarnessSteeringControl;
-  readonly resourceLifecycle: HarnessResourceLifecycle = {
-    suspend: (signal) => this.#suspendIdle(signal),
-    stopOwnedJobs: () => this.#stopOwnedJobs(),
-  };
-  readonly #channel = new HarnessOutputChannel<HarnessOutput>();
+  readonly resourceLifecycle: HarnessResourceLifecycle;
+  readonly #kernel: HarnessSessionKernel;
   readonly #closeTimeoutMs: number;
   readonly #cwd: string;
   readonly #mediaRoots: readonly string[];
@@ -360,9 +355,7 @@ class GrokHarnessSession implements HarnessSession {
   readonly #backgroundSubagents = new Map<string, HostSubagentState>();
   #active: ActiveTurn | null = null;
   #closePromise: Promise<void> | null = null;
-  #idleSuspend: Promise<HarnessIdleSuspendResult> | null = null;
   #configuring = false;
-  #phase: GrokSessionPhase = "open";
   #state: HarnessSessionState;
   #usage: HostUsage | null = null;
   #modes: GrokSessionModes;
@@ -387,6 +380,25 @@ class GrokHarnessSession implements HarnessSession {
       toolOutputLimit: number;
     },
   ) {
+    this.#kernel = new HarnessSessionKernel({
+      label: "Grok Session",
+      scope: "grok-acp-session",
+      workLevel: () =>
+        grokWorkLevel({
+          activeTurn: this.#active !== null,
+          configuring: this.#configuring,
+          backgroundSubagents: this.#backgroundSubagents.size,
+        }),
+      undecided: () => grokReleaseUndecided(this.#snapshot.turns.length),
+      // The release keeps the Transport usable when it fails, so the Session
+      // returns to open and the Host retries on its own backoff.
+      releaseNative: () => this.#transport.releaseOwnedProcess(),
+      released: () => this.#onClosed(),
+    });
+    this.resourceLifecycle = {
+      ...this.#kernel.resourceLifecycle,
+      stopOwnedJobs: () => this.#stopOwnedJobs(),
+    };
     this.#cwd = cwd;
     this.#sessionDirectory = options.sessionDirectory;
     this.#mediaRoots = grokMediaResolveRoots(cwd, options.sessionDirectory);
@@ -424,7 +436,7 @@ class GrokHarnessSession implements HarnessSession {
       ),
       state: this.#state,
     };
-    this.outputs = this.#channel.outputs;
+    this.outputs = this.#kernel.channel.outputs;
     this.#modes = grokSessionModesOrNative(opened.session, {
       restore: options.restore,
       events: [...opened.replay, ...options.history],
@@ -464,7 +476,7 @@ class GrokHarnessSession implements HarnessSession {
   }
 
   async readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>> {
-    if (this.#phase !== "open") {
+    if (!this.#kernel.open) {
       return { ok: false, error: invalidState("Grok Session is not open") };
     }
     if (this.#active || this.#configuring) {
@@ -507,8 +519,7 @@ class GrokHarnessSession implements HarnessSession {
       | HarnessCommandAccepted
     >
   > {
-    if (this.#phase !== "open")
-      return { ok: false, error: invalidState("Grok Session is not open") };
+    if (!this.#kernel.open) return { ok: false, error: invalidState("Grok Session is not open") };
     if ("commandId" in command) return this.#executeHarnessCommand(command);
     if (command.type === "turn.cancel") return this.#cancel(command);
     if (command.type === "interaction.respond") return this.#respond(command);
@@ -734,7 +745,7 @@ class GrokHarnessSession implements HarnessSession {
 
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
-    const closing = this.#close().finally(this.#onClosed);
+    const closing = this.#kernel.close(() => this.#closeNative()).finally(this.#onClosed);
     this.#closePromise = closing;
     // A close that failed left the native process unproven, so the Host must
     // be able to ask again rather than replay the same rejection forever.
@@ -765,7 +776,7 @@ class GrokHarnessSession implements HarnessSession {
   }
 
   async #setWorkMode(mode: HarnessWorkMode): Promise<HarnessResult<void>> {
-    if (this.#phase !== "open") {
+    if (!this.#kernel.open) {
       return { ok: false, error: invalidState("Grok Session is not open") };
     }
     if (!this.#transport.setSessionMode) {
@@ -823,7 +834,7 @@ class GrokHarnessSession implements HarnessSession {
     text: string;
     interjectionId: string;
   }): Promise<HarnessResult<{ accepted: true }>> {
-    if (this.#phase !== "open") {
+    if (!this.#kernel.open) {
       return { ok: false, error: invalidState("Grok Session is not open") };
     }
     if (!this.#active || this.#active.command.turnId !== input.expectedTurnId) {
@@ -1070,12 +1081,12 @@ class GrokHarnessSession implements HarnessSession {
     };
     return new Promise<RequestPermissionResponse>((resolve) => {
       active.approvals.set(interactionId, { interaction, options, resolve });
-      this.#channel.emit({ kind: "interaction", interaction });
+      this.#kernel.channel.emit({ kind: "interaction", interaction });
     });
   }
 
   #handleEvent(active: ActiveTurn, event: GrokTransportEvent): void {
-    if (this.#active !== active || this.#phase !== "open") return;
+    if (this.#active !== active || !this.#kernel.open) return;
     const contextUsage = usageFromUpdate(
       event.type === "usage" ? event.update : undefined,
       event.metadata,
@@ -1099,7 +1110,7 @@ class GrokHarnessSession implements HarnessSession {
   }
 
   #handleSessionEvent(event: GrokTransportEvent): void {
-    if (this.#phase !== "open") return;
+    if (!this.#kernel.open) return;
     if (event.type === "subagent.spawned") {
       const existing = this.#backgroundSubagents.get(event.nativeSubagentId);
       const role = event.role ?? existing?.role;
@@ -1625,54 +1636,7 @@ class GrokHarnessSession implements HarnessSession {
     });
   }
 
-  #suspendIdle(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
-    // Holds an accepted attempt: in flight, or the settled suspension whose
-    // released resources stay released. A rejected attempt clears it again.
-    if (this.#idleSuspend) return this.#idleSuspend;
-    const denied = grokIdleSuspendAdmission({
-      aborted: signal.aborted,
-      phase: this.#phase,
-      activeTurn: this.#active !== null,
-      configuring: this.#configuring,
-      backgroundSubagents: this.#backgroundSubagents.size,
-      verifiedTurns: this.#snapshot.turns.length,
-    });
-    if (denied) return Promise.resolve(denied);
-    // Admission and the closing mark stay synchronous so a late event cannot
-    // publish after the Host has accepted this suspension attempt.
-    this.#phase = "closing";
-    // The attempt is recorded before it can settle, so a rejected release
-    // never leaves a stale result that would deny every later attempt.
-    const attempt = (async () => {
-      const result = await this.#finishIdleSuspend();
-      if (result.status !== "suspended") this.#idleSuspend = null;
-      return result;
-    })();
-    this.#idleSuspend = attempt;
-    return attempt;
-  }
-
-  async #finishIdleSuspend(): Promise<HarnessIdleSuspendResult> {
-    try {
-      await this.#transport.releaseOwnedProcess();
-    } catch (error) {
-      // The release keeps the Transport usable for a later attempt, so the
-      // Session returns to open and the Host retries on its own backoff.
-      this.#phase = "open";
-      return {
-        status: "releaseFailed",
-        reason: error instanceof Error ? error.message : "Grok idle release failed",
-      };
-    }
-    this.#phase = "closed";
-    this.#channel.end();
-    this.#onClosed();
-    return { status: "suspended", scope: "grok-acp-session" };
-  }
-
-  async #close(): Promise<void> {
-    if (this.#phase === "closed") return;
-    this.#phase = "closing";
+  async #closeNative(): Promise<void> {
     const active = this.#active;
     if (active) {
       active.cancellationRequested = true;
@@ -1690,8 +1654,6 @@ class GrokHarnessSession implements HarnessSession {
         status: "failed",
         error: invalidState("Grok Session closed during active Turn"),
       });
-    this.#phase = "closed";
-    this.#channel.end();
   }
 
   async #stopOwnedJobs(): Promise<HarnessOwnedJobsResult> {
@@ -1705,24 +1667,24 @@ class GrokHarnessSession implements HarnessSession {
    */
   #configurationError(error: unknown): HarnessError {
     const normalized = normalizeError(error, "nativeFailure");
-    return this.#phase === "open"
+    return this.#kernel.open
       ? normalized
       : { ...normalized, code: "processExited", retryable: false };
   }
 
   #fault(error: GrokTransportError): void {
-    if (this.#phase !== "open") return;
     const normalized = normalizeError(error, "processExited");
-    if (this.#active) this.#finish(this.#active, { status: "failed", error: normalized });
-    this.#phase = "faulted";
-    this.#event({ type: "session.faulted", error: normalized });
-    this.#channel.end();
+    const faulted = this.#kernel.fault(() => {
+      if (this.#active) this.#finish(this.#active, { status: "failed", error: normalized });
+      this.#event({ type: "session.faulted", error: normalized });
+    });
+    if (!faulted) return;
     void this.#transport.close().catch(() => undefined);
     this.#onClosed();
   }
 
   #event(event: HostEvent): void {
-    this.#channel.emit({ kind: "event", event });
+    this.#kernel.channel.emit({ kind: "event", event });
   }
 }
 

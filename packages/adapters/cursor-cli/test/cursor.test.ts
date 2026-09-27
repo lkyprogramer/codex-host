@@ -926,14 +926,14 @@ describe("Cursor idle suspension", () => {
     aborted.abort();
     await expect(f.session.resourceLifecycle.suspend(aborted.signal)).resolves.toEqual({
       status: "unknown",
-      reason: "Cursor idle suspension was aborted",
+      reason: "Cursor Session idle release was aborted",
     });
     expect(close).not.toHaveBeenCalled();
     await f.session.close();
     await f.done;
     await expect(
       f.session.resourceLifecycle.suspend(new AbortController().signal),
-    ).resolves.toEqual({ status: "unknown", reason: "Cursor Session is closed or faulted" });
+    ).resolves.toEqual({ status: "unknown", reason: "Cursor Session is closed" });
   });
   it("refuses suspension while a snapshot read holds a replay process", async () => {
     const f = session();

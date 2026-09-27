@@ -1,13 +1,10 @@
 import path from "node:path";
 import { cursorDiagnostic } from "./diagnostics.js";
 import {
-  HarnessOutputChannel,
+  HarnessSessionKernel,
   type HarnessAdapter,
   type HarnessError,
-  type HarnessIdleSuspendResult,
-  type HarnessIdleSuspendSignal,
   type HarnessInspection,
-  type HarnessOutput,
   type HarnessResourceLifecycle,
   type HarnessResult,
   type HarnessSession,
@@ -390,16 +387,33 @@ export class CursorSession implements HarnessSession {
   readonly capabilities = CURSOR_CAPABILITIES;
   readonly initialUsage = null;
   readonly initialState: HarnessSessionState;
-  readonly #channel = new HarnessOutputChannel<HarnessOutput>();
-  readonly outputs = this.#channel.outputs;
-  readonly #interactions = new CursorInteractions((output) => this.#channel.emit(output));
+  readonly #kernel = new HarnessSessionKernel({
+    label: "Cursor Session",
+    scope: "cursor-acp-session",
+    workLevel: () =>
+      this.#active || this.#configuring
+        ? {
+            level: "busy",
+            reason: "Cursor Session still has native work or observation in progress",
+          }
+        : { level: "idle" },
+    undecided: () => {
+      if (this.transport.closed) return "Cursor native process has already exited";
+      // Resume loads the native Session from Cursor's local history; until a
+      // Turn has been verified there, that history may be missing.
+      return this.#fresh ? "Cursor has not persisted this Native Session yet" : null;
+    },
+    // Releasing a Cursor Session closes it; a failed close still ends it, so
+    // the Host faults the Thread rather than retrying.
+    releaseNative: () => this.close(),
+    closeFailure: "final",
+  });
+  readonly outputs = this.#kernel.channel.outputs;
+  readonly #interactions = new CursorInteractions((output) => this.#kernel.channel.emit(output));
   readonly #submitted = new Set<string>();
-  readonly resourceLifecycle: HarnessResourceLifecycle = {
-    suspend: (signal) => this.#suspendIdle(signal),
-  };
+  readonly resourceLifecycle: HarnessResourceLifecycle = this.#kernel.resourceLifecycle;
   #active: { command: TurnStartCommand; cancelled: boolean; task: Promise<void> } | undefined;
   #configuring = false;
-  #closed = false;
   #closePromise: Promise<void> | null = null;
   #fresh: boolean;
   readonly #replays = new Set<CursorTransport>();
@@ -466,7 +480,7 @@ export class CursorSession implements HarnessSession {
     );
   }
   async readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>> {
-    if (this.#closed) return rejected("invalidState", "Cursor session is closed");
+    if (!this.#kernel.open) return rejected("invalidState", "Cursor session is closed");
     if (this.#active || this.#configuring) return rejected("sessionBusy", "Cursor session is busy");
     this.#configuring = true;
     try {
@@ -526,7 +540,7 @@ export class CursorSession implements HarnessSession {
       | PermissionModeSelectCompleted
     >
   > {
-    if (this.#closed) return rejected("invalidState", "Cursor session is closed");
+    if (!this.#kernel.open) return rejected("invalidState", "Cursor session is closed");
     if (command.type === "interaction.respond") return this.#interactions.respond(command);
     if (command.type === "turn.cancel") {
       if (!this.#active || this.#active.command.turnId !== command.turnId)
@@ -590,17 +604,21 @@ export class CursorSession implements HarnessSession {
         throw new Error("Cursor did not confirm configuration selection");
       if (command.type === "model.select") this.initialState.effectiveModel = command.model;
       else this.initialState.effectivePermissionModeId = command.permissionModeId;
-      this.#channel.emit({
+      this.#kernel.channel.emit({
         kind: "event",
         event: { type: "session.state.changed", state: { ...this.initialState } },
       });
       return { ok: true, value: { completed: true } };
     } catch (error) {
-      if (this.transport.closed && !this.#closed) {
-        this.#channel.emit({
-          kind: "event",
-          event: { type: "session.faulted", error: cursorError(error) },
-        });
+      if (
+        this.transport.closed &&
+        this.#kernel.fault(() =>
+          this.#kernel.channel.emit({
+            kind: "event",
+            event: { type: "session.faulted", error: cursorError(error) },
+          }),
+        )
+      ) {
         await this.close();
       }
       return { ok: false, error: cursorError(error) };
@@ -612,11 +630,14 @@ export class CursorSession implements HarnessSession {
     let fault: HarnessError | undefined;
     const output = new CursorTurnOutput(
       command.turnId,
-      (event) => this.#channel.emit({ kind: "event", event }),
+      (event) => this.#kernel.channel.emit({ kind: "event", event }),
       before.length,
     );
     this.#subagentOutput = output.subagents;
-    this.#channel.emit({ kind: "event", event: { type: "turn.started", turnId: command.turnId } });
+    this.#kernel.channel.emit({
+      kind: "event",
+      event: { type: "turn.started", turnId: command.turnId },
+    });
     let outcome: TurnOutcome = {
       status: "failed",
       error: { code: "nativeFailure", message: "Cursor turn failed", retryable: false },
@@ -680,7 +701,7 @@ export class CursorSession implements HarnessSession {
     this.#interactions.cancel();
     output.finish(outcome);
     this.#active = undefined;
-    this.#channel.emit({
+    this.#kernel.channel.emit({
       kind: "event",
       event: {
         type: "turn.completed",
@@ -689,53 +710,29 @@ export class CursorSession implements HarnessSession {
         ...(nativeTurnRef ? { nativeTurnRef } : {}),
       },
     });
-    if (fault && !this.#closed) {
-      this.#channel.emit({ kind: "event", event: { type: "session.faulted", error: fault } });
+    if (
+      fault &&
+      this.#kernel.fault(() =>
+        this.#kernel.channel.emit({
+          kind: "event",
+          event: { type: "session.faulted", error: fault },
+        }),
+      )
+    ) {
       void this.close().catch(() => {});
     }
-  }
-  async #suspendIdle(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
-    if (signal.aborted) {
-      return { status: "unknown", reason: "Cursor idle suspension was aborted" };
-    }
-    if (this.#closed || this.transport.closed) {
-      return { status: "unknown", reason: "Cursor Session is closed or faulted" };
-    }
-    if (this.#active || this.#configuring) {
-      return {
-        status: "busy",
-        reason: "Cursor Session still has native work or observation in progress",
-      };
-    }
-    // Resume loads the native Session from Cursor's local history; until a Turn
-    // has been verified there, that history may be missing. Keep the Session live.
-    if (this.#fresh) {
-      return { status: "unknown", reason: "Cursor has not persisted this Native Session yet" };
-    }
-    // close() marks the Session closed before awaiting the ACP process, so no
-    // late callback can publish work after this admission check.
-    try {
-      await this.close();
-    } catch (error) {
-      // Already closed: its outputs have ended, so the Host faults it.
-      return {
-        status: "releaseFailed",
-        reason: `Cursor native process release failed: ${error instanceof Error ? error.message : String(error)}`,
-      };
-    }
-    return { status: "suspended", scope: "cursor-acp-session" };
   }
   close(): Promise<void> {
     this.#closePromise ??= this.#close();
     return this.#closePromise;
   }
   async #close(): Promise<void> {
-    if (this.#closed) return;
-    this.#closed = true;
     const active = this.#active;
-    if (active) active.cancelled = true;
-    this.#interactions.cancel();
-    try {
+    // A failed cleanup still ends the Session but keeps it owned by the
+    // Adapter: onClose is not reported, so the process stays accounted for.
+    await this.#kernel.close(async () => {
+      if (active) active.cancelled = true;
+      this.#interactions.cancel();
       const results = await Promise.allSettled([
         this.transport.close(),
         ...[...this.#replays].map((replay) => replay.close()),
@@ -744,9 +741,7 @@ export class CursorSession implements HarnessSession {
         result.status === "rejected" ? [result.reason] : [],
       );
       if (errors.length) throw new AggregateError(errors, "Cursor Session process cleanup failed");
-    } finally {
-      this.#channel.end();
-    }
+    });
     try {
       await active?.task;
     } finally {

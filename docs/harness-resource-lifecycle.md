@@ -24,6 +24,17 @@ Session 在 `capabilities.resources` 中声明它能交还的原生资源：`idl
 
 恢复时的配置语义同样通过声明表达，而不是按 Harness 名称判断：Adapter 的 `permissionModeScope: "atCreate"` 表示权限模式只能在 Session 打开时设定，Host 恢复时随 open 传入持久化的模式；Session 的 `restoresNativePermissionMode` 表示原生 Session 自己恢复权限模式并以其为准，Host 不再补设；`resumeMayChangeConfiguration` 表示恢复可能改变配置（例如替换了不可用的模型），Host 把恢复后的实际配置写回记录。
 
+### SessionKernel
+
+[`HarnessSessionKernel`](../packages/harness-adapter/src/session-kernel.ts) 是 Adapter 可复用的生命周期内核：Session 阶段（open / releasing / closing / closed / faulted）、输出通道，以及一套统一语义的空闲释放。Adapter 只提供钩子：`workLevel()`（原生工作）、`undecided()`（暂时无法判断，例如尚未落盘）、可选的异步 `confirmIdle()`（需要向原生端确认空闲时）和 `releaseNative()`。
+
+- 并发的释放请求共享一次尝试；释放成功后结果保持，被拒绝或失败的尝试会被清除，下次可以重来。
+- 准入与阶段切换发生在第一个 await 之前，迟到的原生事件不能在 Host 已被告知释放后发布；需要异步确认空闲时，确认返回后重新检查一遍本地状态。
+- 拒绝统一返回 `busy` 或 `unknown`，原因以 Session 名称开头；释放失败返回 `releaseFailed`，原因前缀为「… release failed」。
+- 关闭失败的去向由 Adapter 明确选择：`retry`（默认）保持 closing、输出不结束，之后的 close 再试；`final` 直接结束 Session 与输出，此后每次 close 都报告同一失败。故障只从 open 状态发生，先发布事件再结束输出。
+
+当前 Grok（`retry`）与 Cursor（`final`，释放即关闭）已迁移到内核。Claude Code 与 Kiro 的结构与内核一致，尚未迁移；OpenCode 有刻意不同的语义（释放失败直接判故障、确认空闲期间拒绝其他操作、关闭中也会报告故障），迁移前需要先决定是否统一这些行为。
+
 ## 释放范围与任务静默
 
 `thread release` 的 `resourcesReleased=true` 只证明返回 `proof.scope` 范围内的原生资源已释放。它可以与 `released=false`、`quiescence=unknown` 同时出现：Thread 保留可恢复状态，但不能据此删除工作树或业务资源。

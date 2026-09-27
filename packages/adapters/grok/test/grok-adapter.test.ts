@@ -3164,13 +3164,13 @@ describe("Grok idle suspension", () => {
     aborted.abort();
     await expect(lifecycle.suspend(aborted.signal)).resolves.toEqual({
       status: "unknown",
-      reason: "Grok idle suspension was aborted",
+      reason: "Grok Session idle release was aborted",
     });
     expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
     await session.close();
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "unknown",
-      reason: "Grok Session is closed or faulted",
+      reason: "Grok Session is closed",
     });
     expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
     await adapter.close();
@@ -3487,7 +3487,7 @@ describe("Grok idle suspension", () => {
     transport.releaseError = new Error("Owned process group did not exit within cleanup bounds");
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "releaseFailed",
-      reason: "Owned process group did not exit within cleanup bounds",
+      reason: "Grok Session release failed: Owned process group did not exit within cleanup bounds",
     });
     expect(transport.close).not.toHaveBeenCalled();
     expect(transport.deleteSession).not.toHaveBeenCalled();
@@ -3508,7 +3508,7 @@ describe("Grok idle suspension", () => {
     });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "releaseFailed",
-      reason: "Grok ACP ownership handle is unavailable",
+      reason: "Grok Session release failed: Grok ACP ownership handle is unavailable",
     });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "suspended",
