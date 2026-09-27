@@ -402,6 +402,59 @@ describe("OpenCode SDK transport", () => {
     await expect(transport.promptAsync(input)).rejects.toMatchObject({ code: "unavailable" });
   });
 
+  it("lists native metadata and executes slash commands through the dedicated SDK endpoint", async () => {
+    const list = vi.fn().mockResolvedValue({
+      data: [{ name: "review", source: "command", template: "Review", hints: [] }],
+      error: undefined,
+    });
+    const command = vi.fn().mockResolvedValue({
+      data: {
+        info: { id: "assistant-1", parentID: "user-1", sessionID: "session-1", role: "assistant" },
+        parts: [],
+      },
+      error: undefined,
+    });
+    const transport = new SdkOpenCodeTransport(
+      {
+        stderrTail: "",
+        client: async () => clientWith({ command: { list }, session: { command } }),
+        close: async () => undefined,
+      },
+      "/synthetic",
+      { commandTimeoutMs: 100 },
+    );
+    await expect(transport.commands()).resolves.toMatchObject([{ name: "review" }]);
+    expect(list).toHaveBeenCalledWith({ directory: "/synthetic" }, {});
+    await expect(
+      transport.executeCommand({
+        sessionID: "session-1",
+        command: "review",
+        arguments: " security ",
+        model: { providerID: "provider", modelID: "model" },
+      }),
+    ).resolves.toMatchObject({ info: { id: "assistant-1" } });
+    expect(command).toHaveBeenCalledWith(
+      {
+        sessionID: "session-1",
+        command: "review",
+        arguments: " security ",
+        model: "provider/model",
+      },
+      {},
+    );
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(
+      transport.executeCommand({
+        sessionID: "session-1",
+        command: "review",
+        arguments: "",
+        signal: cancelled.signal,
+      }),
+    ).rejects.toMatchObject({ code: "invalidState" });
+    expect(command).toHaveBeenCalledOnce();
+  });
+
   it("updates Session metadata through the SDK", async () => {
     const update = vi.fn().mockResolvedValue({ data: { id: "session-1" }, error: undefined });
     const connection = {

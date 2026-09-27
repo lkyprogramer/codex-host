@@ -49,7 +49,9 @@ type Scenario =
   | "stats-unsupported-mismatch"
   | "stats-error"
   | "stats-timeout"
-  | "missing-session-id";
+  | "missing-session-id"
+  | "handled-command"
+  | "handled-command-delayed-state";
 
 /** Fakes own no OS process, so their tree must never signal a real pid. */
 function owned(child: FakePiRpcProcess): OwnedProcess<ChildProcessWithoutNullStreams> {
@@ -72,6 +74,7 @@ class FakePiRpcProcess extends EventEmitter {
   #sessionId = "synthetic-session";
   #sessionFile: string | null = "/synthetic/session.jsonl";
   #stateRequestCount = 0;
+  #deferredHandledState: Record<string, unknown> | null = null;
   #isStreaming = false;
   #provider = "synthetic-provider";
   #modelId = "synthetic-model";
@@ -93,6 +96,10 @@ class FakePiRpcProcess extends EventEmitter {
       this.emit("exit", 0, null);
     });
     queueMicrotask(() => this.emit("spawn"));
+  }
+
+  get deferredHandledState(): boolean {
+    return this.#deferredHandledState !== null;
   }
 
   emitAutonomousTurn(
@@ -213,6 +220,10 @@ class FakePiRpcProcess extends EventEmitter {
     }
     if (command.type === "get_state") {
       this.#stateRequestCount += 1;
+      if (this.#scenario === "handled-command-delayed-state" && this.#stateRequestCount > 1) {
+        this.#deferredHandledState = command;
+        return;
+      }
       this.#respond(command, {
         ...(this.#scenario === "missing-session-id" ? {} : { sessionId: this.#sessionId }),
         sessionFile: this.#sessionFile,
@@ -226,6 +237,15 @@ class FakePiRpcProcess extends EventEmitter {
         thinkingLevel: this.#thinkingLevel,
         isStreaming: this.#isStreaming,
         contextUsage: { tokens: 45, contextWindow: 200 },
+      });
+      return;
+    }
+    if (command.type === "get_commands") {
+      this.#respond(command, {
+        commands: [
+          { name: "review", description: "Review project", source: "prompt" },
+          { name: "skill:review", description: "Skill review", source: "skill" },
+        ],
       });
       return;
     }
@@ -417,6 +437,13 @@ class FakePiRpcProcess extends EventEmitter {
       }, this.#compactionDelayMs ?? 20);
       return;
     }
+    if (
+      command.type === "prompt" &&
+      (this.#scenario === "handled-command" || this.#scenario === "handled-command-delayed-state")
+    ) {
+      this.#respond(command, { disposition: "handled" });
+      return;
+    }
     if (command.type === "prompt") this.#isStreaming = true;
     if (
       command.type === "prompt" &&
@@ -431,6 +458,19 @@ class FakePiRpcProcess extends EventEmitter {
       return;
     }
     this.#respond(command);
+    if (command.type === "abort" && this.#scenario === "handled-command-delayed-state") {
+      const waiting = this.#deferredHandledState;
+      this.#deferredHandledState = null;
+      if (waiting)
+        this.#respond(waiting, {
+          sessionId: this.#sessionId,
+          sessionFile: this.#sessionFile,
+          model: { provider: this.#provider, id: this.#modelId },
+          thinkingLevel: this.#thinkingLevel,
+          isStreaming: false,
+        });
+      return;
+    }
     if (
       command.type === "abort" &&
       ["cancel", "cancel-no-settle", "interaction-cancel"].includes(this.#scenario)
@@ -799,6 +839,35 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("Pi RPC Turn aggregation", () => {
+  it("reads native command metadata and completes a handled extension prompt without agent_settled", async () => {
+    const rpc = session("handled-command");
+    await rpc.start();
+    await expect(rpc.getCommands()).resolves.toEqual([
+      { name: "review", description: "Review project", source: "prompt" },
+      { name: "skill:review", description: "Skill review", source: "skill" },
+    ]);
+    await expect(rpc.runTurn("/review", () => undefined)).resolves.toEqual({
+      text: "",
+      cancelled: false,
+      handled: true,
+    });
+    await rpc.close();
+  });
+
+  it("preserves handled identity when cancellation wins a delayed stable-state read", async () => {
+    const child = new FakePiRpcProcess("handled-command-delayed-state");
+    const rpc = new PiRpcSession(
+      { cwd: process.cwd(), commandTimeoutMs: 2_000, closeTimeoutMs: 500 },
+      { spawn: () => owned(child) },
+    );
+    await rpc.start();
+    const turn = rpc.runTurn("/extension", () => undefined);
+    await waitFor(() => child.deferredHandledState);
+    await rpc.abort();
+    await expect(turn).resolves.toEqual({ text: "", cancelled: true, handled: true });
+    await rpc.close();
+  });
+
   it("shares pending close confirmation between concurrent callers", async () => {
     const child = new FakePiRpcProcess("final-only");
     const rpc = new PiRpcSession(
@@ -1045,6 +1114,12 @@ describe("Pi RPC Turn aggregation", () => {
       command: "/synthetic/pi",
       arguments: ["--mode", "rpc", "--fork", "/synthetic/source.jsonl"],
     });
+    expect(piRpcProcessCommand({ ...options, noSession: true })).toMatchObject({
+      arguments: ["--mode", "rpc", "--no-session"],
+    });
+    expect(() =>
+      piRpcProcessCommand({ ...options, noSession: true, sessionFile: "/synthetic/source.jsonl" }),
+    ).toThrow("cannot combine");
     expect(
       piRpcProcessCommand({
         ...options,

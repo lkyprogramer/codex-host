@@ -31,6 +31,7 @@ import {
 } from "../src/pi-adapter.js";
 import type { PiSessionHistory } from "../src/pi-history.js";
 import { encodePiModelRef } from "../src/pi-model-catalog.js";
+import { piNativeCommandCatalog } from "../src/pi-native-commands.js";
 import {
   PiRpcFaultError,
   type PiAutonomousTurn,
@@ -80,6 +81,11 @@ class FakePiTransport implements PiTurnTransport {
           ],
   );
   readonly getEntries = vi.fn(async (): Promise<PiSessionHistory> => structuredClone(this.history));
+  readonly getCommands = vi.fn(async () => [
+    { name: "review", description: "Review the project", source: "prompt" as const },
+    { name: "skill:review", description: "Review skill", source: "skill" as const },
+    { name: "compact", description: "Native compact", source: "extension" as const },
+  ]);
   readonly getSessionUsage = vi.fn(async (): Promise<HostUsage | null> =>
     this.usage === null ? null : structuredClone(this.usage),
   );
@@ -211,6 +217,12 @@ class FakePiTransport implements PiTurnTransport {
     );
     this.history.leafId = assistantId;
     this.resolveTurn({ text, cancelled });
+    this.resetTurn();
+  }
+
+  handledCancelled(): void {
+    if (!this.resolveTurn) throw new Error("No active fake Pi Turn");
+    this.resolveTurn({ text: "", cancelled: true, handled: true });
     this.resetTurn();
   }
 
@@ -1361,6 +1373,254 @@ describe("Pi HarnessAdapter Session", () => {
       expect.any(Function),
     );
     await session.close();
+  });
+
+  it("discovers native commands through an ephemeral RPC and executes only a current live entry", async () => {
+    const { adapter, transports } = fixture();
+    const signal = new AbortController().signal;
+    const inspected = await adapter.inspectCommands({ cwd: "/synthetic", signal });
+    expect(inspected).toMatchObject({ ok: true, value: { source: "live" } });
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    expect(inspected.value.commands).toEqual([
+      expect.objectContaining({ invocation: "/review", kind: "command" }),
+      expect.objectContaining({ invocation: "/skill:review", kind: "skill" }),
+      expect.objectContaining({ invocation: "/compact" }),
+    ]);
+    expect(transports[0]?.options?.noSession).toBe(true);
+    expect(transports[0]?.close).toHaveBeenCalledOnce();
+
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const review = inspected.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!review) throw new Error("Missing native review command");
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("native-review"),
+        commandId: review.id,
+        arguments: { text: "  security  " },
+      }),
+    ).resolves.toEqual({ ok: true, value: { turnId: "native-review" } });
+    const live = transports[1];
+    if (!live) throw new Error("Pi live transport was not started");
+    expect(live.options?.noSession).toBeUndefined();
+    await vi.waitFor(() => expect(live.runTurn).toHaveBeenCalledOnce());
+    expect(live.runTurn).toHaveBeenCalledWith("/review   security  ", expect.any(Function));
+    live.succeed("Reviewed");
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed") break;
+    }
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "succeeded" },
+    });
+    expect(await session.commands?.list()).toMatchObject({ ok: true, value: { source: "live" } });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("closes an ephemeral Pi RPC when command inspection is cancelled", async () => {
+    const { adapter, transports } = fixture();
+    const controller = new AbortController();
+    const pending = adapter.inspectCommands({ cwd: "/synthetic", signal: controller.signal });
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing ephemeral Pi transport");
+    vi.spyOn(transport, "getCommands").mockImplementation(
+      async () => new Promise<never>(() => undefined),
+    );
+    await vi.waitFor(() => expect(transport.getCommands).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(transport.close).toHaveBeenCalledOnce();
+    await adapter.close();
+  });
+
+  it("reports a cancelled handled command without requiring a native User Entry", async () => {
+    const { adapter, transports } = fixture();
+    const inspected = await adapter.inspectCommands({
+      cwd: "/synthetic",
+      signal: new AbortController().signal,
+    });
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    const native = inspected.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!native) throw new Error("Missing review command");
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("handled-cancel"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const live = transports[1];
+    if (!live) throw new Error("Missing live Pi transport");
+    await vi.waitFor(() => expect(live.runTurn).toHaveBeenCalledOnce());
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("handled-cancel") }),
+    ).resolves.toMatchObject({ ok: true });
+    live.handledCancelled();
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed") break;
+    }
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "cancelled" },
+    });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("rejects a native command after Pi Session closes without creating transport", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.close();
+    const created = transports.length;
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing native review command");
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("closed-native"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    expect(transports).toHaveLength(created);
+    await adapter.close();
+  });
+
+  it("cancels before Pi metadata settles and never dispatches the late native command", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing live Pi transport");
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const getCommands = vi.spyOn(transport, "getCommands").mockImplementation(async () => {
+      await gate;
+      return [{ name: "review", source: "prompt" }];
+    });
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("pending-native"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(getCommands).toHaveBeenCalledOnce());
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("pending-native") }),
+    ).resolves.toMatchObject({ ok: true });
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed" && event.turnId === "pending-native") break;
+    }
+    expect(
+      events.filter(
+        (event) => event.type === "turn.completed" && event.turnId === "pending-native",
+      ),
+    ).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "cancelled" },
+    });
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.runTurn).not.toHaveBeenCalled();
+    await expect(session.execute(textTurn("next-turn"))).resolves.toMatchObject({ ok: true });
+    transport.succeed("next completed");
+    const later = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      later.push(event);
+      if (event.type === "turn.completed" && event.turnId === "next-turn") break;
+    }
+    expect(later.at(-1)).toMatchObject({
+      type: "turn.completed",
+      turnId: "next-turn",
+      outcome: { status: "succeeded" },
+    });
+    expect(transport.runTurn).toHaveBeenCalledOnce();
+    await session.close();
+    await adapter.close();
+  });
+
+  it("closes a Pi Session during pending native metadata without dispatch", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing live Pi transport");
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const getCommands = vi.spyOn(transport, "getCommands").mockImplementation(async () => {
+      await gate;
+      return [{ name: "review", source: "prompt" }];
+    });
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    await session.commands?.execute({
+      turnId: hostTurnIdSchema.parse("closing-native"),
+      commandId: native.id,
+    });
+    await vi.waitFor(() => expect(getCommands).toHaveBeenCalledOnce());
+    await expect(session.close()).resolves.toBeUndefined();
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.runTurn).not.toHaveBeenCalled();
+    expect(transport.close).toHaveBeenCalledOnce();
+    await adapter.close();
+  });
+
+  it("fails an accepted Pi native command when metadata refresh fails without prompting", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing live Pi transport");
+    vi.spyOn(transport, "getCommands").mockRejectedValue(new Error("native catalog unavailable"));
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("failed-native"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed" && event.turnId === "failed-native") break;
+    }
+    expect(events.at(-1)).toMatchObject({ type: "turn.completed", outcome: { status: "failed" } });
+    expect(transport.runTurn).not.toHaveBeenCalled();
+    await session.close();
+    await adapter.close();
+  });
+
+  it("excludes ambiguous native names without hiding a distinct user skill", () => {
+    const catalog = piNativeCommandCatalog([
+      { name: "model", source: "extension" },
+      { name: "model", source: "skill" },
+      { name: "skill:model", source: "skill" },
+    ]);
+    expect(catalog.commands).toEqual([
+      expect.objectContaining({ invocation: "/skill:model", kind: "skill" }),
+    ]);
   });
 
   it("publishes native context compaction before continuing the Assistant reply", async () => {
