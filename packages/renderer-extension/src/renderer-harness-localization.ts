@@ -7,6 +7,7 @@ export interface RendererHarnessMessages {
   readonly harnessCommands: string;
   readonly commandsUnavailable: string;
   readonly commandRequiresConversation: string;
+  readonly commandMenuHint: string;
   readonly textArgument: string;
   readonly permissionMode: string;
   readonly permissions: string;
@@ -21,6 +22,7 @@ const ENGLISH_HARNESS_MESSAGES: RendererHarnessMessages = Object.freeze({
   harnessCommands: "Harness commands",
   commandsUnavailable: "No Harness commands available yet",
   commandRequiresConversation: "Start a conversation before running this command",
+  commandMenuHint: "Type # for commands, skills and agents",
   textArgument: "Text",
   permissionMode: "Permission mode",
   permissions: "Permissions",
@@ -36,6 +38,7 @@ const CHINESE_HARNESS_MESSAGES: RendererHarnessMessages = Object.freeze({
   harnessCommands: "Harness 命令",
   commandsUnavailable: "暂无可用的 Harness 命令",
   commandRequiresConversation: "请先开始对话，再执行此命令",
+  commandMenuHint: "输入 # 打开命令、技能和 Agent",
   textArgument: "文本",
   permissionMode: "权限模式",
   permissions: "权限",
@@ -162,6 +165,12 @@ export function rendererHarnessCommandPresentation(
     label: command.label,
     description: command.description ?? command.label,
   };
+}
+
+export function rendererStaticCommandsNotice(locale: RendererSettingsLocale): string {
+  return locale === "zh-CN"
+    ? "当前仅有内置命令，工作区目录尚不可用"
+    : "Only built-in commands are currently available; the workspace catalog is unavailable";
 }
 
 export function rendererPermissionModePresentation(

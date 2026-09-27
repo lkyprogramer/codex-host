@@ -92,6 +92,8 @@ export function createDraftPrewarmPolicyBridge(
   };
   let selectedModel: string | null = null;
   let selectedCodexAccountId: string | null = null;
+  const draftWorkspaceOwner = Symbol(hostId);
+  let prewarmGeneration = 0;
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
   const isRemoteControlHost = hostId.startsWith("remote-control:");
@@ -531,6 +533,47 @@ export function createDraftPrewarmPolicyBridge(
     selectedCodexAccountId = null;
     return routed;
   };
+  const publishDraftWorkspace = (parameters: unknown): void => {
+    if (!isRecord(parameters) || parameters.ephemeral === true) return;
+    const cwd = parameters.cwd;
+    if (typeof cwd !== "string" || cwd.length === 0) {
+      clearDraftWorkspace();
+      return;
+    }
+    const drafts = isRecord(target.__codexhostDraftWorkspacesV1)
+      ? target.__codexhostDraftWorkspacesV1
+      : {};
+    drafts[hostId] = cwd;
+    Object.defineProperty(target, "__codexhostDraftWorkspacesV1", {
+      configurable: true,
+      value: drafts,
+    });
+    const owners = isRecord(target.__codexhostDraftWorkspaceOwnersV1)
+      ? target.__codexhostDraftWorkspaceOwnersV1
+      : {};
+    owners[hostId] = draftWorkspaceOwner;
+    Object.defineProperty(target, "__codexhostDraftWorkspaceOwnersV1", {
+      configurable: true,
+      value: owners,
+    });
+    if (typeof target.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      target.dispatchEvent(
+        new CustomEvent("codexhost:draft-workspace", { detail: { hostId, cwd } }),
+      );
+    }
+  };
+  const clearDraftWorkspace = (): void => {
+    const owners = target.__codexhostDraftWorkspaceOwnersV1;
+    if (!isRecord(owners) || owners[hostId] !== draftWorkspaceOwner) return;
+    Reflect.deleteProperty(owners, hostId);
+    const drafts = target.__codexhostDraftWorkspacesV1;
+    if (isRecord(drafts)) Reflect.deleteProperty(drafts, hostId);
+    if (typeof target.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      target.dispatchEvent(
+        new CustomEvent("codexhost:draft-workspace", { detail: { hostId, cwd: null } }),
+      );
+    }
+  };
   const routedSend = (method: string, parameters: unknown, options?: unknown): unknown => {
     assertCurrent();
     const routedParameters = method === "thread/start" ? routeThreadStart(parameters) : parameters;
@@ -556,12 +599,26 @@ export function createDraftPrewarmPolicyBridge(
   const routedPrewarm = (parameters: unknown, options?: unknown): unknown => {
     assertCurrent();
     const routedParameters = routeThreadStart(parameters);
-    if (shouldUseBridge("thread/start", routedParameters)) {
-      return routedSend("thread/start", routedParameters, options);
-    }
-    return options === undefined
-      ? originalPrewarm.call(bridge, routedParameters)
-      : originalPrewarm.call(bridge, routedParameters, options);
+    const generation = ++prewarmGeneration;
+    publishDraftWorkspace(routedParameters);
+    const result = shouldUseBridge("thread/start", routedParameters)
+      ? routedSend("thread/start", routedParameters, options)
+      : options === undefined
+        ? originalPrewarm.call(bridge, routedParameters)
+        : originalPrewarm.call(bridge, routedParameters, options);
+    if (
+      (isRecord(parameters) && parameters.ephemeral === true) ||
+      (typeof result !== "object" && typeof result !== "function") ||
+      result === null ||
+      typeof Reflect.get(result, "then") !== "function"
+    )
+      return result;
+    return Promise.resolve(result).then((value) => {
+      if (!disposed && isCurrent() && generation === prewarmGeneration) {
+        publishDraftWorkspace(routedParameters);
+      }
+      return value;
+    });
   };
   bridge.sendRequest = routedSend;
   bridge.prewarmThreadStart = routedPrewarm;
@@ -654,6 +711,8 @@ export function createDraftPrewarmPolicyBridge(
     dispose(): void {
       if (disposed) return;
       disposed = true;
+      prewarmGeneration += 1;
+      clearDraftWorkspace();
       if (bridge.sendRequest === routedSend) bridge.sendRequest = originalSend;
       if (bridge.prewarmThreadStart === routedPrewarm) {
         bridge.prewarmThreadStart = originalPrewarm;

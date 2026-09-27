@@ -498,7 +498,7 @@ test("a mounted menu survives a live Send replacement and follows its new button
   await expect(trigger).toBeEnabled();
   await expect(page.locator('button[type="submit"]')).toBeEnabled();
   await trigger.click();
-  const menu = page.locator("[data-codexhost-harness-command-menu]");
+  const menu = page.locator("[data-codexhost-delegation-mention-menu]");
   await expect(menu).toBeVisible();
   await page.evaluate(() => {
     const state = Reflect.get(globalThis, "r3Button");
@@ -522,7 +522,7 @@ test("a mounted menu stays open when the native footer is replaced", async ({ pa
   const trigger = page.locator("[data-codexhost-harness-command-control] > button");
   await expect(trigger).toBeEnabled();
   await trigger.click();
-  const menu = page.locator("[data-codexhost-harness-command-menu]");
+  const menu = page.locator("[data-codexhost-delegation-mention-menu]");
   await expect(menu).toBeVisible();
   await page.evaluate(() => Reflect.get(globalThis, "r3Button").replaceFooter());
   await expect(menu).toBeVisible();

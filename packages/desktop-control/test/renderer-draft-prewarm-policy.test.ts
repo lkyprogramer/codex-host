@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { runInNewContext } from "node:vm";
 
 import {
   installRendererDraftPrewarmPolicy,
@@ -6,6 +7,7 @@ import {
   requestManagerFromHookState,
 } from "../src/renderer-draft-prewarm-policy.js";
 import {
+  createDraftPrewarmPolicyBridge,
   installDraftPrewarmPolicyBridge,
   type DraftPrewarmPolicyTarget,
   type RendererHostRequestBridge,
@@ -317,6 +319,74 @@ describe("Renderer draft prewarm policy", () => {
       ephemeral: true,
       model: "gpt-5",
     });
+  });
+
+  it("publishes the current draft workspace and clears it on replacement", async () => {
+    let finishOld: ((value: unknown) => void) | undefined;
+    const prewarmThreadStart = vi.fn((parameters: unknown) => {
+      if ((parameters as { cwd?: string }).cwd === "/tmp/old") {
+        return new Promise<unknown>((resolve) => {
+          finishOld = resolve;
+        });
+      }
+      return parameters;
+    });
+    const events: Array<{ hostId: string; cwd: string | null }> = [];
+    const target: DraftPrewarmPolicyTarget = {
+      dispatchEvent: vi.fn((event) => {
+        if (event.type === "codexhost:draft-workspace") {
+          events.push((event as CustomEvent<{ hostId: string; cwd: string | null }>).detail);
+        }
+        return true;
+      }),
+    };
+    const manager = requestManagerFixture();
+    const bridge = requestBridgeFixture({ prewarmThreadStart });
+    installDraftPrewarmPolicyBridge(manager, bridge, "local", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+    const old = bridge.prewarmThreadStart({ cwd: "/tmp/old" }) as Promise<unknown>;
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({ local: "/tmp/old" });
+    expect(bridge.prewarmThreadStart({ cwd: "/tmp/new" })).toEqual({ cwd: "/tmp/new" });
+    finishOld?.({ cwd: "/tmp/old" });
+    await old;
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({ local: "/tmp/new" });
+
+    bridge.prewarmThreadStart({ ephemeral: true, cwd: "/tmp/ephemeral" });
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({ local: "/tmp/new" });
+    const remoteBridge = requestBridgeFixture({ prewarmThreadStart: vi.fn((value) => value) });
+    installDraftPrewarmPolicyBridge(requestManagerFixture(), remoteBridge, "remote-host", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({});
+    expect(events.at(-1)).toEqual({ hostId: "local", cwd: null });
+    remoteBridge.prewarmThreadStart({ cwd: "/remote/project" });
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({ "remote-host": "/remote/project" });
+    (target.__codexhostDraftPrewarmPolicyV1 as { dispose(): void }).dispose();
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({});
+  });
+
+  it("keeps workspace publication self-contained after Renderer function serialization", () => {
+    const injected = runInNewContext(`(${createDraftPrewarmPolicyBridge.toString()})`, {
+      TextDecoder,
+      TextEncoder,
+      CustomEvent,
+      setTimeout,
+      clearTimeout,
+      crypto: globalThis.crypto,
+    }) as typeof createDraftPrewarmPolicyBridge;
+    const target: DraftPrewarmPolicyTarget = {};
+    const bridge = requestBridgeFixture({ prewarmThreadStart: vi.fn((input) => input) });
+    const policy = injected(requestManagerFixture(), bridge, "local", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+
+    expect(bridge.prewarmThreadStart({ cwd: "/tmp/serialized" })).toEqual({
+      cwd: "/tmp/serialized",
+    });
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({ local: "/tmp/serialized" });
+    policy.dispose();
+    expect(target.__codexhostDraftWorkspacesV1).toEqual({});
   });
 
   it("routes a draft Codex Account without changing the default Account", async () => {

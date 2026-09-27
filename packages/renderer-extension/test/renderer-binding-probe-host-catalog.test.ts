@@ -663,12 +663,54 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
     probe.setAdapter(
       { state: "ready", reason: "ready", modelUpdates: 0, hook: "request-bridge" },
       undefined,
-      undefined,
+      () => true,
       modelControl as never,
     );
 
     await vi.waitFor(() => expect(claudeInspections).toBeGreaterThanOrEqual(2));
-    expect(testState.renderedModelViews.at(-1)).not.toMatchObject({ status: "error" });
+    await vi.waitFor(() =>
+      expect(testState.renderedModelViews.at(-1)).toMatchObject({ status: "ready" }),
+    );
+  });
+
+  it("loads the selected Harness while another directory inspection remains slow", async () => {
+    installFakeBrowser();
+    testState.modelTarget = ["default"];
+    const inspected: string[] = [];
+    const host = {
+      inspectHarness: vi.fn(async ({ harnessId }: { harnessId: string }) => {
+        inspected.push(harnessId);
+        if (harnessId === "pi") return await new Promise<never>(() => undefined);
+        return readyInspection();
+      }),
+    };
+    const modelControl = {
+      currentHostId: () => "host-a",
+      clientForHost: vi.fn(() => host),
+      inspectHarness: host.inspectHarness,
+      inspectThread: vi.fn(),
+      inspectThreadCommands: vi.fn(async () => ({ commands: [] })),
+      inspectThreadUsage: vi.fn(),
+      subscribeThreadUsage: () => () => undefined,
+    };
+    const { installRendererBindingProbe } = await import("../src/renderer-binding-probe.js");
+    const probe = installRendererBindingProbe({
+      enabledAgents: ["codex", "pi", "claude-code"],
+      defaultAgent: "claude-code",
+    });
+    probe.setAdapter(
+      { state: "ready", reason: "ready", modelUpdates: 0, hook: "request-bridge" },
+      undefined,
+      () => true,
+      modelControl as never,
+    );
+
+    await vi.waitFor(() =>
+      expect(testState.renderedModelViews.at(-1)).toMatchObject({ status: "ready" }),
+    );
+    expect(inspected[0]).toBe("claude-code");
+    expect(inspected.includes("pi")).toBe(true);
+    probe.dispose();
   });
 
   it("reloads a same-Host empty Claude catalog on explicit refresh", async () => {

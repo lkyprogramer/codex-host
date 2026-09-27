@@ -7,7 +7,6 @@ import type {
 import type {
   AccountCreditsSnapshot,
   CodexAccountSummary,
-  HarnessCommandDescriptor,
   ThreadUsageSnapshot,
 } from "@codexhost/shared-contracts";
 import {
@@ -650,7 +649,7 @@ export function mountComposerAgentControl(
   onSelectModel: (modelId: string) => void,
   onSelectThinking: (thinkingOptionId: string) => void,
   onSelectPermissionMode: (permissionModeId: string) => void,
-  onSelectCommand: (command: HarnessCommandDescriptor) => void,
+  onOpenCommandMenu: () => void,
   presentations: ReadonlyMap<RendererAgent, RendererAgentPresentation> = new Map(),
 ): ComposerAgentControl {
   const nativeModelControl = captureNativeControl(nativeModelControlForComposer(composer));
@@ -684,7 +683,7 @@ export function mountComposerAgentControl(
   const harnessCommands = mountRendererHarnessCommandControl(
     toolbar ?? composer,
     trailingActionAnchor(sendButton),
-    onSelectCommand,
+    onOpenCommandMenu,
   );
 
   const permissionParent = nativePermissionModeControl?.element.parentElement;
@@ -807,7 +806,11 @@ export function renderComposerAgentControl(
     pickerView.nativeModelHidden,
     switching || state.agent !== "codex",
   );
-  renderRendererModelPicker(control.modelPicker, modelView, state.agent !== "codex");
+  renderRendererModelPicker(control.modelPicker, modelView, state.agent !== "codex", state.agent);
+  // The model name yields width to the fixed Composer actions in a narrow footer.
+  control.modelPicker.root.style.minWidth = "0";
+  control.modelPicker.root.style.flex = "0 1 auto";
+  control.modelPicker.trigger.style.minWidth = "0";
   const permissionModeVisible =
     state.agent !== "codex" &&
     permissionModeView.status !== "idle" &&
@@ -831,11 +834,13 @@ export function renderComposerAgentControl(
       locale,
       selectedCodexAccount?.email ?? selectedCodexAccount?.label ?? null,
     );
+    control.usage.root.style.minWidth = "0";
+    control.usage.root.style.flex = "0 1 auto";
+    control.usage.trigger.style.minWidth = "0";
   }
   control.harnessCommands.setLocale(locale);
   control.harnessCommands.root.hidden = state.agent === "codex";
   control.harnessCommands.root.style.display = state.agent === "codex" ? "none" : "inline-flex";
-  if (state.agent === "codex") control.harnessCommands.close();
   renderRendererCreditsControl(control.credits, accountCredits, locale);
 }
 
