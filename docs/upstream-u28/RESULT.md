@@ -17,12 +17,13 @@ Implementation: `packages/adapters/cursor-cli/src/{fork.ts,fork-terminal.ts,fork
 - Installed `cursor-agent --version`: `2026.09.10-fd3934a`; macOS `/usr/bin/script` present. Read-only sample: 8 of 15 local native Session stores were readable and exposed rewind roots.
 - Real native head fork on an inactive source: independent target, exact one-Turn readback, source unchanged, target discarded. Real native revise: 11 source Turns to 10 derived Turns, exact retained prefix, source unchanged, target discarded.
 - Real Cursor Adapter `open(kind=fork)` and `open(kind=rollbackLastTurn)` each produced an independent Session. ACP `readSnapshot()` read back the expected derived history (one and ten Turns respectively); sources were unchanged and the derived test targets were closed and removed.
+- A real provider-backed follow-up on a test-derived Cursor Session succeeded: the native source had four Turns; ACP completion and native readback confirmed five derived Turns, an independent Session identity, and unchanged decoded source history. The owned ACP process closed and the test-derived native directory was removed. No prompt text, reply, or Session ID was printed in the evidence output.
 
-A provider-backed follow-up Turn and Windows run were not performed. The temporary real forks did not submit a model prompt. A real follow-up would require a provider request and remains a separate acceptance check. No Desktop restart, push, PR, or release was performed.
+A Windows run was not performed; capability remains unsupported there. No Desktop restart, push, PR, or release was performed.
 
 ## Review
 
-The independent final reviewer ran as `gpt-6-sol` with `xhigh` effort (session `01a0e0be-77ea-75c3-aec5-0da14e561f2c`, verified from its turn context). It found and rechecked repairs for unconfirmed ACP/PTY cleanup, Adapter close during adoption, cold-source model inheritance, and persisted checkpoint revocation. Its final code verdict found no remaining confirmed defect. The reviewer ran `git diff --check`; the test counts above are the implementer's runs, not independent reviewer reruns. The provider-backed continuation remains outside the reviewed acceptance evidence.
+The independent final reviewer ran as `gpt-6-sol` with `xhigh` effort (session `01a0e0be-77ea-75c3-aec5-0da14e561f2c`, verified from its turn context). It found and rechecked repairs for unconfirmed ACP/PTY cleanup, Adapter close during adoption, cold-source model inheritance, and persisted checkpoint revocation. Its final code verdict found no remaining confirmed defect. The reviewer ran `git diff --check`; the test counts and provider-backed continuation above are the implementer's runs, not independent reviewer reruns. The live continuation was performed after the code review without another code change.
 
 ## Rollback
 
