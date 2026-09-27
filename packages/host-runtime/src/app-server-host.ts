@@ -4,7 +4,6 @@ import { AccountRateLimits } from "./codex-runtime/account-rate-limits.js";
 import { inspectHarnessAccounts } from "./harness-accounts.js";
 import type { spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
@@ -28,16 +27,6 @@ import {
   harnessAccountListParamsSchema,
   harnessAccountListResultSchema,
   type HarnessAccountListResult,
-  codexAccountUsageParamsSchema,
-  codexAccountUsageResultSchema,
-  codexAccountResetCreditConsumeParamsSchema,
-  codexAccountResetCreditConsumeOutcomeSchema,
-  codexAccountResetCreditConsumeResultSchema,
-  codexAccountActivateParamsSchema,
-  codexAccountCreateParamsSchema,
-  codexAccountDeleteParamsSchema,
-  codexAccountLoginCancelParamsSchema,
-  codexAccountLoginStartParamsSchema,
   codexAccountPlanTypeSchema,
   harnessPluginListParamsSchema,
   harnessPluginListResultSchema,
@@ -153,6 +142,12 @@ import {
   UnknownCodexThreadAccountError,
 } from "./codex-runtime/codex-runtime-pool.js";
 import { aggregateOfficialAccountThreadListPage } from "./multi-account-thread-list.js";
+import {
+  handleCodexAccountRequest,
+  type CodexAccountRequestContext,
+  type CodexLoginSession,
+} from "./codex-account-requests.js";
+import { requestObject, rpcEnvelope, rpcError } from "./json-rpc-response.js";
 import type { HostUpdateCoordinator } from "./update-coordinator.js";
 
 const SUBAGENT_TERMINAL_REFRESH_DELAYS_MS = [0, 50, 100, 150] as const;
@@ -293,13 +288,6 @@ interface PendingDesktopQuestion {
   timeout: NodeJS.Timeout | null;
 }
 
-interface CodexLoginSession {
-  accountId: string;
-  loginId: string;
-  verificationUrl?: string;
-  userCode?: string;
-}
-
 type ExternalThreadStatus = { type: "active"; activeFlags: [] } | { type: "idle" };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -362,18 +350,6 @@ export function officialAccountEnvironment(
   account: Pick<CodexAccount, "codexHome">,
 ): NodeJS.ProcessEnv {
   return { ...officialEnvironment(source), CODEX_HOME: account.codexHome };
-}
-
-function rpcEnvelope(request: JsonRpcRequest, value: JsonObject): JsonObject {
-  return {
-    ...(request.jsonrpc === "2.0" ? { jsonrpc: "2.0" } : {}),
-    id: request.id,
-    ...value,
-  };
-}
-
-function rpcError(request: JsonRpcRequest, code: number, message: string): JsonObject {
-  return rpcEnvelope(request, { error: { code, message } });
 }
 
 function unixSeconds(): number {
@@ -461,11 +437,6 @@ export function classifyCreateRequestRoute(
     selectedHarness: defaultAgent,
     selectionSource: defaultAgent === "pi" ? "default-agent" : "official-model",
   };
-}
-
-function requestObject(request: JsonRpcRequest): JsonObject {
-  if (!isRecord(request.params)) throw new Error(`${request.method} params must be an object`);
-  return request.params as JsonObject;
 }
 
 function requestText(params: JsonObject): string {
@@ -951,7 +922,9 @@ export class AppServerHost {
       request.method === "codexhost/account/login/start" ||
       request.method === "codexhost/account/login/cancel"
     ) {
-      this.#dispatchDesktopRequest(() => this.#handleCodexAccountRequest(request));
+      this.#dispatchDesktopRequest(() =>
+        handleCodexAccountRequest(request, this.#accountRequestContext()),
+      );
       return;
     }
     if (request.method === "codexhost/harness/accounts/list") {
@@ -1602,217 +1575,23 @@ export class AppServerHost {
       : this.#codexRuntimePool.requestActive(method, params);
   }
 
-  async #handleCodexAccountRequest(request: JsonRpcRequest): Promise<void> {
-    try {
-      if (request.method === "codexhost/account/usage/inspect") {
-        const { accountId } = codexAccountUsageParamsSchema.parse(requestObject(request));
-        if (!(await this.#accountRepository.get(accountId)))
-          throw new Error("Unknown Codex Account");
-        await this.#refreshOfficialRateLimits(accountId);
-        const usage = this.#officialRateLimits.get(accountId);
-        const accountCredits = this.#officialAccountCredits(accountId);
-        const result = codexAccountUsageResultSchema.parse({
-          accountId,
-          usage,
-          ...(accountCredits ? { accountCredits } : {}),
-        });
-        await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(result) }));
-        return;
-      }
-
-      if (request.method === "codexhost/account/rate-limit-reset/consume") {
-        const params = codexAccountResetCreditConsumeParamsSchema.parse(requestObject(request));
-        if (!(await this.#accountRepository.get(params.accountId)))
-          throw new Error("Unknown Codex Account");
-        const runtime = await this.#codexRuntimePool.get(params.accountId);
-        const response = await runtime.request("account/rateLimitResetCredit/consume", {
-          idempotencyKey: params.idempotencyKey ?? randomUUID(),
-        });
-        if (isRecord(response.error)) {
-          await this.#writer.json(rpcEnvelope(request, { error: response.error }));
-          return;
-        }
-        const result = isRecord(response.result) ? response.result : null;
-        const outcome = codexAccountResetCreditConsumeOutcomeSchema.safeParse(result?.outcome);
-        if (!outcome.success) throw new Error("Official reset-credit consume response is invalid");
-        this.#officialRateLimits.reset(params.accountId);
-        if (outcome.data === "reset") await this.#refreshOfficialRateLimits(params.accountId);
-        const accountCredits = this.#officialAccountCredits(params.accountId);
-        const consumeResult = codexAccountResetCreditConsumeResultSchema.parse({
-          accountId: params.accountId,
-          outcome: outcome.data,
-          ...(accountCredits ? { accountCredits } : {}),
-        });
-        await this.#writer.json(
-          rpcEnvelope(request, { result: jsonValueSchema.parse(consumeResult) }),
-        );
-        return;
-      }
-
-      if (
-        request.method === "codexhost/account/list" ||
-        request.method === "codexhost/account/refresh"
-      ) {
-        if (request.method === "codexhost/account/refresh") {
-          await this.#refreshCodexAccountMetadata();
-        }
-        const activeAccountId = await this.#accountRepository.getActiveAccountId();
-        const accounts = await this.#accountRepository.list();
-        await this.#writer.json(
-          rpcEnvelope(request, {
-            result: {
-              accounts: accounts.map((account) => ({
-                accountId: account.accountId,
-                label: account.label,
-                ...(account.email ? { email: account.email } : {}),
-                ...(account.planType ? { planType: account.planType } : {}),
-                codexHome: account.codexHome,
-                active: account.accountId === activeAccountId,
-                isDefault: this.#accountRepository.isDefaultAccount(account.accountId),
-              })),
-            },
-          }),
-        );
-        return;
-      }
-      if (request.method === "codexhost/account/create") {
-        const params = codexAccountCreateParamsSchema.parse(requestObject(request));
-        const accountId = randomUUID();
-        const account = await this.#accountRepository.upsert({
-          accountId,
-          codexHome: path.join(this.#accountDataDirectory, "codex-homes", accountId),
-          label: params.label ?? `Codex Account ${accountId.slice(0, 8)}`,
-        });
-        const activeAccountId = await this.#accountRepository.getActiveAccountId();
-        await this.#writer.json(
-          rpcEnvelope(request, {
-            result: {
-              account: {
-                accountId: account.accountId,
-                label: account.label,
-                ...(account.email ? { email: account.email } : {}),
-                ...(account.planType ? { planType: account.planType } : {}),
-                codexHome: account.codexHome,
-                active: account.accountId === activeAccountId,
-                isDefault: this.#accountRepository.isDefaultAccount(account.accountId),
-              },
-            },
-          }),
-        );
-        return;
-      }
-      if (request.method === "codexhost/account/activate") {
-        const params = codexAccountActivateParamsSchema.parse(requestObject(request));
-        await this.#accountRepository.setActiveAccountId(params.accountId);
-
-        const account = await this.#accountRepository.get(params.accountId);
-        if (!account) throw new Error(`Unknown Codex Account '${params.accountId}'`);
-        await this.#writer.json(
-          rpcEnvelope(request, {
-            result: {
-              account: {
-                accountId: account.accountId,
-                label: account.label,
-                ...(account.email ? { email: account.email } : {}),
-                ...(account.planType ? { planType: account.planType } : {}),
-                codexHome: account.codexHome,
-                active: true,
-                isDefault: this.#accountRepository.isDefaultAccount(account.accountId),
-              },
-            },
-          }),
-        );
-        return;
-      }
-      if (request.method === "codexhost/account/delete") {
-        const params = codexAccountDeleteParamsSchema.parse(requestObject(request));
-        if (this.#accountRepository.isDefaultAccount(params.accountId)) {
-          throw new Error("The default Codex Account cannot be deleted");
-        }
-        const account = await this.#accountRepository.get(params.accountId);
-        if (!account) throw new Error(`Unknown Codex Account '${params.accountId}'`);
-        await this.#codexRuntimePool.remove(params.accountId);
-        await this.#accountRepository.remove(params.accountId);
-        await this.#threadAccountStore.removeByAccount(params.accountId);
-        for (const [key, session] of this.#officialLoginSessions) {
-          if (session.accountId === params.accountId) this.#officialLoginSessions.delete(key);
-        }
-        const managedCodexHome = path.join(
-          this.#accountDataDirectory,
-          "codex-homes",
-          params.accountId,
-        );
-        if (path.resolve(account.codexHome) === path.resolve(managedCodexHome)) {
-          try {
-            await rm(managedCodexHome, { recursive: true, force: true });
-          } catch (error) {
-            this.#diagnose(error);
-          }
-        }
-        this.#resetOfficialUsageState(params.accountId);
-        await this.#writer.json(
-          rpcEnvelope(request, { result: { deletedAccountId: params.accountId } }),
-        );
-        return;
-      }
-      if (request.method === "codexhost/account/login/start") {
-        const params = codexAccountLoginStartParamsSchema.parse(requestObject(request));
-        const runtime = await this.#codexRuntimePool.get(params.accountId);
-        const response = await runtime.request("account/login/start", {
-          type: "chatgptDeviceCode",
-        });
-        if (isRecord(response.error)) {
-          await this.#writer.json(rpcEnvelope(request, { error: response.error }));
-          return;
-        }
-        const result = isRecord(response.result) ? response.result : null;
-        if (
-          !result ||
-          result.type !== "chatgptDeviceCode" ||
-          typeof result.loginId !== "string" ||
-          typeof result.verificationUrl !== "string" ||
-          typeof result.userCode !== "string"
-        ) {
-          throw new Error("Official account/login/start response is invalid");
-        }
-        this.#officialLoginSessions.set(this.#loginSessionKey(params.accountId, result.loginId), {
-          accountId: params.accountId,
-          loginId: result.loginId,
-          verificationUrl: result.verificationUrl,
-          userCode: result.userCode,
-        });
-        await this.#writer.json(
-          rpcEnvelope(request, {
-            result: {
-              accountId: params.accountId,
-              loginId: result.loginId,
-              verificationUrl: result.verificationUrl,
-              userCode: result.userCode,
-            },
-          }),
-        );
-        return;
-      }
-      const params = codexAccountLoginCancelParamsSchema.parse(requestObject(request));
-      const session = params.accountId
-        ? this.#officialLoginSessions.get(this.#loginSessionKey(params.accountId, params.loginId))
-        : this.#uniqueLoginSession(params.loginId);
-      if (!session) {
-        await this.#writer.json(rpcEnvelope(request, { result: { cancelled: false } }));
-        return;
-      }
-      const response = await (
-        await this.#codexRuntimePool.get(session.accountId)
-      ).request("account/login/cancel", { loginId: params.loginId });
-      if (isRecord(response.error)) {
-        await this.#writer.json(rpcEnvelope(request, { error: response.error }));
-        return;
-      }
-      this.#officialLoginSessions.delete(this.#loginSessionKey(session.accountId, session.loginId));
-      await this.#writer.json(rpcEnvelope(request, { result: { cancelled: true } }));
-    } catch (error) {
-      await this.#writer.json(rpcError(request, -32086, errorMessage(error)));
-    }
+  #accountRequestContext(): CodexAccountRequestContext {
+    return {
+      accounts: this.#accountRepository,
+      threadAccounts: this.#threadAccountStore,
+      runtimes: this.#codexRuntimePool,
+      rateLimits: this.#officialRateLimits,
+      loginSessions: this.#officialLoginSessions,
+      accountDataDirectory: this.#accountDataDirectory,
+      write: (value) => this.#writer.json(value),
+      loginSessionKey: (accountId, loginId) => this.#loginSessionKey(accountId, loginId),
+      uniqueLoginSession: (loginId) => this.#uniqueLoginSession(loginId),
+      refreshRateLimits: (accountId) => this.#refreshOfficialRateLimits(accountId),
+      accountCredits: (accountId) => this.#officialAccountCredits(accountId),
+      refreshAccountMetadata: () => this.#refreshCodexAccountMetadata(),
+      resetUsageState: (accountId) => this.#resetOfficialUsageState(accountId),
+      diagnose: (error) => this.#diagnose(error),
+    };
   }
 
   #officialRequestKey(accountId: string, requestId: unknown): string {
