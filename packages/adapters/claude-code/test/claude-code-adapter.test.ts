@@ -644,7 +644,7 @@ describe("Claude Code HarnessAdapter", () => {
 
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "releaseFailed",
-      reason: "Claude Code native process release failed: process group is still alive",
+      reason: "Claude Code Session release failed: process group is still alive",
     });
     // The Host retries on its next idle tick, and that retry reaches the same process.
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({

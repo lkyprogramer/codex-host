@@ -10,7 +10,7 @@ import type {
 /**
  * - `open`: accepts work.
  * - `releasing`: an idle release was admitted; nothing new may start, and a
- *   failed release returns the Session to `open`.
+ *   failed release returns the Session to `open`, or faults it (`releaseFailure`).
  * - `closing` / `closed`: closed by the Host, or released for good.
  * - `faulted`: the native side failed; outputs ended.
  */
@@ -19,7 +19,7 @@ export type HarnessSessionPhase = "open" | "releasing" | "closing" | "closed" | 
 /** A release declined before anything was touched. */
 type Declined = { status: "busy" | "unknown"; reason: string };
 
-export interface HarnessSessionKernelHooks {
+interface HarnessSessionKernelBaseHooks {
   /** Names the Session in the reasons the Host logs, for example "Grok Session". */
   readonly label: string;
   /** What `suspended` reports as released, for example "grok-acp-session". */
@@ -33,7 +33,7 @@ export interface HarnessSessionKernelHooks {
    * tell. Null means idle; anything else declines the release untouched.
    */
   confirmIdle?(signal: HarnessIdleSuspendSignal): Promise<Declined | null>;
-  /** Gives the native resources back. Throwing keeps them owned: `releaseFailed`. */
+  /** Gives the native resources back. Throwing reports `releaseFailed`, then follows `releaseFailure`. */
   releaseNative(): Promise<void>;
   /** After a confirmed release, once outputs ended. */
   released?(): void;
@@ -44,6 +44,19 @@ export interface HarnessSessionKernelHooks {
    */
   readonly closeFailure?: "retry" | "final";
 }
+
+/**
+ * What a failed release leaves. `retry` (the default): the native side is
+ * intact, so the Session returns to open and the Host retries. `fault`: the
+ * release cannot be partly undone, so the Session faults, and
+ * `publishReleaseFault` reports it while outputs are still open.
+ */
+type HarnessSessionReleaseFailureHooks =
+  | { readonly releaseFailure?: "retry" }
+  | { readonly releaseFailure: "fault"; publishReleaseFault(error: unknown): void };
+
+export type HarnessSessionKernelHooks = HarnessSessionKernelBaseHooks &
+  HarnessSessionReleaseFailureHooks;
 
 /**
  * The lifecycle core every Session shares: its phase, its output channel, and
@@ -162,8 +175,12 @@ export class HarnessSessionKernel {
     try {
       await this.#hooks.releaseNative();
     } catch (error) {
-      // The resources stay owned and the Session usable; the Host retries.
-      if (this.#phase === "releasing") this.#phase = "open";
+      // A close that raced the release owns the end of outputs.
+      if (this.#phase === "releasing") {
+        this.#phase = "open";
+        const hooks = this.#hooks;
+        if (hooks.releaseFailure === "fault") this.fault(() => hooks.publishReleaseFault(error));
+      }
       return {
         status: "releaseFailed",
         reason: `${this.#hooks.label} release failed: ${error instanceof Error ? error.message : String(error)}`,

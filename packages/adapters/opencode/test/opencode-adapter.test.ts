@@ -758,7 +758,7 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
-  it("rejects a native event or a new Host operation that races idle suspension", async () => {
+  it("declines idle suspension when a native event races the idle check", async () => {
     const transport = new FakeOpenCodeTransport();
     const { adapter, session } = await openFixture(transport);
     const lifecycle = session.resourceLifecycle;
@@ -769,18 +769,70 @@ describe("OpenCode HarnessAdapter", () => {
         resolveStatuses = resolve;
       });
     const suspension = lifecycle.suspend(new AbortController().signal);
-    await expect(session.execute(turn("racing-turn"))).resolves.toMatchObject({
-      ok: false,
-      error: { code: "sessionBusy" },
-    });
     transport.listener?.onEvent({ id: "idle-race", type: "server.connected", properties: {} });
-    resolveStatuses?.({ "session-1": { type: "idle" } });
+    resolveStatuses?.({});
 
-    await expect(suspension).resolves.toMatchObject({ status: "busy" });
+    await expect(suspension).resolves.toEqual({
+      status: "busy",
+      reason: "OpenCode native state changed during idle check",
+    });
     expect(transport.closed).toBe(0);
-    expect(transport.promptCalls).toHaveLength(0);
     await session.close();
     await adapter.close();
+  });
+
+  it("admits a Host operation during the idle check, then declines the release", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const { adapter, session } = await openFixture(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+    let resolveStatuses: ((value: Record<string, SessionStatus>) => void) | undefined;
+    const getStatuses = transport.getStatuses.bind(transport);
+    transport.getStatuses = () =>
+      new Promise<Record<string, SessionStatus>>((resolve) => {
+        resolveStatuses = resolve;
+      });
+    const suspension = lifecycle.suspend(new AbortController().signal);
+    const snapshot = session.readSnapshot();
+    transport.getStatuses = getStatuses;
+    resolveStatuses?.({});
+
+    await expect(snapshot).resolves.toMatchObject({ ok: true });
+    await expect(suspension).resolves.toMatchObject({ status: "busy" });
+    expect(transport.closed).toBe(0);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("faults the Session when its idle release closes only part of the native resources", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const { adapter, session } = await openFixture(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const close = transport.close.bind(transport);
+    transport.close = async () => {
+      transport.closed += 1;
+      throw new Error("synthetic transport close failure");
+    };
+
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "releaseFailed",
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { kind: "event", event: { type: "session.faulted" } },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    await expect(session.execute(turn("after-fault"))).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalidState" },
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+    transport.close = close;
+    await adapter.close().catch(() => undefined);
   });
 
   it("closes the managed Server when transport cleanup rejects", async () => {

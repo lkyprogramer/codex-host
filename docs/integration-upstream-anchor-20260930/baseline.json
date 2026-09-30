@@ -1,0 +1,39 @@
+{
+  "anchorHead": "6a1d26cdea98c305d6f8ab8f29a5192a397df00c",
+  "upstreamHead": "d71ed935d87e085b0c9deb54382c76e9b3277729",
+  "pendingPatchSha256": "b6e2ac1a3862bc7a209f5b441c731587b1da45e9bcbc2da5bb917aa1ae8569eb",
+  "pendingFiles": [
+    {
+      "path": "docs/harness-resource-lifecycle.md",
+      "sha256": "6441f9adf08b6e401bc2f2fa7e1c243ab03b9b48e96c2548d280fe23c499b3ec"
+    },
+    {
+      "path": "docs/process-anchor-remediation-plan.md",
+      "sha256": "874ef8c2318d71810bae2f05c3a1bcaa90fdcfbec9e7620d4c9c741c9b7febdb"
+    },
+    {
+      "path": "packages/adapters/claude-code/src/claude-code-adapter.ts",
+      "sha256": "ff639e556ab5c73846b98605fdeef7846e1ff548e750b98683ab52c69adb6d2a"
+    },
+    {
+      "path": "packages/adapters/claude-code/test/claude-code-adapter.test.ts",
+      "sha256": "c695eaa06aa5744b4de608fe53b87e0bb2390b5c2ba0e86e686b8628d07738f2"
+    },
+    {
+      "path": "packages/adapters/opencode/src/opencode-adapter.ts",
+      "sha256": "f16895073156fafe094fdb664505c28689d8865059477a090c2c098f1ff01820"
+    },
+    {
+      "path": "packages/adapters/opencode/test/opencode-adapter.test.ts",
+      "sha256": "99e63b1f7b5cf9105f44b7843e52ecefc6e22256030a22290ba26c153624f71e"
+    },
+    {
+      "path": "packages/harness-adapter/src/session-kernel.ts",
+      "sha256": "3390faaff4a64a87b776aeff788efe60bda208feff13dd49dc4a816a98012611"
+    },
+    {
+      "path": "packages/harness-adapter/test/session-kernel.test.ts",
+      "sha256": "d628d9dfbd222a3e6e3603f2bbc89c2ebb904b4edde0be4b24422eecb6df5898"
+    }
+  ]
+}
