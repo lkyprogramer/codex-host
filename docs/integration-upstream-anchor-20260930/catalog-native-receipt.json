@@ -1,0 +1,16 @@
+{
+  "pi": {
+    "live": true,
+    "count": 28,
+    "fixtureCommandObserved": false,
+    "providerPrompts": 0,
+    "noPersistedSession": true
+  },
+  "opencode": {
+    "live": true,
+    "count": 4,
+    "fixtureCommandObserved": true,
+    "providerPrompts": 0
+  },
+  "anchorPath": "/Users/luo/Documents/github/codex-host-merge-anchor/target/aarch64-apple-darwin/release/codexhost-anchor"
+}

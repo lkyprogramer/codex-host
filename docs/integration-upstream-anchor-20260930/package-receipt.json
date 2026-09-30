@@ -1,0 +1,18 @@
+{
+  "codeCommit": "36bf47bc555b8ae09f49d247728ec0b920c2c004",
+  "codeTree": "8cba8d5d48f6a020b4d06444289420c687d21e75",
+  "version": "0.7.0-local.14",
+  "target": "macos-arm64",
+  "artifacts": [
+    {
+      "path": "/Users/luo/Documents/github/codex-host-merge-anchor/build/npm/0.7.0-local.14/macos-arm64/codexhost-cli-0.7.0-local.14-macos-arm64.tgz",
+      "bytes": 4678270,
+      "sha256": "d19f98e177dce6a2f0e3e62cd31c70c3c6b87ed96bc4e4f463fdfb7ac0a871d7"
+    },
+    {
+      "path": "/Users/luo/Documents/github/codex-host-merge-anchor/build/npm/0.7.0-local.14/meta/codexhost-cli-0.7.0-local.14.tgz",
+      "bytes": 5042,
+      "sha256": "fe073ef5550814ee2921612833f2dc75d934c34955f99ac21ea7ce33fe73075f"
+    }
+  ]
+}
