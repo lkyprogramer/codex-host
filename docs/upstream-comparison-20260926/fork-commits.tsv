@@ -1,0 +1,106 @@
+af255febcba902a70d16cfec9271dfa2c5cd6ae9	2026-09-26	docs: record the re-review fixes and the limits they leave
+4d738cd94d9a13a149b81ee4ae192a37687af7d4	2026-09-26	fix(host-runtime): shorten the release bound and keep one status list
+2fab98852df3254e6b05a0afaa539f58a994a55b	2026-09-26	fix(shim): keep waiting when a forced round fails while anchors finish
+ec18e52cfed951a0a26061495cdaf04eb7d712f2	2026-09-26	fix(anchor): never reclaim escapees the user keeps
+9ed6d1b1c8d89b4869704e8579480c1521366f0d	2026-09-25	docs: record the review fixes for the anchor fallback and phase B
+9286266063af23ed83efcab402375054e24cd329	2026-09-25	fix(host-runtime): bound releases separately and tolerate unknown suspend statuses
+9d2a64e689fee1e736ef43866acc23d2d830e01d	2026-09-25	fix(shim): keep killing non-anchor processes while anchors finish
+1af00266f27e5cb6cee00b6fa80275449117e976	2026-09-25	fix(anchor): reclaim by recorded identity only, and address review findings
+6836bba40b332bb30e92bf850d4b8e7d41ac8fd9	2026-09-25	docs: record phase B completion
+471d63ba905082a990f1a27dc39b3c490d772bdf	2026-09-25	test(harness-adapter): check resource lifecycle and Turn grammar in conformance
+46850898eaed299b93aa1acfb0704a05f72d27ac	2026-09-25	feat(harness-adapter): report a failed idle release as releaseFailed
+f832b361fb93a53ede66cff023803fbbce1b2361	2026-09-25	perf(platform): read executable paths only for owned processes
+2b8b647da14ae178893301b070699b71f10ccd27	2026-09-25	fix(host-runtime): survive stray plugin failures, close in order on fatal ones
+0603fda173e29dc53ebfabb36211764028f1d30c	2026-09-25	fix(host-runtime): bound Harness calls and shutdown, retire faulted Threads
+feab1e44726a1eb299461cff10af9317dbeb9820	2026-09-25	docs: record the anchor fallback mechanisms and the tracking incident
+17072c67bd409018a5801688546a3a8a013d3b08	2026-09-25	feat(shim): reclaim groups whose anchor was lost
+3e65b3326cf7e2c2c4292fe28a6753c0b2b1ebcf	2026-09-25	feat(anchor): track escapees, record owned groups, isolate Linux trees
+86f5ad86173def636ae212ae21f8c87cabe1d894	2026-09-24	fix(shim,broker): let anchors finish their groups and anchor broker Harnesses
+9a85e3f45a1258a72ac6ba02187bd78906547ada	2026-09-24	docs: record the anchor re-review fixes
+841b39001b7583ee86953810f259ea3063644688	2026-09-24	test(adapters): run the Claude wrapper reclaim test in both ownership modes
+492ebec7513be9901e1a58734d8b8cba4db51125	2026-09-24	fix(harness-discovery): report aborts and kill() rounds the way Node would
+f53ddb6265454d7e75f26e027e549d6c7d88f000	2026-09-24	test(shim): cover how the Host learns where the anchor is
+d591765d3f91eb0021aeebe37d5bf1341c41f85e	2026-09-24	fix(anchor): never split a control message, and keep shortened graces
+8b20a0842f190e26c36e3054148fcb42e56a68f2	2026-09-24	docs: record the anchor review fixes and the Harness handle semantics
+89646ef34feb52b8c10ff3818b0afbd05032f1ca	2026-09-24	chore(boundaries): catch globalThis.process.kill and process["kill"] too
+7f013e64296b09553fef32e06b79df91c7fa6fc9	2026-09-24	fix(adapters): fail fast on startup faults and fit cleanup budgets
+a6414347bb80006445b88f521bb68cd2f534ea2c	2026-09-24	fix(harness-discovery): make the anchored child behave like the Harness
+c5c8ac45e12d929b1b5e29f7f3c76e2eb1511cce	2026-09-24	fix(shim): resolve the anchor beside the real Shim and drop stale values
+263b07e91b0e0c3312dd163c7c34faecf69ecbb9	2026-09-24	fix(anchor): reap adopted zombies, kill late escapees, and let urgent requests win
+2a78bc13cdb75e6edd2a5fe3869552870db7b90a	2026-09-24	docs: describe process ownership through the native anchor
+8ccdc232291aae08061ec654010873ee81515941	2026-09-24	chore(boundaries): forbid process-group signals outside the owned-process API
+4e180f85f69321dcc744eb5ceaf1c4f7a9202651	2026-09-24	refactor(adapters): start every Harness through the owned-process API
+8324972310f14a0caeb5645d4649b6dce5ae15de	2026-09-24	feat(harness-discovery): own every Harness process through spawnOwnedProcess
+8d877931d88615f832ed76a333720b01a19f9247	2026-09-24	feat(shim): ship the process anchor and tell the Host where it is
+e8eb8c2c659d689a88602b3c19e3cb465853d399	2026-09-24	feat(anchor): add a native process anchor that owns one Harness group
+c94f06b7a6a6162b9357b75f8b06abc0708f5b1a	2026-09-24	docs: plan the Rust process anchor and the full remediation order
+6d9cf6c787ecb48191e6993c4e3f9deeb418be56	2026-09-24	fix(claude,antigravity): wait only on live task levels and never let orphans hold a Turn
+a9f5d45d86bc52fbc27d8bfa471dac0d8210e95a	2026-09-23	fix(claude,antigravity): keep native background work alive and make release retryable
+5e5d048182d49e685dac97fe6ee7896e99593bf4	2026-09-23	chore: bump local version to 0.7.0-local.11
+f57c22179fcdae64d10625dc13561f963c6aacb2	2026-09-23	fix(grok): never read an unreadable identity as a recycled pid
+26468d0a21ed0868ecd99ffe559cffd27072c6d0	2026-09-23	fix(grok): prove ownership before reclaiming the owned process group
+62761d37b7bf3769c4d0ea52fc978612dac2f0c0	2026-09-23	fix(grok): make idle release retryable and close the remaining gates
+c7badd6d7e76bd8ad0a08922ab425244694247bc	2026-09-22	fix(grok): correct idle suspension admission, shutdown order and release
+63c12fc59f6aee11885c73976a9506fd463e8ad3	2026-09-22	feat(grok): suspend idle Grok ACP processes through the resource lifecycle
+cb24c3945de18748153a33738ef22f49777251fb	2026-09-21	chore: bump local version to 0.7.0-local.10
+5d04a0eb29b359f007fd0010629b9f1ad3057913	2026-09-21	fix(host-runtime): give Cursor history restore the ACP open timeout
+a24f3b0094ab1ff84654fa353d1c65eefe15fcd5	2026-09-19	chore: bump local version to 0.7.0-local.9
+1fdef3749b8c7315b81df687e6ab6629e384bdc7	2026-09-19	fix(cursor): suspend idle Cursor ACP processes through the resource lifecycle
+5d8adadc12bb7ec870bed6e2e47cb37f2ae9ce67	2026-09-18	chore: bump local version to 0.7.0-local.8
+137e21af00c5e6d47683b3862298e2e9e7d0a45f	2026-09-18	fix(antigravity): treat recovered API retries as successful Turns
+f75bd8eca0502f24fbecc493988b4dbeaa37a151	2026-09-18	fix(host-runtime): port upstream plugin loader timeout and shutdown fixes
+1734cd1e6589b113d39ce3d9c6d4254fc4f707a3	2026-09-18	chore: ignore Python bytecode caches in fixtures and tooling
+ab7c58a5552b27e204242a8cadc64d2312ad2233	2026-09-18	fix: bound the live Claude Code account read like the inspector path
+3ef20a214edc5e7a51986a9490ed00dfe193bdcb	2026-09-18	fix: spawn fewer Claude Code processes that share one OAuth credential
+a273ba1215b3110ea44381912f89b39bad817ab8	2026-09-18	fix: let Claude Code exit on its own before signalling it
+4becc744f79017296ff0b9f141926917ef396c99	2026-09-18	fix: recycle Claude Code process after an authentication failure
+814ddd451d5cfc850cd732445cf80b8e8adfbd34	2026-09-18	fix: classify Claude Code authentication only from failed results
+da9f35ea5d5eee4e07a5364b314d3f4d464592a3	2026-09-18	fix: expire cached Cursor catalog when a live session contradicts it
+c50c9dedeabf558a0e9e861adf004f2132ef54c6	2026-09-17	chore: bump local npm version to 0.7.0-local.7
+904bfa75e9fb52bdb1ec0d89797980eeade75bff	2026-09-17	fix: restore stored threads from history before fetching catalogs
+6affe8f78d46f630196a97a865e904c6cbd3fc02	2026-09-15	fix: keep Cursor session transport defined after catalog retry
+9c57073f438f9b0605d7a2ad64c5f84a7f11199a	2026-09-15	chore: bump local npm version to 0.7.0-local.6
+8525e23da12c986b60ffbdf9f05d30a696d712ed	2026-09-15	fix: cache Cursor model catalogs globally and retry empty directories
+a82cbd0911e8151f8aa9a40df8c913b23e9eb2e3	2026-09-15	fix: treat wait-many read deadlines as idle timeouts
+0b17cf734a4562823300b317170e20db9d1d679c	2026-09-14	docs: record review remediation, resource lifecycle, and harness integration
+ba7898f93a4190496e32a5dcbeb4252c9ca2243f	2026-09-14	chore: isolate plugin dependencies and tighten package boundary checks
+c9609a45605cfbd8d6ea99d6e39cde75e28827d0	2026-09-14	fix: align update paths, Unix signal exits, and macOS Broker rollback
+519e820e56177a354b285213124f42ec31a455e3	2026-09-14	feat: drive renderer catalog, steering, and usage from Host capabilities
+92a441a82d8e2e48bb665c3372edfce225c0951f	2026-09-14	fix: restore OpenCode, Pi, OMP, DeepSeek, CodeBuddy, and Cursor native semantics
+044d37fef94f90522c0144c862097866e1b31e29	2026-09-14	fix: restore Claude, Grok, Antigravity, and Kiro native semantics
+03b49e2bb7153939f6a111d389789ac95236e637	2026-09-14	fix: recover Host turns, persist config, and manage harness session resources
+14953866ffbb8697da0d2747c5900aba7550c7b4	2026-09-14	feat: add adapter conformance, session validation, and capability contracts
+38964658185bd090b4044f0cc9f5b575d8284b87	2026-09-12	fix: recognize Desktop 26.908 duplicated client-new-thread draft identity
+4afc25d7f45bebc6e0d171c7701ea732cbf364d6	2026-09-12	Merge remote-tracking branch 'origin/main' into local/all-fixes
+86722cbdb4d319bffde408da3d8226310f7bbeec	2026-09-12	feat: add Grok ACP plan mode and native interject steering
+6ba9ae77020a9875fefe36814912fb10d4ff99a7	2026-09-12	feat: keep Desktop and wait-many responsive during slow history reads
+480853a55b884c2e8be3c55c66f810c5096588ea	2026-09-12	fix: recover request manager from Desktop 26.908 hook snapshots
+4b1fac88f28a86dffcbbc0a27e36eec17bcbc0e5	2026-09-10	feat: observe delegated threads without idle model polling
+6a3519ef94152c414ab035a7146aca94517b32f2	2026-09-10	style: format delegation verify helpers and drop unused cwd
+3cdde00bd53ce9016b996cacfad2b298a8b03904	2026-09-10	fix: require terminal review results and real CLI evidence
+ae8dfee10e47cc832e4c81d5c3adf9911c4c9c73	2026-09-10	fix: serialize delegation turn-state compare-and-write
+e1db3a9724f1849e0f9abfe2fc8e6bcc650cdab5	2026-09-10	fix: pin terminal turn state and writer-immutable verify oracles
+1b45b9ae5a6da11cf3327802bb242e52536980ee	2026-09-10	fix: assert real verify contracts instead of missing fields
+39a0f2c4fb523c243432c8ca1df7562a373a270c	2026-09-10	fix: make FLOW-01 and remaining verify scenarios prove their contracts
+9bce92ddaa4384c56f1b40781c165562da0720e3	2026-09-10	fix: close delegation create, send identity, and verify gaps
+efbad4ee27d6d80c908476b786b13d6d350877eb	2026-09-10	fix: address Codex review on Grok delegation workers
+5890978d235d8b1ce61ee4ce9889a54310354367	2026-09-10	merge: origin/main into Grok delegation workers
+2c56e785af9ddc1ca20a4408cdb5d5e075ca6ce0	2026-09-10	test: wait for the first live Turn to finish before TURN-05 send
+cbe02d51103e754dcab6b06a6717b534f1f0cebe	2026-09-10	fix: keep pending Host Turn IDs until history alignment binds them
+7e8f30065efca444f88390332b8d0f9e196cb5f8	2026-09-10	fix: exit the verify CLI so isolated Host handles cannot hang the process
+876a32cf8509b9f8d7db1b41d77b2e47c9af6316	2026-09-10	fix: isolate verify scenarios on their own Runtime and data dir
+875eb893108e63782ec96aed9cb95906626eb99d	2026-09-10	fix: keep isolated Runtime alive after ENTRY-03 error preservation
+7056a5f0b7a1b0bbfd47d975b57cfeec8d4b4010	2026-09-10	fix: keep reopened isolated Runtime env after recovery scenarios
+cf7a401f50e871d9d7ba408749b3f9ea16b841a5	2026-09-10	test: narrow delegation API before waiting for progress
+bcda02183bd3097bf3c03a06432782bca8ae2408	2026-09-10	test: wait for delegated progress projection before asserting
+8e9a69b62546002cab3b4b21ba289f8d48b32800	2026-09-10	test: type the concurrent admission barrier callback
+35d688863186b7dbe0adfe3c541e97d56c38adc7	2026-09-10	test: avoid dynamic env delete in isolated runtime test
+abac69ea96c95f0c2defea4dd0c15de49d121318	2026-09-10	style: format delegation coordinator for prettier check
+dead7829dbfdd326755b08701fc6c07c75053a54	2026-09-10	feat: support reliable Grok delegation workers and verifiable coordination
+80f3116530c47e05ec24b97f267c011bbf7be982	2026-09-10	merge: npm launcher 修复
+405dae62e153f921d19e9d65039f01efa4a2a018	2026-09-10	fix: advertise the npm Node launcher as the delegation CLI
+6aab40f52a60305be3d15c3b5b23eaab6004b325	2026-09-10	merge: thread list 分页行数修复
+835f96765aff176e53d5e35729e9bb7d9739c67f	2026-09-10	merge: CLI 路径与 Windows shell 修复
+e4b05d9dd413a19054391c4d530c67cb80511dd7	2026-09-10	fix: 按请求的行数返回 Account 聚合页
+bc9ebc0fa3a916671ca8e168ab109ca7323a1b27	2026-09-09	fix: emit shell-executable delegation commands on Windows
+a001d1ceed1a39d2f899ad8b713989a8c5f14883	2026-09-09	fix: invoke delegation CLI through the Host-provided path
