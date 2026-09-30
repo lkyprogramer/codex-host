@@ -40,6 +40,7 @@ export async function rollbackPiLastTurn(
   const sourceSnapshot = mapPiSnapshot(copiedHistory, {
     sessionId: startupSessionId,
     model: currentModel,
+    cwd,
   });
   let state = await transport.fork(boundary.lastUserEntryId);
   if (state.sessionId === sourceSessionId || state.sessionId === startupSessionId) {
@@ -64,6 +65,7 @@ export async function rollbackPiLastTurn(
   const snapshot = mapPiSnapshot(await transport.getEntries(), {
     sessionId: state.sessionId,
     model: modelFromState(state),
+    cwd,
   });
   const expectedTurnKeys = sourceSnapshot.turns
     .slice(0, -1)

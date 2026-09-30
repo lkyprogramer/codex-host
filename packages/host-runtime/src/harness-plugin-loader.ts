@@ -11,6 +11,7 @@ import {
 import type { HarnessPluginContext, HarnessPluginModule } from "@codexhost/harness-adapter/plugin";
 import {
   HARNESS_PLUGIN_API_VERSION,
+  SUPPORTED_HARNESS_PLUGIN_API_VERSIONS,
   HARNESS_PLUGIN_LIMIT,
   HARNESS_PLUGIN_MANIFEST_MAX_BYTES,
   harnessPluginDescriptorSchema,
@@ -21,6 +22,7 @@ import {
 
 import { HarnessPluginRegistry } from "./harness-plugin-registry.js";
 import { validateOpenedHarnessSession } from "./harness-session-validation.js";
+import { legacyPluginAdapter } from "./legacy-plugin-adapter.js";
 import {
   pluginResourcePath,
   readPluginConfiguration,
@@ -90,7 +92,10 @@ function validatePluginAdapter(
 ): HarnessAdapter {
   return {
     harnessId: adapter.harnessId,
+    ...(adapter.permissionModeScope ? { permissionModeScope: adapter.permissionModeScope } : {}),
     ...(adapter.commandCatalog ? { commandCatalog: adapter.commandCatalog } : {}),
+    ...(adapter.liveCommandCatalog ? { liveCommandCatalog: adapter.liveCommandCatalog } : {}),
+    ...(adapter.inspectCommands ? { inspectCommands: adapter.inspectCommands.bind(adapter) } : {}),
     ...(adapter.sessionImport ? { sessionImport: adapter.sessionImport } : {}),
     ...(adapter.subagents ? { subagents: adapter.subagents } : {}),
     ...(adapter.webUi ? { webUi: adapter.webUi } : {}),
@@ -172,7 +177,10 @@ async function loadAdapter(
         })
         .catch(() => diagnose({ id: manifest.id, code: "warmupFailed" }));
     }
-    return validatePluginAdapter(value, diagnose);
+    return validatePluginAdapter(
+      manifest.adapterApiVersion < HARNESS_PLUGIN_API_VERSION ? legacyPluginAdapter(value) : value,
+      diagnose,
+    );
   })();
   try {
     const races: Array<Promise<HarnessAdapter | undefined>> = [
@@ -326,7 +334,7 @@ export async function loadHarnessPlugins(
       });
       let adapter: HarnessAdapter;
       let failure: HarnessPluginDiagnosticCode | undefined;
-      if (manifest.adapterApiVersion !== HARNESS_PLUGIN_API_VERSION) {
+      if (!SUPPORTED_HARNESS_PLUGIN_API_VERSIONS.includes(manifest.adapterApiVersion)) {
         failure = "incompatibleVersion";
         adapter = unavailableAdapter(descriptor, failure);
       } else {

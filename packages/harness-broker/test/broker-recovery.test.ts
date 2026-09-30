@@ -1,8 +1,9 @@
-import { mkdtemp, rm, writeFile, chmod } from "node:fs/promises";
+import { mkdtemp, rm, writeFile, chmod, lstat, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import net, { type Socket } from "node:net";
 import { randomUUID } from "node:crypto";
+import { spawn } from "node:child_process";
 import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   HarnessOutputChannel,
@@ -343,4 +344,95 @@ describe("broker recovery ownership", () => {
       }
     },
   );
+});
+
+describe.skipIf(process.platform === "win32")("broker descriptor ownership", () => {
+  it("replaces a descriptor whose owner pid is alive but no longer serves", async () => {
+    const f = await fixture();
+    // This process stands in for an unrelated process that reused the pid.
+    await writeFile(
+      f.descriptorPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        protocolVersion: 1,
+        harnessId: id,
+        generation: randomUUID(),
+        ownerPid: process.pid,
+        socketPath: f.endpoint("crashed"),
+        token: "0".repeat(64),
+      }),
+      { mode: 0o600 },
+    );
+    const server = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    cleanup.push(() => server.close());
+    expect(server.descriptor.socketPath).toBe(f.socketPath);
+  });
+
+  it("replaces a descriptor whose socket remains but refuses connections", async () => {
+    const f = await fixture();
+    // A broker killed outright leaves its socket file behind, unanswered.
+    const crashed = spawn(
+      process.execPath,
+      [
+        "-e",
+        `require("node:net").createServer().listen(${JSON.stringify(f.socketPath)}, () => console.log("up"))`,
+      ],
+      { stdio: ["ignore", "pipe", "inherit"] },
+    );
+    await new Promise<void>((resolve) => crashed.stdout.once("data", () => resolve()));
+    const exited = new Promise((resolve) => crashed.once("exit", resolve));
+    crashed.kill("SIGKILL");
+    await exited;
+    expect((await lstat(f.socketPath)).isSocket()).toBe(true);
+    await writeFile(
+      f.descriptorPath,
+      JSON.stringify({
+        schemaVersion: 1,
+        protocolVersion: 1,
+        harnessId: id,
+        generation: randomUUID(),
+        // This process stands in for an unrelated process that reused the pid.
+        ownerPid: process.pid,
+        socketPath: f.socketPath,
+        token: "0".repeat(64),
+      }),
+      { mode: 0o600 },
+    );
+    const server = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    cleanup.push(() => server.close());
+    expect(server.descriptor.ownerPid).toBe(process.pid);
+  });
+
+  it("leaves a successor's descriptor in place when closing", async () => {
+    const f = await fixture();
+    const first = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    // A successor published over this broker's descriptor.
+    const successorDescriptor = { ...first.descriptor, generation: randomUUID() };
+    await writeFile(f.descriptorPath, JSON.stringify(successorDescriptor), { mode: 0o600 });
+
+    await first.close();
+
+    expect(JSON.parse(await readFile(f.descriptorPath, "utf8"))).toEqual(successorDescriptor);
+  });
+
+  it("removes its own socket and descriptor when closing", async () => {
+    const f = await fixture();
+    const server = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    await server.close();
+    await expect(lstat(f.socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(lstat(f.descriptorPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("refuses to replace a descriptor whose owner still serves", async () => {
+    const f = await fixture();
+    const server = await startHarnessBrokerServer({ ...f, adapter: new FakeHarnessAdapter(id) });
+    cleanup.push(() => server.close());
+    await expect(
+      startHarnessBrokerServer({
+        ...f,
+        socketPath: f.endpoint("second"),
+        adapter: new FakeHarnessAdapter(id),
+      }),
+    ).rejects.toThrow("already has a live owner");
+  });
 });

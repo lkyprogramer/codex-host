@@ -2,6 +2,7 @@ import type {
   DecodedThreadListRequest,
   JsonObject,
   OfficialThreadListPage,
+  ThreadListSortKey,
 } from "@codexhost/protocol-core";
 
 import {
@@ -117,6 +118,10 @@ export async function aggregateOfficialAccountThreadListPage(input: {
   requestAccountPage(accountId: string, params: JsonObject): Promise<OfficialThreadListPage>;
   observeThread?(threadId: string, accountId: string): Promise<void>;
 }): Promise<OfficialThreadListPage> {
+  if (input.query.sortKey === "section_position") {
+    throw new Error("Section position sorting cannot be merged across Accounts");
+  }
+  const sortKey: ThreadListSortKey = input.query.sortKey;
   // The outer merger may re-request only its consumed prefix. The decoded
   // desktop query still carries the original, larger page size in that case.
   // Honouring `query.limit` there would over-deliver and break prefix accounting.
@@ -169,9 +174,7 @@ export async function aggregateOfficialAccountThreadListPage(input: {
         source.requestedThisPage = true;
       }
       source.batch = page;
-      source.entries = page.data.map((thread) =>
-        officialThreadListEntry(thread, input.query.sortKey),
-      );
+      source.entries = page.data.map((thread) => officialThreadListEntry(thread, sortKey));
       if (source.entries.length === 0) {
         if (page.nextCursor === null || page.nextCursor === source.cursor) {
           source.done = true;

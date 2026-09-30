@@ -17,6 +17,7 @@ export {
 export type { HarnessPluginRoute } from "./harness-route.js";
 export {
   HARNESS_PLUGIN_API_VERSION,
+  SUPPORTED_HARNESS_PLUGIN_API_VERSIONS,
   HARNESS_PLUGIN_ICON_MAX_BYTES,
   HARNESS_PLUGIN_LIMIT,
   HARNESS_PLUGIN_MANIFEST_MAX_BYTES,
@@ -305,3 +306,30 @@ export const packageMetadata = {
   name: "@codexhost/shared-contracts",
   contractVersion: WORKSPACE_CONTRACT_VERSION,
 } as const;
+
+export {
+  LOADED_SESSIONS_METHOD,
+  loadedSessionsParamsSchema,
+  loadedSessionsResultSchema,
+  loadedSessionResourceStateSchema,
+  loadedSessionReleaseStatusSchema,
+  type LoadedSessionsResult,
+  type LoadedSessionResourceState,
+  type LoadedSessionReleaseStatus,
+} from "./loaded-sessions.js";
+
+export { mergeHarnessCommandCatalogs } from "./harness-commands.js";
+
+export {
+  isComposerCodePosition,
+  DELEGATION_MENTION_PATH_PREFIX,
+  HARNESS_COMMAND_MENTION_PATH_PREFIX,
+  delegationMentionPath,
+  formatDelegationMentionLink,
+  stripDelegationMentions,
+  harnessCommandMentionPath,
+  formatHarnessCommandMentionLink,
+  decodeHarnessCommandMention,
+  restoreHarnessCommandMentions,
+  type DelegationMention,
+} from "./delegation-mention.js";

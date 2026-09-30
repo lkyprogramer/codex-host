@@ -7,6 +7,7 @@ export const LINUX_NATIVE_EXECUTABLES = Object.freeze([
   "bin/codexhost",
   "libexec/codexhost-shim",
   "libexec/codexhost-updater",
+  "libexec/codexhost-anchor",
 ]);
 
 function compareVersion(left, right) {

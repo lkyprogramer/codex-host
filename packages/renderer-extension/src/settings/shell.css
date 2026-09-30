@@ -67,6 +67,62 @@ button {
   border: 0;
 }
 
+.settings-resources-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.settings-resources-status {
+  color: var(--settings-muted);
+}
+
+.settings-resources-status[data-state="error"] {
+  color: var(--settings-danger);
+}
+
+.settings-resources-list {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.settings-resource-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  gap: 12px;
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid var(--settings-border);
+  border-radius: 8px;
+  background: var(--settings-panel);
+}
+
+.settings-resource-row__identity,
+.settings-resource-row__facts {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 4px;
+}
+
+.settings-resource-row__identity code {
+  overflow-wrap: anywhere;
+  color: var(--settings-muted);
+  font-size: 11px;
+}
+
+.settings-resource-row__release {
+  color: var(--settings-muted);
+}
+
+@media (max-width: 720px) {
+  .settings-resource-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
 .codexhost-settings-dialog {
   width: min(1120px, calc(100vw - 32px));
   height: min(780px, calc(100vh - 32px));

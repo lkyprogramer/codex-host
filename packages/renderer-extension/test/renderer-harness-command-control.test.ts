@@ -5,6 +5,7 @@ import type { HarnessCommandDescriptor } from "@codexhost/shared-contracts";
 import {
   rendererHarnessCommandPresentation,
   rendererHarnessMessages,
+  rendererStaticCommandsNotice,
 } from "../src/renderer-harness-localization.js";
 
 const compactCommand = {
@@ -24,6 +25,10 @@ const customCommand = {
 } as HarnessCommandDescriptor;
 
 describe("Renderer Harness command localization", () => {
+  it("does not promise that a message will make a static workspace catalog live", () => {
+    expect(rendererStaticCommandsNotice("zh-CN")).toBe("当前仅有内置命令，工作区目录尚不可用");
+    expect(rendererStaticCommandsNotice("en")).toContain("workspace catalog is unavailable");
+  });
   it("uses Chinese chrome and compact copy for the Chinese settings locale", () => {
     expect(rendererHarnessMessages("zh-CN")).toMatchObject({
       commands: "命令",

@@ -5,6 +5,7 @@ import type {
   HarnessInspection,
   HarnessModelRef,
   HarnessPermissionModeId,
+  HarnessPermissionModeScope,
   HarnessSessionCapabilities,
   HarnessSessionImportCandidate,
   HarnessThinkingOption,
@@ -99,6 +100,8 @@ export interface ForkSessionInput {
   kind: "fork";
   sourceRef: NativeSessionRef;
   checkpoint: NativeCheckpointRef;
+  /** Saved source selection when the native source is not live in this Adapter. */
+  model?: HarnessModelRef;
   /** Execution cwd for the derived Native Session. */
   cwd: string;
   environment?: Record<string, string | undefined>;
@@ -350,12 +353,18 @@ export interface HostFileChange {
   path: string;
   kind: "add" | "update" | "delete";
   unifiedDiff: string;
+  /** A local edit fragment without stable file-wide coordinates. */
+  diffScope?: "fragment";
+  /** Tool previews for this path covered by a native file result; not causal source IDs. */
+  coveredToolItemIds?: HostItemId[];
 }
 
 export interface HostFileChangeItem {
   type: "fileChange";
   itemId: HostItemId;
   changes: HostFileChange[];
+  /** Original tool Item IDs represented by this native file-change Item. */
+  sourceItemIds?: HostItemId[];
 }
 
 export type HostSubagentStatus = "pending" | "running" | "completed" | "failed" | "interrupted";
@@ -527,9 +536,19 @@ export type HarnessOutput =
   { kind: "event"; event: HostEvent } | { kind: "interaction"; interaction: HostInteraction };
 
 /** Outcome of an atomic, non-destructive idle suspension attempt. */
+/**
+ * - `suspended`: native resources were released; the Session resumes later.
+ * - `busy`: native work or an interaction is in progress; nothing was touched.
+ * - `unknown`: suspension was not attempted because the Session cannot decide
+ *   now (not yet persisted, closing, aborted); nothing was released.
+ * - `releaseFailed`: a release was attempted and could not be confirmed.
+ *   Whatever remains is still owned by the adapter. A Session that stays open
+ *   is retried later; one the adapter had to close ends its outputs.
+ * - `unsupported`: this Session never suspends.
+ */
 export type HarnessIdleSuspendResult =
   | { status: "suspended"; scope: string }
-  | { status: "busy" | "unknown" | "unsupported"; reason?: string };
+  | { status: "busy" | "unknown" | "releaseFailed" | "unsupported"; reason?: string };
 
 /** Structural cancellation view: usable without Node.js or DOM library dependencies. */
 export interface HarnessIdleSuspendSignal {
@@ -545,6 +564,30 @@ export interface HarnessIdleSuspendSignal {
  */
 export interface HarnessResourceLifecycle {
   suspend(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult>;
+  /**
+   * What native work the Session holds right now, without touching it. A
+   * Session that reports `busy` refuses an idle release for that reason.
+   */
+  workLevel?(): HarnessWorkLevel;
+  /**
+   * Stops jobs the Session started that outlive its Turns (background
+   * shells, subagents) and reports whether they are provably gone. Declared by
+   * `capabilities.resources.ownedJobs`.
+   */
+  stopOwnedJobs?(): Promise<HarnessOwnedJobsResult>;
+}
+
+/**
+ * - `idle`: nothing native is running; an idle release may proceed.
+ * - `busy`: a Turn, an interaction, a configuration change or background
+ *   native work (for example a detached shell or subagent) is in progress.
+ */
+export type HarnessWorkLevel = { level: "idle" } | { level: "busy"; reason: string };
+
+/** Whether owned jobs are provably stopped; `proof` names what was reclaimed. */
+export interface HarnessOwnedJobsResult {
+  quiescence: "confirmed" | "unknown" | "unsupported";
+  proof?: { pid: number; scope: string };
 }
 
 export interface HarnessSession {
@@ -553,15 +596,18 @@ export interface HarnessSession {
   readonly initialState: HarnessSessionState;
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
-  readonly commands?: HarnessCommandCapability;
-  readonly workMode?: HarnessWorkModeControl;
-  readonly steering?: HarnessSteeringControl;
-  readonly resourceLifecycle?: HarnessResourceLifecycle;
+  // Optional capabilities may also read as undefined: a wrapper that
+  // forwards another Session's capabilities (the Host's managed Session)
+  // exposes them through getters.
+  readonly commands?: HarnessCommandCapability | undefined;
+  readonly workMode?: HarnessWorkModeControl | undefined;
+  readonly steering?: HarnessSteeringControl | undefined;
+  readonly resourceLifecycle?: HarnessResourceLifecycle | undefined;
   /**
    * False when the Session can replay history but cannot start native work.
    * Host replaces it with a live resume before execute. Omitted means ready.
    */
-  readonly executionReady?: boolean;
+  readonly executionReady?: boolean | undefined;
 
   refreshUsage?(): Promise<void>;
   readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>>;
@@ -601,10 +647,35 @@ export interface HarnessSessionImportCapability {
   resolveCandidate?(nativeSessionId: string): Promise<HarnessResult<HarnessSessionImportSource>>;
 }
 
+/** Structural cancellation signal; the public Adapter contract has no DOM/Node dependency. */
+export interface HarnessCatalogSignal {
+  readonly aborted: boolean;
+  readonly reason?: unknown;
+  addEventListener(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener(type: "abort", listener: () => void): void;
+}
+export interface InspectHarnessCommandsInput {
+  cwd: string;
+  signal: HarnessCatalogSignal;
+}
+
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
+  /**
+   * Where this Harness chooses a Session's Permission Mode. `atCreate` means
+   * only when a Session opens, so the Host passes a Thread's persisted mode
+   * into a resume. Omitted means `live`.
+   */
+  readonly permissionModeScope?: HarnessPermissionModeScope;
   /** Static command metadata. Reading it must not inspect, connect to, or open a Native Session. */
   readonly commandCatalog?: HarnessCommandCatalog;
+  /** Session command lists include native workspace metadata, not only builtin entries. */
+  readonly liveCommandCatalog?: boolean;
+  /** Bounded read-only metadata discovery. No model Turn or retained Native Session;
+   * close all temporary resources on success, failure, cancellation and timeout. */
+  inspectCommands?(
+    input: InspectHarnessCommandsInput,
+  ): Promise<HarnessResult<HarnessCommandCatalog>>;
   readonly sessionImport?: HarnessSessionImportCapability;
   readonly subagents?: HarnessSubagentCapability;
   readonly webUi?: HarnessWebUiAction;

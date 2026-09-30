@@ -39,6 +39,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import { encodeOpenCodeModelRef } from "./model-catalog.js";
+import { coverOpenCodeFileChanges } from "./file-change-coverage.js";
 
 export interface OpenCodeMessageWithParts {
   info: Message;
@@ -49,6 +50,7 @@ export interface OpenCodeHistoryInput {
   session: Session;
   messages: readonly OpenCodeMessageWithParts[];
   diffsByUserMessageId?: ReadonlyMap<string, readonly SnapshotFileDiff[]>;
+  worktree?: string;
   toolOutputLimit: number;
 }
 
@@ -284,8 +286,11 @@ export function projectOpenCodeHistory(input: OpenCodeHistoryInput): HostThreadS
     const items = assistants.flatMap((entry) =>
       assistantItems(entry, assistantOutcome(entry.info), input.toolOutputLimit),
     );
-    const changes = reliableOpenCodeFileChanges(
-      input.diffsByUserMessageId?.get(userEntry.info.id) ?? [],
+    const changes = coverOpenCodeFileChanges(
+      reliableOpenCodeFileChanges(input.diffsByUserMessageId?.get(userEntry.info.id) ?? []),
+      items.map(({ item }) => item),
+      input.session.directory,
+      input.worktree,
     );
     if (changes.length > 0) {
       const item: HostFileChangeItem = {

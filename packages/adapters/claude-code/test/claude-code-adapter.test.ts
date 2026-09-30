@@ -643,8 +643,8 @@ describe("Claude Code HarnessAdapter", () => {
     transport.close.mockRejectedValueOnce(new Error("process group is still alive"));
 
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
-      status: "unknown",
-      reason: "Claude Code native process release failed: process group is still alive",
+      status: "releaseFailed",
+      reason: "Claude Code Session release failed: process group is still alive",
     });
     // The Host retries on its next idle tick, and that retry reaches the same process.
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
@@ -670,7 +670,7 @@ describe("Claude Code HarnessAdapter", () => {
       .mockRejectedValueOnce(new Error("process group is still alive"))
       .mockRejectedValueOnce(new Error("process group is still alive"));
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
-      status: "unknown",
+      status: "releaseFailed",
     });
 
     // The old process may still write this native history: no new one may start,
@@ -715,7 +715,7 @@ describe("Claude Code HarnessAdapter", () => {
       .mockRejectedValueOnce(new Error("process group is still alive"))
       .mockRejectedValueOnce(new Error("process group is still alive"));
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
-      status: "unknown",
+      status: "releaseFailed",
     });
 
     // Close owns the retained process too, and never reports what it could not confirm.
@@ -747,7 +747,7 @@ describe("Claude Code HarnessAdapter", () => {
     const suspending = lifecycle.suspend(new AbortController().signal);
     const closing = session.close();
     failRelease(new Error("process group is still alive"));
-    await expect(suspending).resolves.toMatchObject({ status: "unknown" });
+    await expect(suspending).resolves.toMatchObject({ status: "releaseFailed" });
     await expect(closing).rejects.toThrow("could not stop safely");
     // The failed release must not hand a closed Session back to new work.
     await expect(session.execute(textTurn("after-close"))).resolves.toMatchObject({ ok: false });
@@ -928,6 +928,7 @@ describe("Claude Code HarnessAdapter", () => {
         selectPermissionMode: true,
         permissionModeScope: "live",
       },
+      resources: { idleRelease: true, ownedJobs: false },
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
       turnControl: { steering: "restart", workModes: ["default"] },
       subagents: { observe: true, readTranscript: true },
@@ -3426,8 +3427,8 @@ describe("Claude Code HarnessAdapter", () => {
     await session.close();
   });
 
-  it("emits a reliable File Change immediately after a successful Edit", async () => {
-    const { adapter, transports } = fixture();
+  it("emits a reliable File Change and recovers the same native path from history", async () => {
+    const { adapter, transports, history } = fixture();
     const session = await openSession(adapter);
     const iterator = session.outputs[Symbol.asyncIterator]();
 
@@ -3437,50 +3438,49 @@ describe("Claude Code HarnessAdapter", () => {
     await nextEvent(iterator);
     const transport = transports[0];
     if (!transport) throw new Error("Fake Claude transport was not created");
+    const nativePath = path.sep === "\\" ? "/synthetic/sample.txt" : "/synthetic/a\\b";
+    const displayedPath = path.sep === "\\" ? "sample.txt" : "a\\b";
+    const patch = {
+      path: nativePath,
+      kind: "update" as const,
+      hunks: [{ oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-old", "+new"] }],
+    };
 
     transport.event({
       type: "tool.started",
       callId: "edit-1",
       toolName: "Edit",
-      arguments: { file_path: "/synthetic/sample.txt" },
+      arguments: { file_path: nativePath },
     });
-    expect(await nextEvent(iterator)).toMatchObject({
+    const startedEdit = await nextEvent(iterator);
+    expect(startedEdit).toMatchObject({
       type: "item.started",
       item: { type: "toolExecution", toolName: "Edit" },
     });
+    if (startedEdit.type !== "item.started") throw new Error("Missing Edit item");
     transport.event({
       type: "tool.completed",
       callId: "edit-1",
       toolName: "Edit",
       outputText: "edited",
       isError: false,
-      fileChange: {
-        path: "/synthetic/sample.txt",
-        kind: "update",
-        hunks: [
-          {
-            oldStart: 1,
-            oldLines: 1,
-            newStart: 1,
-            newLines: 1,
-            lines: ["-old", "+new"],
-          },
-        ],
-      },
+      fileChange: patch,
     });
     expect(await nextEvent(iterator)).toMatchObject({
       type: "item.completed",
       snapshot: { item: { type: "toolExecution", toolName: "Edit" } },
     });
-    expect(await nextEvent(iterator)).toMatchObject({
+    const liveFile = await nextEvent(iterator);
+    expect(liveFile).toMatchObject({
       type: "item.started",
       item: {
         type: "fileChange",
+        sourceItemIds: [startedEdit.item.itemId],
         changes: [
           {
-            path: "sample.txt",
+            path: displayedPath,
             kind: "update",
-            unifiedDiff: "--- a/sample.txt\n+++ b/sample.txt\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+            unifiedDiff: `--- a/${displayedPath}\n+++ b/${displayedPath}\n@@ -1,1 +1,1 @@\n-old\n+new\n`,
           },
         ],
       },
@@ -3499,6 +3499,45 @@ describe("Claude Code HarnessAdapter", () => {
       type: "turn.completed",
       outcome: { status: "succeeded" },
     });
+    const submitted = transport.turns[0];
+    if (!submitted || liveFile.type !== "item.started" || liveFile.item.type !== "fileChange") {
+      throw new Error("Missing live Claude File Change");
+    }
+    history.push(
+      {
+        type: "user",
+        uuid: submitted.userMessageId,
+        session_id: transport.sessionId,
+        message: { role: "user", content: "edit" },
+      },
+      {
+        type: "assistant",
+        uuid: "persisted-edit",
+        session_id: transport.sessionId,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "edit-1", name: "Edit", input: { file_path: nativePath } },
+          ],
+        },
+      },
+      {
+        type: "user",
+        uuid: "persisted-result",
+        session_id: transport.sessionId,
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "edit-1", content: "edited" }],
+        },
+        toolUseResult: { filePath: nativePath, structuredPatch: patch.hunks },
+      },
+    );
+    const snapshot = await session.readSnapshot();
+    if (!snapshot.ok) throw new Error(snapshot.error.message);
+    const replayFile = snapshot.value.turns[0]?.items.find(
+      ({ item }) => item.type === "fileChange",
+    );
+    expect(replayFile?.item).toMatchObject({ changes: liveFile.item.changes });
     await session.close();
   });
 

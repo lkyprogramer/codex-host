@@ -9,6 +9,7 @@ import {
 } from "../src/renderer-model-picker.js";
 import type { RendererConnectionDiagnostics } from "../src/settings/connections-page.js";
 import type { RendererSessionImportClient } from "../src/settings/session-import-page.js";
+import type { RendererResourcesClient } from "../src/settings/resources-page.js";
 import type * as VersionedRendererAdapter from "../src/versioned-renderer-adapter.js";
 
 const testState = vi.hoisted(() => ({
@@ -19,6 +20,7 @@ const testState = vi.hoisted(() => ({
   selectModel: null as null | ((modelId: string) => void),
   getConnectionDiagnostics: null as null | (() => RendererConnectionDiagnostics | null),
   getSessionImportClient: null as null | (() => RendererSessionImportClient | null),
+  getResourcesClient: null as null | (() => RendererResourcesClient | null),
   documentListeners: new Map<string, EventListener>(),
   modelTarget: ["conversation", "thread-a"] as readonly unknown[],
 }));
@@ -39,7 +41,11 @@ vi.mock("../src/renderer-composer-dom.js", async (importOriginal) => {
         composer: testState.composer,
         composerId: "composer-1",
         root: { isConnected: true, remove: vi.fn() },
-        picker: { root: { isConnected: true } },
+        picker: {
+          root: { isConnected: true },
+          agents: [...args[3]],
+          presentations: new Map(),
+        },
         modelPicker: { root: { isConnected: true }, trigger: {} },
         permissionModePicker: { root: { isConnected: true } },
         nativeModelControl: null,
@@ -58,6 +64,12 @@ vi.mock("../src/renderer-composer-dom.js", async (importOriginal) => {
         sendButton: testState.sendButton,
         sendDisabledBeforeSwitch: null,
       };
+    },
+    replaceComposerAgentPicker: (
+      control: RendererComposerDom.ComposerAgentControl,
+      agents: Parameters<typeof RendererComposerDom.replaceComposerAgentPicker>[1],
+    ) => {
+      control.picker.agents = [...agents];
     },
     renderComposerAgentControl: (
       _control: unknown,
@@ -94,10 +106,12 @@ vi.mock("../src/renderer-settings-lifecycle.js", () => ({
     options: {
       getConnectionDiagnostics(): RendererConnectionDiagnostics | null;
       getSessionImportClient(): RendererSessionImportClient | null;
+      getResourcesClient(): RendererResourcesClient | null;
     },
   ) => {
     testState.getConnectionDiagnostics = options.getConnectionDiagnostics;
     testState.getSessionImportClient = options.getSessionImportClient;
+    testState.getResourcesClient = options.getResourcesClient;
     return {
       locale: "en",
       refresh: vi.fn(),
@@ -165,6 +179,7 @@ function installFakeBrowser(): void {
   testState.selectModel = null;
   testState.getConnectionDiagnostics = null;
   testState.getSessionImportClient = null;
+  testState.getResourcesClient = null;
   testState.documentListeners.clear();
   testState.modelTarget = ["conversation", "thread-a"];
   const window_ = {
@@ -344,7 +359,7 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
     expect(applyAgent).not.toHaveBeenCalled();
   });
 
-  it("routes Session import to local while the current Composer Host is remote", async () => {
+  it("routes Session import and Resources to local while the current Composer Host is remote", async () => {
     installFakeBrowser();
     const local = {
       inspectHarness: vi.fn(async () => readyInspection()),
@@ -355,6 +370,7 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       })),
       listHarnessSessions: vi.fn(async () => ({ candidates: [] })),
       importHarnessSession: vi.fn(async () => ({ threadId: "local-thread" })),
+      listLoadedSessions: vi.fn(async () => ({ sessions: [] })),
     };
     const remote = {
       inspectHarness: vi.fn(async () => readyInspection()),
@@ -365,11 +381,13 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       })),
       listHarnessSessions: vi.fn(),
       importHarnessSession: vi.fn(),
+      listLoadedSessions: vi.fn(async () => ({ sessions: [] })),
     };
+    let localRoute = local;
     const modelControl = {
       ...remote,
       currentHostId: () => "remote-1",
-      clientForHost: vi.fn((hostId: string) => (hostId === "local" ? local : remote)),
+      clientForHost: vi.fn((hostId: string) => (hostId === "local" ? localRoute : remote)),
       inspectThread: vi.fn(),
       inspectThreadCommands: vi.fn(async () => ({ commands: [] })),
       inspectThreadUsage: vi.fn(),
@@ -395,6 +413,10 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       harnessId: harnessIdSchema.parse("pi"),
       nativeSessionId: "native-session",
     });
+    await testState.getResourcesClient?.()?.listLoadedSessions();
+    const replacement = { ...local, listLoadedSessions: vi.fn(async () => ({ sessions: [] })) };
+    localRoute = replacement;
+    await testState.getResourcesClient?.()?.listLoadedSessions();
 
     expect(modelControl.clientForHost).toHaveBeenCalledWith("local");
     expect(local.listSessionImportSources).toHaveBeenCalledOnce();
@@ -403,6 +425,9 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
       harnessId: "pi",
       nativeSessionId: "native-session",
     });
+    expect(local.listLoadedSessions).toHaveBeenCalledOnce();
+    expect(replacement.listLoadedSessions).toHaveBeenCalledOnce();
+    expect(remote.listLoadedSessions).not.toHaveBeenCalled();
     expect(remote.listHarnessSessions).not.toHaveBeenCalled();
     expect(remote.importHarnessSession).not.toHaveBeenCalled();
   });
@@ -638,12 +663,54 @@ describe("Renderer binding Host-scoped Claude catalogs", () => {
     probe.setAdapter(
       { state: "ready", reason: "ready", modelUpdates: 0, hook: "request-bridge" },
       undefined,
-      undefined,
+      () => true,
       modelControl as never,
     );
 
     await vi.waitFor(() => expect(claudeInspections).toBeGreaterThanOrEqual(2));
-    expect(testState.renderedModelViews.at(-1)).not.toMatchObject({ status: "error" });
+    await vi.waitFor(() =>
+      expect(testState.renderedModelViews.at(-1)).toMatchObject({ status: "ready" }),
+    );
+  });
+
+  it("loads the selected Harness while another directory inspection remains slow", async () => {
+    installFakeBrowser();
+    testState.modelTarget = ["default"];
+    const inspected: string[] = [];
+    const host = {
+      inspectHarness: vi.fn(async ({ harnessId }: { harnessId: string }) => {
+        inspected.push(harnessId);
+        if (harnessId === "pi") return await new Promise<never>(() => undefined);
+        return readyInspection();
+      }),
+    };
+    const modelControl = {
+      currentHostId: () => "host-a",
+      clientForHost: vi.fn(() => host),
+      inspectHarness: host.inspectHarness,
+      inspectThread: vi.fn(),
+      inspectThreadCommands: vi.fn(async () => ({ commands: [] })),
+      inspectThreadUsage: vi.fn(),
+      subscribeThreadUsage: () => () => undefined,
+    };
+    const { installRendererBindingProbe } = await import("../src/renderer-binding-probe.js");
+    const probe = installRendererBindingProbe({
+      enabledAgents: ["codex", "pi", "claude-code"],
+      defaultAgent: "claude-code",
+    });
+    probe.setAdapter(
+      { state: "ready", reason: "ready", modelUpdates: 0, hook: "request-bridge" },
+      undefined,
+      () => true,
+      modelControl as never,
+    );
+
+    await vi.waitFor(() =>
+      expect(testState.renderedModelViews.at(-1)).toMatchObject({ status: "ready" }),
+    );
+    expect(inspected[0]).toBe("claude-code");
+    expect(inspected.includes("pi")).toBe(true);
+    probe.dispose();
   });
 
   it("reloads a same-Host empty Claude catalog on explicit refresh", async () => {

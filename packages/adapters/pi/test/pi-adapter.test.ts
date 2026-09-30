@@ -22,6 +22,7 @@ import {
   runAdapterConformance,
   type ConformanceOutputObserver,
 } from "@codexhost/harness-adapter/conformance";
+import { CodexTurnProjector, projectHistoricalTurn } from "@codexhost/protocol-core";
 import {
   PiAdapter,
   type PiAdapterDependencies,
@@ -30,6 +31,7 @@ import {
 } from "../src/pi-adapter.js";
 import type { PiSessionHistory } from "../src/pi-history.js";
 import { encodePiModelRef } from "../src/pi-model-catalog.js";
+import { piNativeCommandCatalog } from "../src/pi-native-commands.js";
 import {
   PiRpcFaultError,
   type PiAutonomousTurn,
@@ -79,6 +81,11 @@ class FakePiTransport implements PiTurnTransport {
           ],
   );
   readonly getEntries = vi.fn(async (): Promise<PiSessionHistory> => structuredClone(this.history));
+  readonly getCommands = vi.fn(async () => [
+    { name: "review", description: "Review the project", source: "prompt" as const },
+    { name: "skill:review", description: "Review skill", source: "skill" as const },
+    { name: "compact", description: "Native compact", source: "extension" as const },
+  ]);
   readonly getSessionUsage = vi.fn(async (): Promise<HostUsage | null> =>
     this.usage === null ? null : structuredClone(this.usage),
   );
@@ -210,6 +217,12 @@ class FakePiTransport implements PiTurnTransport {
     );
     this.history.leafId = assistantId;
     this.resolveTurn({ text, cancelled });
+    this.resetTurn();
+  }
+
+  handledCancelled(): void {
+    if (!this.resolveTurn) throw new Error("No active fake Pi Turn");
+    this.resolveTurn({ text: "", cancelled: true, handled: true });
     this.resetTurn();
   }
 
@@ -1362,6 +1375,254 @@ describe("Pi HarnessAdapter Session", () => {
     await session.close();
   });
 
+  it("discovers native commands through an ephemeral RPC and executes only a current live entry", async () => {
+    const { adapter, transports } = fixture();
+    const signal = new AbortController().signal;
+    const inspected = await adapter.inspectCommands({ cwd: "/synthetic", signal });
+    expect(inspected).toMatchObject({ ok: true, value: { source: "live" } });
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    expect(inspected.value.commands).toEqual([
+      expect.objectContaining({ invocation: "/review", kind: "command" }),
+      expect.objectContaining({ invocation: "/skill:review", kind: "skill" }),
+      expect.objectContaining({ invocation: "/compact" }),
+    ]);
+    expect(transports[0]?.options?.noSession).toBe(true);
+    expect(transports[0]?.close).toHaveBeenCalledOnce();
+
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const review = inspected.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!review) throw new Error("Missing native review command");
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("native-review"),
+        commandId: review.id,
+        arguments: { text: "  security  " },
+      }),
+    ).resolves.toEqual({ ok: true, value: { turnId: "native-review" } });
+    const live = transports[1];
+    if (!live) throw new Error("Pi live transport was not started");
+    expect(live.options?.noSession).toBeUndefined();
+    await vi.waitFor(() => expect(live.runTurn).toHaveBeenCalledOnce());
+    expect(live.runTurn).toHaveBeenCalledWith("/review   security  ", expect.any(Function));
+    live.succeed("Reviewed");
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed") break;
+    }
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "succeeded" },
+    });
+    expect(await session.commands?.list()).toMatchObject({ ok: true, value: { source: "live" } });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("closes an ephemeral Pi RPC when command inspection is cancelled", async () => {
+    const { adapter, transports } = fixture();
+    const controller = new AbortController();
+    const pending = adapter.inspectCommands({ cwd: "/synthetic", signal: controller.signal });
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing ephemeral Pi transport");
+    vi.spyOn(transport, "getCommands").mockImplementation(
+      async () => new Promise<never>(() => undefined),
+    );
+    await vi.waitFor(() => expect(transport.getCommands).toHaveBeenCalledOnce());
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(transport.close).toHaveBeenCalledOnce();
+    await adapter.close();
+  });
+
+  it("reports a cancelled handled command without requiring a native User Entry", async () => {
+    const { adapter, transports } = fixture();
+    const inspected = await adapter.inspectCommands({
+      cwd: "/synthetic",
+      signal: new AbortController().signal,
+    });
+    if (!inspected.ok) throw new Error(inspected.error.message);
+    const native = inspected.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!native) throw new Error("Missing review command");
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("handled-cancel"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const live = transports[1];
+    if (!live) throw new Error("Missing live Pi transport");
+    await vi.waitFor(() => expect(live.runTurn).toHaveBeenCalledOnce());
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("handled-cancel") }),
+    ).resolves.toMatchObject({ ok: true });
+    live.handledCancelled();
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed") break;
+    }
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "cancelled" },
+    });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("rejects a native command after Pi Session closes without creating transport", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.close();
+    const created = transports.length;
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing native review command");
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("closed-native"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    expect(transports).toHaveLength(created);
+    await adapter.close();
+  });
+
+  it("cancels before Pi metadata settles and never dispatches the late native command", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing live Pi transport");
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const getCommands = vi.spyOn(transport, "getCommands").mockImplementation(async () => {
+      await gate;
+      return [{ name: "review", source: "prompt" }];
+    });
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("pending-native"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(getCommands).toHaveBeenCalledOnce());
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("pending-native") }),
+    ).resolves.toMatchObject({ ok: true });
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed" && event.turnId === "pending-native") break;
+    }
+    expect(
+      events.filter(
+        (event) => event.type === "turn.completed" && event.turnId === "pending-native",
+      ),
+    ).toHaveLength(1);
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "cancelled" },
+    });
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.runTurn).not.toHaveBeenCalled();
+    await expect(session.execute(textTurn("next-turn"))).resolves.toMatchObject({ ok: true });
+    transport.succeed("next completed");
+    const later = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      later.push(event);
+      if (event.type === "turn.completed" && event.turnId === "next-turn") break;
+    }
+    expect(later.at(-1)).toMatchObject({
+      type: "turn.completed",
+      turnId: "next-turn",
+      outcome: { status: "succeeded" },
+    });
+    expect(transport.runTurn).toHaveBeenCalledOnce();
+    await session.close();
+    await adapter.close();
+  });
+
+  it("closes a Pi Session during pending native metadata without dispatch", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing live Pi transport");
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const getCommands = vi.spyOn(transport, "getCommands").mockImplementation(async () => {
+      await gate;
+      return [{ name: "review", source: "prompt" }];
+    });
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    await session.commands?.execute({
+      turnId: hostTurnIdSchema.parse("closing-native"),
+      commandId: native.id,
+    });
+    await vi.waitFor(() => expect(getCommands).toHaveBeenCalledOnce());
+    await expect(session.close()).resolves.toBeUndefined();
+    release?.();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(transport.runTurn).not.toHaveBeenCalled();
+    expect(transport.close).toHaveBeenCalledOnce();
+    await adapter.close();
+  });
+
+  it("fails an accepted Pi native command when metadata refresh fails without prompting", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    await session.readSnapshot();
+    const transport = transports[0];
+    if (!transport) throw new Error("Missing live Pi transport");
+    vi.spyOn(transport, "getCommands").mockRejectedValue(new Error("native catalog unavailable"));
+    const native = piNativeCommandCatalog([{ name: "review", source: "prompt" }]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("failed-native"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const events = [];
+    for (let count = 0; count < 8; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed" && event.turnId === "failed-native") break;
+    }
+    expect(events.at(-1)).toMatchObject({ type: "turn.completed", outcome: { status: "failed" } });
+    expect(transport.runTurn).not.toHaveBeenCalled();
+    await session.close();
+    await adapter.close();
+  });
+
+  it("excludes ambiguous native names without hiding a distinct user skill", () => {
+    const catalog = piNativeCommandCatalog([
+      { name: "model", source: "extension" },
+      { name: "model", source: "skill" },
+      { name: "skill:model", source: "skill" },
+    ]);
+    expect(catalog.commands).toEqual([
+      expect.objectContaining({ invocation: "/skill:model", kind: "skill" }),
+    ]);
+  });
+
   it("publishes native context compaction before continuing the Assistant reply", async () => {
     const { adapter, transports } = fixture();
     const session = await openSession(adapter);
@@ -2063,6 +2324,127 @@ describe("Pi HarnessAdapter Session", () => {
     await session.close();
   });
 
+  it("uses the same native Edit patch in live projection and persisted history", async () => {
+    const { adapter, transports } = fixture();
+    const session = await openSession(adapter);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("native-edit-consistency");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "edit" }] });
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Pi transport was not created");
+    const arguments_ = { path: "sample.txt", old_string: "old\n", new_string: "preview\n" };
+    const result = {
+      content: [{ type: "text", text: "edited" }],
+      details: { patch: "--- a/sample.txt\n+++ b/sample.txt\n@@ -1 +1 @@\n-old\n+native\n" },
+    };
+    const projector = new CodexTurnProjector({
+      threadId: "thread",
+      turnId,
+      cwd: "/synthetic",
+      startedAtMs: 1000,
+    });
+    projector.project({ type: "turn.started", turnId });
+    transport.event({
+      type: "tool.started",
+      callId: "edit-1",
+      toolName: "edit",
+      arguments: arguments_,
+    });
+    const toolStarted = await nextEvent(iterator);
+    if (toolStarted.type !== "item.started") throw new Error("Missing tool Item start");
+    projector.project(toolStarted);
+    transport.event({
+      type: "tool.completed",
+      callId: "edit-1",
+      toolName: "edit",
+      result,
+      isError: false,
+    });
+    const toolCompleted = await nextEvent(iterator);
+    const fileStarted = await nextEvent(iterator);
+    const fileCompleted = await nextEvent(iterator);
+    if (
+      toolCompleted.type !== "item.completed" ||
+      fileStarted.type !== "item.started" ||
+      fileCompleted.type !== "item.completed"
+    )
+      throw new Error("Missing native file-change Item lifecycle");
+    expect(fileStarted.item).toMatchObject({
+      type: "fileChange",
+      sourceItemIds: [toolStarted.item.itemId],
+      changes: [{ unifiedDiff: result.details.patch }],
+    });
+    projector.project(toolCompleted);
+    projector.project(fileStarted);
+    projector.project(fileCompleted);
+
+    transport.succeed("done");
+    let turnCompleted = false;
+    for (let index = 0; index < 6; index += 1) {
+      if ((await nextEvent(iterator)).type === "turn.completed") {
+        turnCompleted = true;
+        break;
+      }
+    }
+    expect(turnCompleted).toBe(true);
+    const user = transport.history.entries[0];
+    const assistant = transport.history.entries[1];
+    if (!user || !assistant) throw new Error("Missing persisted Turn");
+    if (typeof user.id !== "string") throw new Error("Missing persisted User identity");
+    const toolCallId = "persisted-tool-call";
+    const toolResultId = "persisted-tool-result";
+    assistant.parentId = toolResultId;
+    transport.history.entries.splice(
+      1,
+      0,
+      {
+        id: toolCallId,
+        parentId: user.id,
+        type: "message",
+        message: {
+          role: "assistant",
+          content: [{ type: "toolCall", id: "edit-1", name: "edit", arguments: arguments_ }],
+        },
+      },
+      {
+        id: toolResultId,
+        parentId: toolCallId,
+        type: "message",
+        message: {
+          role: "toolResult",
+          toolCallId: "edit-1",
+          toolName: "edit",
+          isError: false,
+          ...result,
+        },
+      },
+    );
+    const read = await session.readSnapshot();
+    if (!read.ok) throw new Error(read.error.message);
+    const turn = read.value.turns[0];
+    if (!turn) throw new Error("Missing restored Turn");
+    const live = projector.project({
+      type: "turn.completed",
+      turnId,
+      outcome: { status: "succeeded" },
+    }).completedTurn;
+    const replay = projectHistoricalTurn({ turnId, cwd: "/synthetic", snapshot: turn });
+    const fileCards = (value: typeof replay | undefined) =>
+      (value?.items as Array<{ type: string; changes?: unknown[] }>).filter(
+        (item) => item.type === "fileChange",
+      );
+    expect(fileCards(live)).toHaveLength(1);
+    expect(fileCards(replay)).toHaveLength(1);
+    expect(fileCards(live)[0]?.changes).toEqual(fileCards(replay)[0]?.changes);
+    expect(JSON.stringify(fileCards(live)[0])).toContain("+native");
+    expect(JSON.stringify(fileCards(live)[0])).not.toContain("+preview");
+    await session.close();
+    await adapter.close();
+  });
+
   it("maps interleaved Bash, Generic Tool, bounded output, and reliable Edit Patch", async () => {
     const { adapter, transports } = fixture({ toolOutputLimit: 10 });
     const session = await openSession(adapter);
@@ -2169,7 +2551,8 @@ describe("Pi HarnessAdapter Session", () => {
       toolName: "edit",
       arguments: { path: "sample.txt" },
     });
-    await nextEvent(iterator);
+    const startedEdit = await nextEvent(iterator);
+    if (startedEdit.type !== "item.started") throw new Error("Missing Edit item");
     transport?.event({
       type: "tool.completed",
       callId: "edit-1",
@@ -2190,6 +2573,7 @@ describe("Pi HarnessAdapter Session", () => {
       type: "item.started",
       item: {
         type: "fileChange",
+        sourceItemIds: [startedEdit.item.itemId],
         changes: [
           { path: "sample.txt", kind: "update", unifiedDiff: expect.stringContaining("@@") },
         ],

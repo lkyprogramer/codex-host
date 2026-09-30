@@ -9,6 +9,7 @@ const read = (file) => readFile(path.join(root, file), "utf8");
 
 describe("workflow and form contracts", () => {
   it.each([
+    ".github/workflows/ci.yml",
     ".github/workflows/repository-maintenance.yml",
     ".github/workflows/release-packages.yml",
     ".github/ISSUE_TEMPLATE/bug_report.yml",
@@ -34,6 +35,62 @@ describe("workflow and form contracts", () => {
       expect(workflow).toContain(`- ${name.slice("Check ".length)}\n`);
     }
     expect(workflow).toContain("name: Check Linux ARM64");
+  });
+
+  it("cancels superseded PR runs while keeping main-push runs independent", async () => {
+    const workflow = await read(".github/workflows/ci.yml");
+    expect(workflow).toContain(
+      "group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}",
+    );
+    expect(workflow).toContain("cancel-in-progress: ${{ github.event_name == 'pull_request' }}");
+  });
+
+  it("runs static checks once and preserves tests, anchor builds, and package smokes on every OS", async () => {
+    const workflow = await read(".github/workflows/ci.yml");
+    expect(workflow.match(/run: npm run check\n/gu)).toHaveLength(1);
+    expect(workflow).toContain("if: matrix.os == 'ubuntu-22.04'\n        run: npm run check");
+    for (const suite of ["typescript", "rust"]) {
+      expect(workflow).toContain(
+        `if: matrix.os != 'ubuntu-22.04'\n        run: npm run test:${suite}`,
+      );
+      expect(workflow).toMatch(
+        new RegExp(`name: Test [^\\n]+ on Linux ARM64\\n        run: npm run test:${suite}`),
+      );
+    }
+    // Independent steps retain a failed native process exit on PowerShell.
+    expect(workflow).not.toMatch(/run: \|\n\s+npm run test:typescript\n\s+npm run test:rust/u);
+    expect(workflow.match(/uses: Swatinem\/rust-cache@[a-f0-9]{40}/gu)).toHaveLength(2);
+    expect(workflow.match(/cache-workspace-crates: false/gu)).toHaveLength(2);
+    expect(workflow.match(/cache-on-failure: false/gu)).toHaveLength(2);
+    expect(workflow).toContain("--target linux-x64");
+    expect(workflow).toContain("--target linux-arm64");
+  });
+
+  it("keeps the shared test scripts and Vitest selection behind each CI test lane", async () => {
+    const packageJson = JSON.parse(await read("package.json"));
+    expect(packageJson.scripts["test:typescript"]).toContain(
+      "cargo build --locked --package codexhost-anchor",
+    );
+    expect(packageJson.scripts["test:typescript"]).toContain(
+      "vitest run --config tests/vitest.config.js",
+    );
+    expect(packageJson.scripts["test:rust"]).toContain(
+      "cargo test --workspace --locked --features",
+    );
+    expect(packageJson.scripts.check).toContain("npm run typecheck");
+    expect(packageJson.scripts.check).toContain("npm run check:rust");
+    expect(packageJson.scripts.lint).toContain("tools/check-boundaries.mjs");
+    expect(packageJson.scripts.typecheck).toContain("tests/tsconfig.json");
+
+    const vitest = await read("tests/vitest.config.js");
+    for (const pattern of [
+      "packages/**/test/**/*.test.ts",
+      "packages/repository-automation/test/**/*.test.mjs",
+      "tests/release/**/*.test.mjs",
+      "tools/**/*.test.mjs",
+    ])
+      expect(vitest).toContain(pattern);
+    expect(await read("tests/vitest.setup.js")).toContain("CODEXHOST_PROCESS_ANCHOR_PATH");
   });
 
   it("runs write-capable maintenance only with trusted code and no dependency installation", async () => {

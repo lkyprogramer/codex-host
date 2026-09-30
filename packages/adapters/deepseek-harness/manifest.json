@@ -3,7 +3,7 @@
   "id": "deepseek-harness",
   "name": "DeepSeek Harness",
   "version": "0.0.0",
-  "adapterApiVersion": 1,
+  "adapterApiVersion": 2,
   "entry": "./dist/plugin.js",
   "links": { "installation": "https://github.com/deepseek-ai/deepseek-harness" }
 }

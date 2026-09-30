@@ -22,6 +22,7 @@
     "build": "tsc -b"
   },
   "dependencies": {
+    "@codexhost/adapter-pi-family": "0.0.0",
     "@codexhost/harness-adapter": "0.0.0",
     "@codexhost/harness-discovery": "0.0.0",
     "@codexhost/shared-contracts": "0.0.0",

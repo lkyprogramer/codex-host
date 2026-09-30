@@ -181,8 +181,31 @@ export const harnessSessionCapabilitiesSchema = z
         selectThinkingOption: z.boolean(),
         selectPermissionMode: z.boolean(),
         permissionModeScope: harnessPermissionModeScopeSchema.default("live"),
+        /**
+         * The native Session restores its own Permission Mode on resume and is
+         * authoritative for it: the Host does not re-apply a persisted one.
+         */
+        restoresNativePermissionMode: z.boolean().optional(),
+        /**
+         * A resume can leave a configuration other than the persisted one
+         * (for example a replaced, unavailable Model); the Host persists the
+         * resumed state instead of re-applying an obsolete selection later.
+         */
+        resumeMayChangeConfiguration: z.boolean().optional(),
       })
       .strict(),
+    /**
+     * Native resources the Session can give back. `idleRelease` promises
+     * `resourceLifecycle.suspend`; `ownedJobs` promises
+     * `resourceLifecycle.stopOwnedJobs`. Required from plugin API version 2.
+     */
+    resources: z
+      .object({
+        idleRelease: z.boolean(),
+        ownedJobs: z.boolean(),
+      })
+      .strict()
+      .optional(),
     history: harnessHistoryCapabilitiesSchema,
     turnControl: harnessTurnControlCapabilitiesSchema.optional(),
     subagents: z

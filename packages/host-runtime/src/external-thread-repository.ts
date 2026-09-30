@@ -75,6 +75,10 @@ export interface ExternalThreadStore {
     hostThreadId: HostThreadId,
     pendingHostTurnIds: readonly HostTurnId[],
   ): Promise<StoredThreadRecordV1>;
+  removePendingHostTurnIds(
+    hostThreadId: HostThreadId,
+    removed: readonly HostTurnId[],
+  ): Promise<StoredThreadRecordV1>;
   removeDelegation(delegationId: HostThreadId): Promise<void>;
   createProvisional(input: CreateProvisionalThreadInput): Promise<StoredThreadRecordV1>;
   commitReady(input: CommitReadyThreadInput): Promise<StoredThreadRecordV1>;
@@ -90,6 +94,7 @@ export interface ExternalThreadStore {
   reconcileTurnMappings(
     hostThreadId: HostThreadId,
     mappings: StoredTurnMappingV1[],
+    expectedRevision?: number,
   ): Promise<StoredThreadRecordV1>;
   setTitle(hostThreadId: HostThreadId, title: string): Promise<StoredThreadRecordV1>;
   setTransportModelId(
@@ -109,10 +114,6 @@ export interface AlignedExternalSnapshot {
 
 function nativeTurnKey(ref: NativeTurnRef): string {
   return `${ref.harnessId}\u0000${ref.nativeSessionId}\u0000${ref.nativeTurnKey}\u0000${ref.formatVersion}`;
-}
-
-function sameMapping(left: StoredTurnMappingV1, right: StoredTurnMappingV1): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
 }
 
 export function defaultMappingStoreDirectory(environment: NodeJS.ProcessEnv): string {
@@ -470,6 +471,7 @@ export class ExternalThreadRepository {
     return current.hostThreadId;
   }
 
+  /** Aligns one Snapshot against the revision captured before its native read. */
   async alignSnapshot(
     record: StoredThreadRecordV1,
     snapshot: HostThreadSnapshot,
@@ -511,7 +513,7 @@ export class ExternalThreadRepository {
       return {
         snapshot: turn,
         mapping: {
-          ...mapping,
+          hostTurnId: mapping.hostTurnId,
           nativeTurnRef: turn.nativeTurnRef,
           ...(turn.checkpoint ? { nativeCheckpointRef: turn.checkpoint } : {}),
         },
@@ -521,20 +523,20 @@ export class ExternalThreadRepository {
     const remainingPending = pendingHostTurnIds.filter((id) => !mappedHostTurnIds.has(id));
 
     const orderedMappings = aligned.map(({ mapping }) => mapping);
-    const mappingsChanged =
-      orderedMappings.length !== record.turnMappings.length ||
-      orderedMappings.some((mapping, index) => {
-        const persisted = record.turnMappings[index];
-        return !persisted || !sameMapping(mapping, persisted);
-      });
-    let nextRecord = mappingsChanged
-      ? await this.store.reconcileTurnMappings(record.hostThreadId, orderedMappings)
-      : record;
-    if (JSON.stringify(remainingPending) !== JSON.stringify(record.pendingHostTurnIds ?? [])) {
-      nextRecord = await this.store.setPendingHostTurnIds(
-        nextRecord.hostThreadId,
-        remainingPending,
-      );
+    // Even an unchanged list must validate the revision. The store keeps this
+    // check atomic and avoids a write when the mappings are identical.
+    let nextRecord = await this.store.reconcileTurnMappings(
+      record.hostThreadId,
+      orderedMappings,
+      record.revision,
+    );
+    // Only the pending Turns this alignment consumed (or found mapped) are
+    // removed; one added since `record` was read stays pending.
+    const removed = (record.pendingHostTurnIds ?? []).filter(
+      (id) => !remainingPending.includes(id),
+    );
+    if (removed.length > 0) {
+      nextRecord = await this.store.removePendingHostTurnIds(nextRecord.hostThreadId, removed);
     }
     return {
       record: nextRecord,

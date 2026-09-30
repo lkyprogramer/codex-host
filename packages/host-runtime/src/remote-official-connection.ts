@@ -37,7 +37,9 @@ export async function createRemoteOfficialAppServerConnection(
   let outputPaused = false;
 
   const webSocketOptions = {
-    maxPayload: 128 * 1024 * 1024,
+    // Private official history responses can exceed the old 128 MiB ceiling.
+    // Keep the same unbounded framing as stdio; endpoint checks remain below.
+    maxPayload: 0,
     // The native Codex daemon client uses tokio-tungstenite without offering
     // permessage-deflate. Keep the same handshake for every private listener.
     perMessageDeflate: false,

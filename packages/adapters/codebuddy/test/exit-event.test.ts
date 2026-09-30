@@ -2,8 +2,14 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import { describe, it, expect, vi } from "vitest";
 import { CodeBuddyAcpClient } from "../src/acp-client.js";
-const state = vi.hoisted(() => ({ child: undefined as unknown }));
-vi.mock("node:child_process", () => ({ spawn: () => state.child, execFile: vi.fn() }));
+const state = vi.hoisted(() => ({ child: undefined as unknown, closeTree: vi.fn(async () => {}) }));
+vi.mock("@codexhost/harness-discovery", () => ({
+  spawnOwnedProcess: () => ({
+    child: state.child,
+    tree: { close: state.closeTree },
+    anchored: false,
+  }),
+}));
 vi.mock("../src/command.js", () => ({
   codeBuddyInvocation: () => ({ command: "fixture", arguments: [], environment: {} }),
 }));
@@ -17,6 +23,7 @@ describe("CodeBuddy independent process exit signal", () => {
       signalCode: null,
     });
     state.child = child;
+    state.closeTree.mockClear();
     child.stdin.on("data", (chunk) => {
       const m = JSON.parse(String(chunk));
       if (m.method === "session/prompt") return;
@@ -67,6 +74,7 @@ describe("CodeBuddy independent process exit signal", () => {
       child.stderr.end();
       child.emit("close", 1, null);
       await client.close();
+      expect(state.closeTree).toHaveBeenCalledOnce();
     }
   });
 });

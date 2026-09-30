@@ -1,3 +1,4 @@
+/** Cursor config and rewind-root decoding adapt BytePioneer-AI/codex-host@997f62a0ede22609ed42b949957100d16043ad17 native-history.ts (LGPLv3 source revision). */
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -6,6 +7,23 @@ import { DatabaseSync } from "node:sqlite";
 export interface CursorNativeTurn {
   id: string;
   text: string;
+  /** Native conversation root immediately before this user turn, when present. */
+  rewindRoot?: string;
+}
+
+export function cursorConfigDirectory(environment: NodeJS.ProcessEnv): string {
+  const home = environment.HOME ?? environment.USERPROFILE ?? os.homedir();
+  return environment.CURSOR_CONFIG_DIR?.trim()
+    ? path.resolve(environment.CURSOR_CONFIG_DIR)
+    : environment.XDG_CONFIG_HOME?.trim()
+      ? path.resolve(environment.XDG_CONFIG_HOME, "cursor")
+      : path.join(home, ".cursor");
+}
+
+export function cursorSessionDirectory(sessionId: string, environment: NodeJS.ProcessEnv): string {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/iu.test(sessionId))
+    throw new Error("Unsupported Cursor native session ID");
+  return path.join(cursorConfigDirectory(environment), "acp-sessions", sessionId);
 }
 
 /** Minimal, bounded wire decoder for the observed 2026.09.08 native store.
@@ -61,8 +79,7 @@ export function readCursorNativeTurns(
   allowMissing = false,
 ): CursorNativeTurn[] {
   if (!/^[0-9a-f-]{36}$/iu.test(sessionId)) throw new Error("Unsupported Cursor native session ID");
-  const home = environment.HOME ?? environment.USERPROFILE ?? os.homedir();
-  const directory = path.join(home, ".cursor", "acp-sessions", sessionId);
+  const directory = cursorSessionDirectory(sessionId, environment);
   const filename = path.join(directory, "store.db");
   if (allowMissing && !existsSync(filename)) return [];
   const info: unknown = JSON.parse(readFileSync(path.join(directory, "meta.json"), "utf8"));
@@ -104,7 +121,17 @@ export function readCursorNativeTurns(
         const id = one(user, 2).toString("utf8");
         if (!/^[0-9a-f-]{36}$/iu.test(id) || result.some((existing) => existing.id === id))
           throw new Error("Cursor native turn ID is invalid or duplicated");
-        result.push({ id, text: one(user, 1).toString("utf8") });
+        const anchor = user.get(10)?.[0];
+        const rewindRoot =
+          anchor?.length === 32 &&
+          db.prepare("SELECT 1 FROM blobs WHERE id = ?").get(anchor.toString("hex"))
+            ? anchor.toString("hex")
+            : undefined;
+        result.push({
+          id,
+          text: one(user, 1).toString("utf8"),
+          ...(rewindRoot ? { rewindRoot } : {}),
+        });
       }
     }
     return result;

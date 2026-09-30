@@ -897,6 +897,54 @@ fn canonical_macho_executable(path: &Path, label: &str) -> Result<PathBuf, Platf
     Ok(canonical)
 }
 
+/// The Codex CLI a bundle ships. Current Desktops provision it as its own
+/// app inside `Resources/codex-cli` (next to `codex-package.json`) and resolve
+/// only that path; earlier ones shipped `Resources/codex`.
+#[cfg(target_os = "macos")]
+fn packaged_macos_codex_cli(bundle: &Path) -> Result<PathBuf, PlatformError> {
+    let resources = bundle.join("Contents/Resources");
+    let package = resources.join("codex-cli");
+    let provisioned = package.join("CodexCLI.app/Contents/MacOS/codex");
+    if provisioned.symlink_metadata().is_ok() {
+        verify_macos_codex_cli_layout(&package.join("codex-package.json"))?;
+        return canonical_macho_executable(&provisioned, "Codex CLI");
+    }
+    canonical_macho_executable(&resources.join("codex"), "Codex CLI")
+}
+
+/// The provisioned CLI's path is fixed by layout version 1; another version
+/// may move it, so it is refused rather than guessed.
+#[cfg(target_os = "macos")]
+fn verify_macos_codex_cli_layout(metadata: &Path) -> Result<(), PlatformError> {
+    const SUPPORTED_LAYOUT_VERSION: u64 = 1;
+    const MAX_METADATA_BYTES: u64 = 64 * 1024;
+
+    let invalid = |reason: String| {
+        PlatformError::Invalid(format!(
+            "Codex CLI package metadata '{}' {reason}",
+            metadata.display()
+        ))
+    };
+    let file = File::open(metadata).map_err(|error| invalid(format!("is unavailable: {error}")))?;
+    let mut text = String::new();
+    file.take(MAX_METADATA_BYTES + 1)
+        .read_to_string(&mut text)
+        .map_err(|error| invalid(format!("is unreadable: {error}")))?;
+    if text.len() as u64 > MAX_METADATA_BYTES {
+        return Err(invalid("is too large".into()));
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(&text).map_err(|error| invalid(format!("is invalid: {error}")))?;
+    match value
+        .get("layoutVersion")
+        .and_then(serde_json::Value::as_u64)
+    {
+        Some(SUPPORTED_LAYOUT_VERSION) => Ok(()),
+        Some(version) => Err(invalid(format!("has unsupported layoutVersion {version}"))),
+        None => Err(invalid("has no layoutVersion".into())),
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn inspect_bundle(bundle: &Path) -> Result<DesktopInstallation, PlatformError> {
     let bundle = bundle.canonicalize().map_err(|error| {
@@ -939,8 +987,7 @@ fn inspect_bundle(bundle: &Path) -> Result<DesktopInstallation, PlatformError> {
         &bundle.join("Contents/MacOS").join(executable_name),
         "Desktop executable",
     )?;
-    let packaged_codex_cli =
-        canonical_macho_executable(&bundle.join("Contents/Resources/codex"), "Codex CLI")?;
+    let packaged_codex_cli = packaged_macos_codex_cli(&bundle)?;
     if !desktop_executable.starts_with(&bundle) || !packaged_codex_cli.starts_with(&bundle) {
         return Err(PlatformError::Invalid(format!(
             "App bundle '{}' resolves an executable outside the bundle",
@@ -1131,6 +1178,80 @@ mod tests {
         fs::set_permissions(&external, fs::Permissions::from_mode(0o755))
             .expect("make external CLI executable");
         symlink(&external, bundle.join("Contents/Resources/codex")).expect("link external CLI");
+        assert!(matches!(
+            discover_from_candidates([bundle]),
+            Err(PlatformError::Invalid(_))
+        ));
+    }
+
+    const PROVISIONED_CLI: &str = "Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
+
+    fn write_cli_package(bundle: &std::path::Path, layout_version: u32) {
+        fs::write(
+            bundle.join("Contents/Resources/codex-cli/codex-package.json"),
+            format!(r#"{{"layoutVersion":{layout_version},"entrypoint":"bin/codex"}}"#),
+        )
+        .expect("write CLI package metadata");
+    }
+
+    #[test]
+    fn refuses_a_provisioned_cli_of_an_unknown_layout() {
+        let bundle = temporary_bundle("Codex.app", "com.openai.codex", true);
+        let provisioned = bundle.join(PROVISIONED_CLI);
+        fs::create_dir_all(provisioned.parent().expect("parent")).expect("create CLI app");
+        fs::write(&provisioned, [0xcf, 0xfa, 0xed, 0xfe]).expect("write provisioned CLI");
+        fs::set_permissions(&provisioned, fs::Permissions::from_mode(0o755))
+            .expect("make provisioned CLI executable");
+        // Missing metadata, then a layout this code does not know.
+        assert!(matches!(
+            discover_from_candidates([bundle.clone()]),
+            Err(PlatformError::Invalid(message)) if message.contains("codex-package.json")
+        ));
+        write_cli_package(&bundle, 2);
+        assert!(matches!(
+            discover_from_candidates([bundle]),
+            Err(PlatformError::Invalid(message)) if message.contains("layoutVersion 2")
+        ));
+    }
+
+    #[test]
+    fn prefers_the_provisioned_cli_app_over_the_legacy_cli() {
+        for include_legacy in [false, true] {
+            let bundle = temporary_bundle("ChatGPT.app", "com.openai.codex", include_legacy);
+            let provisioned = bundle.join(PROVISIONED_CLI);
+            fs::create_dir_all(provisioned.parent().expect("parent")).expect("create CLI app");
+            write_cli_package(&bundle, 1);
+            fs::write(&provisioned, [0xcf, 0xfa, 0xed, 0xfe]).expect("write provisioned CLI");
+            fs::set_permissions(&provisioned, fs::Permissions::from_mode(0o755))
+                .expect("make provisioned CLI executable");
+
+            let installation = discover_from_candidates([bundle]).expect("valid bundle");
+            assert_eq!(
+                installation.packaged_codex_cli,
+                provisioned.canonicalize().expect("provisioned CLI")
+            );
+            assert_eq!(
+                installation.executable_codex_cli,
+                installation.packaged_codex_cli
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_provisioned_cli_outside_the_bundle() {
+        let bundle = temporary_bundle("Codex.app", "com.openai.codex", true);
+        let external = bundle
+            .parent()
+            .expect("parent")
+            .join("external-provisioned-codex");
+        fs::write(&external, [0xcf, 0xfa, 0xed, 0xfe]).expect("write external CLI");
+        fs::set_permissions(&external, fs::Permissions::from_mode(0o755))
+            .expect("make external CLI executable");
+        let provisioned = bundle.join(PROVISIONED_CLI);
+        fs::create_dir_all(provisioned.parent().expect("parent")).expect("create CLI app");
+        write_cli_package(&bundle, 1);
+        symlink(&external, &provisioned).expect("link external CLI");
+        // A present but unsafe provisioned CLI is not silently replaced by the legacy one.
         assert!(matches!(
             discover_from_candidates([bundle]),
             Err(PlatformError::Invalid(_))

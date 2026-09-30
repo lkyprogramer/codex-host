@@ -1,0 +1,28 @@
+{
+  "baseline": "2d048f9d",
+  "files": {
+    "packages/desktop-control/src/cdp-client.ts": "e8a465e3d66e4559413425d1e809094f8a39682b3fb2960a55fd3e8e64ebcef0",
+    "packages/desktop-control/src/renderer-cdp-control-session.ts": "8af3c30ff1de5e380b97fc0abbb4c03f18c93a0dc926bea275fbbd521c4b7264",
+    "packages/desktop-control/src/renderer-draft-prewarm-policy.ts": "365de51952e25be86c750365a1e00e7eebb57ad3f7451410fdf199ea1c1c8652",
+    "packages/desktop-control/src/renderer-draft-prewarm-runtime.ts": "ae92631595e6090c2efe0adac190aeafa3e02e3d69d4dbbce48f010223861b72",
+    "packages/desktop-control/test/cdp-client.test.ts": "de13d677a58f678016c725cc05c75051697719820a1bf69163d43bbc12f24c60",
+    "packages/desktop-control/test/renderer-cdp-control-session.test.ts": "66e958524559d7b85029810dbb68edfa0dad45638fc872d12d6945c8e60a6dc3",
+    "packages/desktop-control/test/renderer-draft-prewarm-policy.test.ts": "53bb1f5848d1c412b74239d19649ebae0f819a9c99fec0a6ebc7d5997f163dcb",
+    "packages/renderer-extension/src/renderer-binding-probe.ts": "8c7dd35a667e9aae3bc5e9de02076f3f7ad16470cae35d9ea2a6702fe750bbde",
+    "packages/renderer-extension/src/renderer-composer-dom.ts": "a278ad3534f6d280fc03fb2d9ec5e2ec1818f63a0c80cc12eaf24b8bd865cb01",
+    "packages/renderer-extension/src/settings/pages.ts": "d98e0d687b6bd13d2b81fa3223001b96a39dff6a61a0811487c01d306eadfeb8",
+    "packages/renderer-extension/src/versioned-renderer-adapter.ts": "9aa225532c11f6b25b2fcaf25bb703763eef69cfb17c6beaafabc8338821e74a",
+    "packages/renderer-extension/test/renderer-binding-probe.test.ts": "c192a55aaa4e27db4085fd16c2df07ce3022472ff72b3793b24b78611b56ae34",
+    "packages/renderer-extension/test/settings/pages.test.ts": "4ebe7d01c9f60c7b616708f583f104729dcf9090f6165c9e603c8e910e22f5f0",
+    "packages/renderer-extension/test/settings/update-request.test.ts": "eab4706045408fbeab86852e9eb4b140ee44990fca870d169082feeda43c0144",
+    "packages/renderer-extension/test/versioned-renderer-adapter.test.ts": "25221e6c2dcc3bca8005a2bdffc22153f90c57887573c88867591da5b676094e",
+    "packages/desktop-control/src/renderer-host-discovery.ts": "57e879a66732a74b4392f6db1ac0caf07190cf3a006d6b2c74c8335bcf2cc61e",
+    "packages/desktop-control/src/renderer-host-routing.ts": "d6afe28a4f3ca81edc8395f3fbeb42782c4a655ada3fe7bc8203cef520ae1f66",
+    "packages/desktop-control/src/renderer-react-ownership.ts": "c1a505c839aa6973763947b9786ef3c9bcf0ea3f8a364414f50d1869c32e5c64",
+    "packages/desktop-control/test/renderer-host-routing.test.ts": "747a3a1d2c1ca73ccb60919e7d3ee5849d88f2d1b6cbb4121a4f58443c84fa46",
+    "packages/desktop-control/test/renderer-react-ownership.test.ts": "215e4e6b80615e72153f324d5143cced176ed9642c7bf708e9a96c566a5c47e9",
+    "packages/renderer-extension/src/renderer-host-clients.ts": "ced882dd2077481a6f81f3d3e0543dfac81728dcebadb343a30a79383e184f75",
+    "packages/renderer-extension/test/renderer-host-clients.test.ts": "109253bbff71dce70dd987892242bdcd3087de48d9ae74cdca3f489c54be2cb7",
+    "tests/e2e/renderer-settings-update.spec.ts": "81eb443efb429e819b3a840e6eb6515d7d451ada90787a820b2594c3ced017f6"
+  }
+}

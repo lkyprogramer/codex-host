@@ -5,7 +5,11 @@ import { pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { FakeHarnessAdapter } from "@codexhost/harness-adapter/testing";
+import type { StoredThreadRecordV1 } from "@codexhost/mapping-store";
 import {
+  encodeHarnessPluginRoute,
+  hostThreadIdSchema,
+  harnessPermissionModeIdSchema,
   harnessPluginDescriptorSchema,
   harnessPluginManifestSchema,
 } from "@codexhost/shared-contracts";
@@ -14,6 +18,9 @@ import { loadHarnessPlugins, type HarnessPluginDiagnostic } from "../src/harness
 import { HarnessPluginRegistry } from "../src/harness-plugin-registry.js";
 import { installedHarnessPluginOptions } from "../src/installed-harness-plugins.js";
 import { pluginResourcePath, readPluginIcon } from "../src/plugin-files.js";
+import { WorkspaceCommandCatalogs } from "../src/workspace-command-catalog.js";
+import { ExternalThreadRuntime } from "../src/external-thread-runtime.js";
+import type { ExternalThreadRepository } from "../src/external-thread-repository.js";
 
 const roots: string[] = [];
 const context = {
@@ -71,6 +78,231 @@ afterEach(async () => {
 });
 
 describe("Harness plugin discovery and loading", () => {
+  it("adapts API v1 owned jobs before validation and preserves the raw Session receiver", async () => {
+    const directory = await root(["legacy-agent"]);
+    const location = await plugin(directory, "legacy-agent", {
+      code: `
+        import { writeFileSync } from "node:fs";
+        import { FakeHarnessAdapter } from ${JSON.stringify(fakeModule)};
+        export function createHarnessAdapter() {
+          return new (class extends FakeHarnessAdapter {
+            #raw;
+            constructor() { super("legacy-agent"); }
+            async open(input) {
+              const result = await super.open(input);
+              if (result.ok) {
+                this.#raw = result.value;
+                const { resources, ...legacy } = result.value.capabilities;
+                Object.defineProperty(result.value, "capabilities", { value: legacy });
+              }
+              return result;
+            }
+            async stopOwnedJobs(session) {
+              if (session !== this.#raw) throw new Error("Session identity changed");
+              writeFileSync(new URL("stopped", import.meta.url), "raw receiver");
+              return { quiescence: "confirmed" };
+            }
+          })();
+        }
+      `,
+    });
+    const registry = await loadHarnessPlugins({ roots: [directory], context, warmup: false });
+    const adapter = [...registry.adapters.values()][0];
+    if (!adapter) throw new Error("Legacy plugin was not loaded");
+    try {
+      const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+      if (!opened.ok) throw new Error(opened.error.message);
+      expect(opened.value.capabilities.resources).toEqual({ idleRelease: true, ownedJobs: true });
+      expect(await opened.value.resourceLifecycle?.stopOwnedJobs?.()).toEqual({
+        quiescence: "confirmed",
+      });
+      expect(await readFile(path.join(location, "stopped"), "utf8")).toBe("raw receiver");
+    } finally {
+      await adapter.close();
+    }
+  });
+
+  it("restores an API v2 installed plugin's Permission Mode fixed at create", async () => {
+    const directory = await root(["grok"]);
+    const location = await plugin(directory, "grok", {
+      manifest: { adapterApiVersion: 2 },
+      code: `
+        import { writeFileSync } from "node:fs";
+        import { FakeHarnessAdapter } from ${JSON.stringify(fakeModule)};
+        export function createHarnessAdapter() {
+          return new (class extends FakeHarnessAdapter {
+            constructor() { super("grok", undefined, true, true, null, {
+              modes: [{ id: "ask", label: "Ask" }, { id: "auto", label: "Auto" }],
+              defaultModeId: "ask"
+            }, false, "atCreate"); }
+            async open(input) {
+              const result = await super.open(input);
+              if (input.kind === "resume") {
+                writeFileSync(new URL("resume-mode", import.meta.url), input.permissionModeId ?? "missing");
+                if (result.ok && input.permissionModeId) result.value.setStateForSnapshot({
+                  ...result.value.state, effectivePermissionModeId: input.permissionModeId
+                });
+              }
+              return result;
+            }
+          })();
+        }
+      `,
+    });
+    const registry = await loadHarnessPlugins({ roots: [directory], context, warmup: false });
+    const adapter = [...registry.adapters.values()][0];
+    if (!adapter) throw new Error("Grok plugin was not loaded");
+    expect(adapter.permissionModeScope).toBe("atCreate");
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const id = hostThreadIdSchema.parse("installed-grok");
+    const stored = {
+      formatVersion: 1,
+      revision: 1,
+      hostThreadId: id,
+      createRequestId: "installed-grok",
+      harnessId: adapter.harnessId,
+      state: "ready",
+      nativeSessionRef: opened.value.initialState.nativeRef,
+      cwd: "/synthetic",
+      title: "Grok Thread",
+      archived: false,
+      transportModelId: encodeHarnessPluginRoute({
+        harnessId: adapter.harnessId,
+        permissionModeId: harnessPermissionModeIdSchema.parse("auto"),
+      }),
+      ephemeral: false,
+      historyMode: "legacy",
+      turnMappings: [],
+      createdAt: "2026-09-30T00:00:00.000Z",
+      updatedAt: "2026-09-30T00:00:00.000Z",
+    } as StoredThreadRecordV1;
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["grok", adapter]]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => id,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    try {
+      const restored = await runtime.resolve(id);
+      expect(restored.kind).toBe("external");
+      if (restored.kind !== "external") throw new Error("Installed Grok did not restore");
+      expect(restored.thread.stateObserver.state.effectivePermissionModeId).toBe("auto");
+      expect(await readFile(path.join(location, "resume-mode"), "utf8")).toBe("auto");
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it.each([1, 2])(
+    "preserves API v%s installed plugin workspace commands and static-only behavior",
+    async (adapterApiVersion) => {
+      const directory = await root(["live-agent", "static-agent"]);
+      const location = await plugin(directory, "live-agent", {
+        manifest: { adapterApiVersion },
+        code: `
+          import { writeFileSync } from "node:fs";
+          import path from "node:path";
+          export function createHarnessAdapter() {
+            return new (class {
+              #identity = "live-agent";
+              harnessId = "live-agent";
+              commandCatalog = { commands: [
+                { id: "help", invocation: "/help", label: "Help", argumentMode: "none" }
+              ] };
+              liveCommandCatalog = true;
+              async inspect() { return { status: "ready" }; }
+              async open() { return { ok: false, error: { code: "unavailable", message: "unused", retryable: false } }; }
+              async inspectCommands({ cwd, signal }) {
+                if (cwd.endsWith("blocked")) {
+                  return new Promise((resolve) => signal.addEventListener("abort", () => {
+                    writeFileSync(new URL("aborted", import.meta.url), "yes");
+                    resolve({ ok: false, error: { code: "cancelled", message: "cancelled", retryable: false } });
+                  }, { once: true }));
+                }
+                return { ok: true, value: { source: "live", commands: [
+                  { id: this.#identity + "." + path.basename(cwd),
+                    invocation: "/workspace", label: cwd, argumentMode: "none" }
+                ] } };
+              }
+              async close() { writeFileSync(new URL("closed", import.meta.url), this.#identity); }
+            })();
+          }
+        `,
+      });
+      await plugin(directory, "static-agent", {
+        manifest: { adapterApiVersion },
+        code: `
+          export function createHarnessAdapter() {
+            return { harnessId: "static-agent", commandCatalog: { commands: [
+              { id: "help", invocation: "/help", label: "Help", argumentMode: "none" }
+            ] }, inspect: async () => ({ status: "ready" }),
+              open: async () => ({ ok: false, error: { code: "unavailable", message: "unused", retryable: false } }),
+              close: async () => {} };
+          }
+        `,
+      });
+      const registry = await loadHarnessPlugins({ roots: [directory], context, warmup: false });
+      const catalogs = new WorkspaceCommandCatalogs({
+        adapter: (id) =>
+          [...registry.adapters.values()].find((adapter) => adapter.harnessId === id),
+      });
+      try {
+        const builtin = { id: "help", invocation: "/help", label: "Help", argumentMode: "none" };
+        const firstCwd = path.resolve("/first");
+        const secondCwd = path.resolve("/second");
+        expect(await catalogs.inspect("live-agent")).toEqual({
+          commands: [builtin],
+          source: "static",
+        });
+        expect(await catalogs.inspect("static-agent", "/first")).toEqual({
+          commands: [builtin],
+          source: "static",
+        });
+        expect(await catalogs.inspect("live-agent", firstCwd)).toEqual({
+          commands: [
+            builtin,
+            {
+              id: "live-agent.first",
+              invocation: "/workspace",
+              label: firstCwd,
+              argumentMode: "none",
+            },
+          ],
+          source: "live",
+        });
+        expect(await catalogs.inspect("live-agent", secondCwd)).toEqual({
+          commands: [
+            builtin,
+            {
+              id: "live-agent.second",
+              invocation: "/workspace",
+              label: secondCwd,
+              argumentMode: "none",
+            },
+          ],
+          source: "live",
+        });
+        const controller = new AbortController();
+        const pending = catalogs.inspect("live-agent", "/blocked", { signal: controller.signal });
+        controller.abort();
+        await expect(pending).rejects.toBeDefined();
+        await vi.waitFor(async () =>
+          expect(await readFile(path.join(location, "aborted"), "utf8")).toBe("yes"),
+        );
+      } finally {
+        catalogs.close();
+        await registry.close();
+      }
+      expect(await readFile(path.join(location, "closed"), "utf8")).toBe("live-agent");
+    },
+  );
+
   it("rejects a malformed JavaScript Session before registration and closes its resources", async () => {
     const directory = await root(["bad-session"]);
     const location = await plugin(directory, "bad-session", {
@@ -285,7 +517,7 @@ describe("Harness plugin discovery and loading", () => {
   it("keeps an incompatible plugin visible but never imports its entry", async () => {
     const directory = await root(["future-agent"]);
     await plugin(directory, "future-agent", {
-      manifest: { adapterApiVersion: 2 },
+      manifest: { adapterApiVersion: 3 },
       code: 'throw new Error("never-report-this")',
     });
     const diagnose = vi.fn();

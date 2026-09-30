@@ -5,6 +5,7 @@ import { PassThrough, type Readable } from "node:stream";
 
 import { describe, expect, it } from "vitest";
 import { WebSocketServer } from "ws";
+import { readLfFrames } from "@codexhost/protocol-core";
 
 import { createRemoteAppServerWebSocketListener } from "../src/remote-app-server.js";
 import { createRemoteOfficialAppServerConnection } from "../src/remote-official-connection.js";
@@ -66,6 +67,47 @@ describe("remote official app-server connection", () => {
       await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
+
+  it("preserves a response above 128 MiB and the following small frame", async () => {
+    const server = createServer();
+    const webSockets = new WebSocketServer({ server });
+    const history = Buffer.alloc(129 * 1024 * 1024, 0x61);
+    history.write('{"result":"');
+    history.write('"}', history.length - 2);
+    webSockets.on("connection", (socket) => {
+      socket.on("message", () => {
+        socket.send(history, { binary: false });
+        socket.send('{"id":2}', { binary: false });
+      });
+    });
+    let connection: Awaited<ReturnType<typeof createRemoteOfficialAppServerConnection>> | undefined;
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("error", reject);
+        server.listen(0, "127.0.0.1", resolve);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("Expected TCP listener");
+      connection = await createRemoteOfficialAppServerConnection(`ws://127.0.0.1:${address.port}`);
+      // Delay consumption until after request submission to exercise the stream's backpressure.
+      connection.stdin.write('{"id":1,"method":"thread/read"}\n');
+      const frames = readLfFrames(connection.stdout);
+      const first = await frames.next();
+      expect(first.done).toBe(false);
+      expect(first.value?.equals(history)).toBe(true);
+      const second = await frames.next();
+      expect(second.value?.toString()).toBe('{"id":2}');
+      const ended = frames.next();
+      connection.close();
+      await connection.closed;
+      expect((await ended).done).toBe(true);
+    } finally {
+      connection?.close();
+      for (const socket of webSockets.clients) socket.terminate();
+      await new Promise<void>((resolve) => webSockets.close(() => resolve()));
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  }, 20_000);
 
   it("matches the native client handshake without offering permessage-deflate", async () => {
     const socketPath = testSocketPath();

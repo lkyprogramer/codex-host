@@ -6,7 +6,7 @@ Host Thread 的持久化身份与原生进程的存活期不同。Thread 可以�
 
 公共入口是 [`HarnessSession.resourceLifecycle`](../packages/harness-adapter/src/text-session.ts)，Host 通过 [`ManagedHarnessSession`](../packages/host-runtime/src/managed-harness-session.ts) 管理可挂起实例。它不依赖具体 Harness 名称，也不把所有 CLI 假定成 ACP。
 
-Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `suspend(signal)` 必须在自身原生生命周期内完成检查和关闭；分别返回 `suspended`、`busy`、`unknown` 或 `unsupported`。Host 不把一次 idle 查询当作随后强制关闭的授权。
+Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `suspend(signal)` 必须在自身原生生命周期内完成检查和关闭；分别返回 `suspended`、`busy`、`unknown`、`releaseFailed` 或 `unsupported`。`unknown` 表示这次没有尝试释放（尚未持久化、正在关闭或被中止），`releaseFailed` 表示尝试过释放但没能确认完成、剩余资源仍归 Adapter 所有。Host 对 `unknown` 只报告一次，对 `releaseFailed` 每次都报告，两者都按退避重试；Adapter 若已关闭自身（Cursor、Kiro），其输出结束，Host 将 Session 判为故障。Host 不把一次 idle 查询当作随后强制关闭的授权。
 
 - 有活动 Turn、配置、待回答交互、后台子代理或自主任务时不能挂起。
 - 成功挂起保留原生 Session 身份、历史及配置；后续操作通过同一原生身份恢复。
@@ -16,11 +16,41 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 - `executionReady=false` 的 history-only Session 被挂起后，读取以 history-only 恢复；只有执行才升级为 live Session。
 - 未声明合同的旧插件保持兼容，自动回收明确不启用；不能为了统一行为而取消未知后台工作。
 
+### 能力声明（插件 API v2）
+
+Session 在 `capabilities.resources` 中声明它能交还的原生资源：`idleRelease` 表示实现了 `resourceLifecycle.suspend`，`ownedJobs` 表示实现了 `resourceLifecycle.stopOwnedJobs`。打开 Session 时 Host 校验声明与实现一致，声明了却没实现、实现了却没声明都视为协议错误；此后 Host 只依据声明决定，不再探测方法。v1 插件没有这项声明，加载器按它实际实现的方法补出等价声明。
+
+`resourceLifecycle.workLevel()` 是可选的只读查询，报告 Session 当前是否仍有原生工作（Turn、交互、配置变更或后台 shell / 子代理），不触碰任何资源。`thread release` 先读它：报告 `busy` 时直接以 busy 和原因回答，不再尝试挂起。
+
+恢复时的配置语义同样通过声明表达，而不是按 Harness 名称判断：Adapter 的 `permissionModeScope: "atCreate"` 表示权限模式只能在 Session 打开时设定，Host 恢复时随 open 传入持久化的模式；Session 的 `restoresNativePermissionMode` 表示原生 Session 自己恢复权限模式并以其为准，Host 不再补设；`resumeMayChangeConfiguration` 表示恢复可能改变配置（例如替换了不可用的模型），Host 把恢复后的实际配置写回记录。
+
+### SessionKernel
+
+[`HarnessSessionKernel`](../packages/harness-adapter/src/session-kernel.ts) 是 Adapter 可复用的生命周期内核：Session 阶段（open / releasing / closing / closed / faulted）、输出通道，以及一套统一语义的空闲释放。Adapter 只提供钩子：`workLevel()`（原生工作）、`undecided()`（暂时无法判断，例如尚未落盘）、可选的异步 `confirmIdle()`（需要向原生端确认空闲时）和 `releaseNative()`。
+
+- 并发的释放请求共享一次尝试；释放成功后结果保持，被拒绝或失败的尝试会被清除，下次可以重来。
+- 准入与阶段切换发生在第一个 await 之前，迟到的原生事件不能在 Host 已被告知释放后发布；需要异步确认空闲时，确认返回后重新检查一遍本地状态。
+- 拒绝统一返回 `busy` 或 `unknown`，原因以 Session 名称开头；释放失败返回 `releaseFailed`，原因前缀为「… release failed」。
+- 确认空闲期间 Session 仍是 open，照常接受操作；确认返回后重新准入，期间开始的工作让这次释放以 `busy` 放弃。
+- 释放失败的去向由 Adapter 按原生事实声明：`retry`（默认）表示原生端仍完整，Session 回到 open，由 Host 按退避重试；`fault` 表示释放无法部分回退（例如传输与服务连接已关闭其一），Session 经 `publishReleaseFault` 发布故障后结束输出，由 Host 关闭。与释放竞争的 close 优先，此时不再判故障。
+- 关闭失败的去向由 Adapter 明确选择：`retry`（默认）保持 closing、输出不结束，之后的 close 再试；`final` 直接结束 Session 与输出，此后每次 close 都报告同一失败。故障只从 open 状态发生，先发布事件再结束输出；closing 期间到达的原生故障不再发布。
+
+已迁移到内核的 Adapter：
+
+| Adapter | 释放失败 | 关闭失败 | 说明 |
+| --- | --- | --- | --- |
+| Grok | `retry` | `retry` | 释放只结束受管进程，传输仍可用 |
+| Claude Code | `retry` | `final` | 未确认的进程保留为待释放 Transport，下次启动先重试释放 |
+| OpenCode | `fault` | `final` | 原生空闲经 `confirmIdle` 向 Server 确认；关闭失败时 Session 留在 Adapter 所有权台账中 |
+| Cursor | 释放即关闭 | `final` | |
+
+Kiro 的结构与内核一致，尚未迁移。
+
 ## 释放范围与任务静默
 
 `thread release` 的 `resourcesReleased=true` 只证明返回 `proof.scope` 范围内的原生资源已释放。它可以与 `released=false`、`quiescence=unknown` 同时出现：Thread 保留可恢复状态，但不能据此删除工作树或业务资源。
 
-挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown` 或 `unsupported` 时，具备显式 owned-job 接口的 Harness 仍走原有的停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
+挂起返回 `busy` 时 `thread release` 保持 busy，不做破坏性释放；返回 `unknown`、`releaseFailed` 或 `unsupported` 时，声明了 `ownedJobs` 的 Session 仍走停止与确认路径，空闲挂起不可用不等于这条 Thread 没有释放方式。
 
 `quiescence=confirmed` 与资源挂起是不同的证明。受管进程组退出不覆盖工具自行创建的独立进程组、远端任务、容器任务或外部业务处理。取消请求成功、父 Turn 结束和进程内存下降，都不能替代这些任务的静默证明。
 
@@ -28,9 +58,17 @@ Host 在符合条件的 Session 空闲 60 秒后尝试挂起。Adapter 的 `susp
 
 清理只能针对 Adapter 创建并跟踪的资源。禁止通过进程名称批量结束同名 CLI，或把截图中的 PID 当作永久有效的所有权依据。
 
-回收前必须能把目标重新归属到本次 spawn：进程句柄尚未观察到退出，或组 id 未被内核回收，都足以证明剩余成员仍属本次 spawn；否则用启动时记录的身份证据核对，避免 pid 复用后误杀他人。无法证明所有权时不发信号，按未确认失败——「读不到身份证据」必须与「证据不匹配」区分开，前者不得当作已释放。
+Adapter 只通过 `harness-discovery` 的 `spawnOwnedProcess` 创建自己拥有的 Harness 进程，不直接对 pid 发信号；`tools/check-boundaries.mjs` 禁止生产代码出现 `process.kill(-pid)`。macOS 与 Linux 上，Shim 注入 `CODEXHOST_PROCESS_ANCHOR_PATH`，每个 Harness 由原生 `codexhost-anchor` 启动并拥有（设计见[进程 Anchor 与整改计划](process-anchor-remediation-plan.md)）：
 
-Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关闭需要有界 TERM → KILL，并观察整个受管组的退出；Windows 需要平台自己的进程树关闭与结果检查。丢失所有权或无法验证退出时返回失败，不能报告成功。
+- anchor 以独立进程组创建 Harness，并在组内还有存活成员时绝不回收 leader，所以组号不可能被复用；对组发信号永远只命中本次 spawn，失败后的重试天然安全。
+- 关闭为有界 TERM → KILL，只有组内不再有非僵尸成员才报告已释放；只剩僵尸不再与「仍存活」混淆。
+- leader 自行退出时，anchor 立即回收它留下的 MCP、后台 shell 等进程；Host 看到的 `exit` 仍是 Harness 自己的退出码或信号，只是在组清空之后才到达。
+- Host 以任何方式退出（包括被 SIGKILL）时，anchor 的控制通道断开，它独立结束整组，Shim 是否存活都不影响。
+- Linux 上 anchor 是 subreaper，`setsid` / double fork 逃出组的后代会被收养并一并回收；macOS 没有对应原语，这类后代仍依赖 Shim 的全局账本兜底。
+
+Adapter 看到的仍是 Harness 本身：`child.exit` 报告 Harness 自己的退出码或信号，但在整组清空之后才到达；`spawn` 只在 Harness 实际创建后发出，创建失败时与原生 `spawn` 一样只有 `error` 与 `close`；`child.kill()` 是对 anchor 的受管终止（SIGKILL 为立即终止，其他信号带宽限期），作用于整组而不是只有 leader。
+
+Windows、或找不到 anchor 的开发环境回退到 Host 侧 tracker：leader 退出即开始回收（Windows 除外，root 退出后无法再定位进程树）；失败后只在 leader 尚未被回收时允许重试，回收后保持失败（它只持有 pid），按未确认失败处理。丢失所有权或无法验证退出时返回失败，不能报告成功。
 
 不同 Session 的环境、执行策略和 cwd 仍保持隔离；资源回收不是把所有 Session 合并到一个共享 Server。
 
@@ -45,7 +83,7 @@ Unix 下独立进程组的 leader 退出不代表组内子孙进程退出。关�
 2026-09-23 补齐 Claude Code 的同类缺口：
 
 - 原生后台任务（包括 `run_in_background` Shell，不只是子代理）未结束时拒绝挂起。判断只依据 Claude 的 `background_tasks_changed` 电平集合，不依据可能乱序或遗漏的 task 边沿事件；关闭时也只等待电平集合中的任务结束，仅见于边沿的 id（例如前台 Task）只尽力请求停止，不等待其终态。
-- 释放失败返回 `unknown` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback：`turn.start` 直接以可重试的 `unavailable`（「上一进程未确认停止」）拒绝，不会开始 Turn。已拆除的 Transport 不再向 Session 投递迟到输出，重试时也不再等待这些输出排空，只重新确认受管进程组。
+- 释放失败返回 `releaseFailed` 并保留旧 Transport 的所有权，失败原因经 `thread release` 的 `reason` 返回。Host 下次空闲重试、下一次启动或 Session 关闭都会先重试释放；确认前不启动新进程、不允许 rollback：`turn.start` 直接以可重试的 `unavailable`（「上一进程未确认停止」）拒绝，不会开始 Turn。已拆除的 Transport 不再向 Session 投递迟到输出，重试时也不再等待这些输出排空，只重新确认受管进程组。
 - 释放未确认期间，若旧进程仍在运行并写入原生历史，这部分输出不会投影到 Host；Session 重新可用后，Host 视图可能落后于原生历史，直到下一次完整读取。准入已排除活动 Turn 与后台任务，此时进程应无原生工作，因此只是残余风险。
 - 重试时若 leader 已被回收且其 pid 已被其他进程占用，即判定受管组已空，不再发信号；EPERM 按组仍存在继续等待。
 

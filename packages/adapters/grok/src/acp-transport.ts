@@ -1,19 +1,15 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { readdir, readFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { Readable, Writable } from "node:stream";
 
+import { startAcpAgent, withDeadline } from "@codexhost/adapter-acp-core";
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
-import { processStartToken, reclaimOwnedGroup, type OwnedGroupRef } from "./owned-group.js";
+import type { OwnedProcessTree } from "@codexhost/harness-discovery";
 import type { HarnessPermissionModeId } from "@codexhost/shared-contracts";
 import {
-  ClientSideConnection,
-  PROTOCOL_VERSION,
   RequestError,
-  ndJsonStream,
-  type Client,
+  type ClientSideConnection,
   type InitializeResponse,
   type NewSessionResponse,
   type LoadSessionResponse,
@@ -57,14 +53,17 @@ export type GrokTransportFaultKind =
 
 export class GrokTransportError extends Error {
   readonly diagnostic: string | undefined;
+  /** The native side may have applied the request although it never answered. */
+  readonly outcomeUnknown: boolean;
 
   constructor(
     readonly kind: GrokTransportFaultKind,
     message: string,
-    options?: ErrorOptions & { diagnostic?: string },
+    options?: ErrorOptions & { diagnostic?: string; outcomeUnknown?: boolean },
   ) {
     super(message, options);
     this.diagnostic = options?.diagnostic;
+    this.outcomeUnknown = options?.outcomeUnknown ?? false;
     this.name = "GrokTransportError";
   }
 }
@@ -148,6 +147,10 @@ export interface GrokAcpTransportOptions {
   command?: string;
   environment?: NodeJS.ProcessEnv;
   commandTimeoutMs?: number;
+  /** Bounds Model and Session-mode writes; defaults to commandTimeoutMs. */
+  configurationTimeoutMs?: number;
+  /** Bounds a native Compact; defaults to COMPACT_TIMEOUT_MS. */
+  compactTimeoutMs?: number;
   closeTimeoutMs?: number;
   onFault?: (error: GrokTransportError) => void;
 }
@@ -262,20 +265,24 @@ function classifyStartupError(error: unknown): GrokTransportError {
   return new GrokTransportError("unavailable", "Grok CLI could not start", { cause: error });
 }
 
-function withTimeout<T>(promise: Promise<T>, milliseconds: number, operation: string): Promise<T> {
-  let timeout: NodeJS.Timeout | undefined;
-  return Promise.race([
-    promise,
-    new Promise<never>((_resolve, reject) => {
-      timeout = setTimeout(
-        () => reject(new GrokTransportError("unavailable", `${operation} timed out`)),
-        milliseconds,
-      );
-    }),
-  ]).finally(() => {
-    if (timeout) clearTimeout(timeout);
+function withTimeout<T>(
+  promise: Promise<T>,
+  milliseconds: number,
+  operation: string,
+  onTimeout?: (error: GrokTransportError) => void,
+): Promise<T> {
+  return withDeadline(promise, milliseconds, () => {
+    const error = new GrokTransportError("unavailable", `${operation} timed out`);
+    onTimeout?.(error);
+    return error;
   });
 }
+
+/**
+ * A native Compact can legitimately run for minutes on a long conversation;
+ * it is still bounded, and it is cancellable meanwhile.
+ */
+const COMPACT_TIMEOUT_MS = 10 * 60_000;
 
 function yieldToEventLoop(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
@@ -552,15 +559,11 @@ export class GrokAcpTransport {
   #sessionId: string | null = null;
   #startupModelId: string | undefined;
   #stderrTail = "";
-  #owned: {
-    pid: number;
-    startedAtMs: number;
-    startToken: string;
-  } | null = null;
   #ownedTree: OwnedProcessTree | null = null;
-  #ownedTreeFailed = false;
   #shutdownPromise: Promise<void> | null = null;
   #shutdownMode: ShutdownMode | null = null;
+  /** A write went unanswered: the native side is not asked for anything more. */
+  #retired = false;
 
   constructor(options: GrokAcpTransportOptions) {
     this.#options = {
@@ -801,87 +804,38 @@ export class GrokAcpTransport {
       ...(this.#options.command ? { command: this.#options.command } : {}),
       environment: this.#options.environment ?? process.env,
     });
-    const invocation = grokInvocation(executable, process.platform, this.#startupModelId);
-    const child = spawn(invocation.command, invocation.arguments, {
+    const initialize = await startAcpAgent({
+      label: "Grok",
+      invocation: grokInvocation(executable, process.platform, this.#startupModelId),
       cwd: this.#options.cwd,
-      env: { ...process.env, ...this.#options.environment },
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-    });
-    this.#child = child;
-    if (typeof child.pid === "number") {
-      this.#owned = {
-        pid: child.pid,
-        startedAtMs: Date.now(),
-        startToken: processStartToken(child.pid),
-      };
-    }
-    this.#ownedTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
+      ...(this.#options.environment ? { environment: this.#options.environment } : {}),
       closeTimeoutMs: this.#options.closeTimeoutMs,
-      onExitCleanupFailure: (error) =>
-        this.#fault(
-          new GrokTransportError(
-            "processExited",
-            `Grok ACP owned process cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
-          ),
+      startupTimeoutMs: this.#options.commandTimeoutMs,
+      clientCapabilities: {},
+      client: {
+        sessionUpdate: (params) => this.#handleUpdate(params),
+        requestPermission: (params) => this.#handlePermission(params),
+        extNotification: (method, params) => this.#handleExtensionNotification(method, params),
+      },
+      onSpawned: (child, tree) => {
+        this.#child = child;
+        this.#ownedTree = tree;
+      },
+      onConnected: (connection) => {
+        this.#connection = connection;
+      },
+      onStderr: (chunk) => {
+        this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk}`);
+      },
+      closing: () => this.#closing || this.#closed,
+      onProcessFault: (message) => this.#fault(new GrokTransportError("processExited", message)),
+      timedOut: (operation) => new GrokTransportError("unavailable", `${operation} timed out`),
+      unsupportedProtocol: (version) =>
+        new GrokTransportError(
+          "protocolError",
+          `Grok ACP negotiated unsupported protocol version ${version}`,
         ),
     });
-    child.stderr.on("data", (chunk: Buffer | string) => {
-      this.#stderrTail = sanitizeDiagnosticTail(`${this.#stderrTail}${chunk.toString()}`);
-    });
-    await withTimeout(
-      new Promise<void>((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      }),
-      this.#options.commandTimeoutMs,
-      "Grok CLI startup",
-    );
-    const stream = ndJsonStream(
-      Writable.toWeb(child.stdin) as WritableStream<Uint8Array>,
-      Readable.toWeb(child.stdout) as ReadableStream<Uint8Array>,
-    );
-    const connection = new ClientSideConnection(
-      () =>
-        ({
-          sessionUpdate: (params) => this.#handleUpdate(params),
-          requestPermission: (params) => this.#handlePermission(params),
-          extNotification: (method, params) => this.#handleExtensionNotification(method, params),
-        }) satisfies Client,
-      stream,
-    );
-    this.#connection = connection;
-    child.once("error", (error) =>
-      this.#fault(new GrokTransportError("processExited", error.message)),
-    );
-    child.once("exit", (code, signal) => {
-      if (!this.#closing && !this.#closed) {
-        this.#fault(
-          new GrokTransportError(
-            "processExited",
-            `Grok ACP exited (code=${code}, signal=${signal})`,
-          ),
-        );
-      }
-    });
-    const initialize = await withTimeout(
-      connection.initialize({
-        protocolVersion: PROTOCOL_VERSION,
-        clientCapabilities: {},
-        clientInfo: { name: "codexhost", version: "0.1.6" },
-      }),
-      this.#options.commandTimeoutMs,
-      "Grok ACP initialize",
-    );
-    if (initialize.protocolVersion !== PROTOCOL_VERSION) {
-      throw new GrokTransportError(
-        "protocolError",
-        `Grok ACP negotiated unsupported protocol version ${initialize.protocolVersion}`,
-      );
-    }
     this.#initialize = initialize;
     return initialize;
   }
@@ -931,12 +885,17 @@ export class GrokAcpTransport {
       };
       let raw: unknown;
       try {
-        raw = await connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_METHOD, params);
+        raw = await this.#retiringOnTimeout(
+          connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_METHOD, params),
+          "Grok Native Compact",
+          this.#options.compactTimeoutMs ?? COMPACT_TIMEOUT_MS,
+        );
       } catch (error) {
         if (!isGrokMethodNotFound(error)) throw error;
-        raw = await connection.request<unknown, unknown>(
-          GROK_COMPACT_CONVERSATION_FALLBACK_METHOD,
-          params,
+        raw = await this.#retiringOnTimeout(
+          connection.request<unknown, unknown>(GROK_COMPACT_CONVERSATION_FALLBACK_METHOD, params),
+          "Grok Native Compact",
+          this.#options.compactTimeoutMs ?? COMPACT_TIMEOUT_MS,
         );
       }
       await yieldToEventLoop();
@@ -952,8 +911,12 @@ export class GrokAcpTransport {
     const connection = this.#connection;
     if (!connection || !this.#sessionId) throw new Error("Grok ACP Session is unavailable");
     try {
-      await connection.setSessionMode({ sessionId: this.#sessionId, modeId });
+      await this.#retiringOnTimeout(
+        connection.setSessionMode({ sessionId: this.#sessionId, modeId }),
+        "Grok Session mode configuration",
+      );
     } catch (error) {
+      if (error instanceof GrokTransportError) throw error;
       if (error instanceof RequestError && error.code === -32601) {
         throw new GrokTransportError(
           "protocolError",
@@ -976,10 +939,24 @@ export class GrokAcpTransport {
       );
     }
     try {
-      const raw = await connection.request<unknown, unknown>(GROK_INTERJECT_METHOD, {
-        sessionId: this.#sessionId,
-        text,
-        interjectionId,
+      // An interjection only adds to the running Turn, which stays
+      // cancellable: a late answer is refused, the connection kept.
+      const raw = await withTimeout(
+        connection.request<unknown, unknown>(GROK_INTERJECT_METHOD, {
+          sessionId: this.#sessionId,
+          text,
+          interjectionId,
+        }),
+        this.#options.commandTimeoutMs,
+        "Grok Native Interject",
+      ).catch((error: unknown) => {
+        if (!(error instanceof GrokTransportError) || !error.message.endsWith("timed out"))
+          throw error;
+        throw new GrokTransportError(
+          "unavailable",
+          "Grok did not confirm the interjection in time; it may already be queued",
+          { cause: error, outcomeUnknown: true },
+        );
       });
       const parsed = parseGrokInterjectResponse(raw);
       if (!parsed) {
@@ -1002,13 +979,13 @@ export class GrokAcpTransport {
   async setModel(modelId: string, reasoningEffort?: string): Promise<void> {
     const connection = this.#connection;
     if (!connection || !this.#sessionId) throw new Error("Grok ACP Session is unavailable");
-    const response = await connection.request<unknown, Record<string, unknown>>(
-      "session/set_model",
-      {
+    const response = await this.#retiringOnTimeout(
+      connection.request<unknown, Record<string, unknown>>("session/set_model", {
         sessionId: this.#sessionId,
         modelId,
         ...(reasoningEffort ? { reasoningEffort } : {}),
-      },
+      }),
+      "Grok Model configuration",
     );
     if (!isRecord(response) || !isRecord(response._meta) || !isRecord(response._meta.model)) {
       throw new GrokTransportError("protocolError", "Grok rejected Model configuration");
@@ -1019,40 +996,22 @@ export class GrokAcpTransport {
     }
   }
 
-  /** Identity of the group this Transport spawned, for a bounded reclaim. */
-  #ownedGroup(): OwnedGroupRef | null {
-    const owned = this.#owned;
-    const child = this.#child;
-    if (!owned || !child?.pid) return null;
-    return {
-      pid: owned.pid,
-      pgid: process.platform === "win32" ? owned.pid : -owned.pid,
-      startToken: owned.startToken,
-      leaderExited: child.exitCode !== null || child.signalCode !== null,
-    };
-  }
-
-  ownedProcess(): { pid: number; pgid: number; startedAtMs: number } | null {
-    const owned = this.#owned;
-    const child = this.#child;
-    if (!owned || !child?.pid) return null;
-    return {
-      pid: owned.pid,
-      pgid: process.platform === "win32" ? owned.pid : -owned.pid,
-      startedAtMs: owned.startedAtMs,
-    };
-  }
-
-  async stopOwnedJobs(timeoutMs = this.#options.closeTimeoutMs): Promise<{
+  /**
+   * Stops the owned ACP process for an explicit Thread release. Quiescence is
+   * confirmed only by the owned tree reporting every member gone.
+   */
+  async stopOwnedJobs(): Promise<{
     quiescence: "confirmed" | "unknown";
-    proof?: { pid: number; pgid: number; scope: string };
+    proof?: { pid: number; scope: string };
   }> {
-    const owned = this.ownedProcess();
+    const pid = this.#child?.pid;
+    const tree = this.#ownedTree;
     await this.close();
-    if (!owned) return { quiescence: "unknown" };
-    const proof = { pid: owned.pid, pgid: owned.pgid, scope: "grok-acp-child" };
-    const group = this.#ownedGroup();
-    if (!group || (await reclaimOwnedGroup(group, timeoutMs))) {
+    if (!pid || !tree) return { quiescence: "unknown" };
+    const proof = { pid, scope: "grok-acp-child" };
+    try {
+      await tree.close();
+    } catch {
       return { quiescence: "unknown", proof };
     }
     return { quiescence: "confirmed", proof };
@@ -1069,18 +1028,16 @@ export class GrokAcpTransport {
     await this.#beginShutdown("release");
     // A shutdown already in flight, or one that finished earlier, ran under
     // close semantics that tolerate an unconfirmed tree. An idle release
-    // cannot inherit that: it confirms the owned group on its own.
-    if (shared !== null && shared !== "release") await this.#confirmOwnedGroupGone();
+    // cannot inherit that: it asks the owned tree to confirm on its own.
+    if (shared !== null && shared !== "release") await this.#confirmReleased();
   }
 
-  async #confirmOwnedGroupGone(): Promise<void> {
-    const group = this.#ownedGroup();
-    if (!group) {
+  async #confirmReleased(): Promise<void> {
+    const tree = this.#ownedTree;
+    if (!tree) {
       throw new GrokTransportError("processExited", "Grok ACP ownership handle is unavailable");
     }
-    if (await reclaimOwnedGroup(group, this.#options.closeTimeoutMs)) {
-      throw new GrokTransportError("processExited", "Grok managed process group did not exit");
-    }
+    await tree.close();
   }
 
   cancel(): Promise<void> {
@@ -1129,13 +1086,21 @@ export class GrokAcpTransport {
   async #performShutdown(mode: ShutdownMode): Promise<void> {
     const child = this.#child;
     const connection = this.#connection;
+    // A retired connection already failed to answer; asking it to close the
+    // Session would only wait again. Otherwise the request is bounded too:
+    // a native side that stopped answering must not keep its process alive.
     if (
       mode === "close" &&
+      !this.#retired &&
       connection &&
       this.#sessionId &&
       this.#initialize?.agentCapabilities?.sessionCapabilities?.close
     ) {
-      await connection.closeSession({ sessionId: this.#sessionId }).catch(() => undefined);
+      await withTimeout(
+        connection.closeSession({ sessionId: this.#sessionId }),
+        this.#options.closeTimeoutMs,
+        "Grok ACP session/close",
+      ).catch(() => undefined);
     }
     const owned = this.#ownedTree;
     if (!child || !owned) {
@@ -1162,28 +1127,16 @@ export class GrokAcpTransport {
 
   /**
    * Idle release must never report success over an unconfirmed process tree;
-   * an explicit close stays tolerant and reports through its own paths.
+   * an explicit close stays tolerant and reports through its own paths. An
+   * anchored tree may be asked again after a failure; the Host-side fallback
+   * keeps its first failure rather than signalling a bare pid later.
    */
   async #reclaimOwnedGroup(owned: OwnedProcessTree, mode: ShutdownMode): Promise<void> {
     if (mode !== "release") {
       await owned.close().catch(() => undefined);
       return;
     }
-    if (!this.#ownedTreeFailed) {
-      try {
-        await owned.close();
-        return;
-      } catch (error) {
-        // The tracker holds a pid alone, so it refuses to be replayed once a
-        // cleanup failed. Later attempts must carry their own ownership proof.
-        this.#ownedTreeFailed = true;
-        throw error;
-      }
-    }
-    // The tracker will not be replayed, so the retry carries its own evidence:
-    // the recorded spawn identity decides whether this group may be signalled
-    // again, and only an observed exit counts as released.
-    await this.#confirmOwnedGroupGone();
+    await owned.close();
   }
 
   #handleUpdate(notification: SessionNotification): void {
@@ -1223,5 +1176,31 @@ export class GrokAcpTransport {
   #fault(error: GrokTransportError): void {
     if (this.#closing || this.#closed) return;
     this.#options.onFault?.(error);
+  }
+
+  /**
+   * A write whose answer never came leaves Grok's native state unknown (was
+   * the Model switched? is the Compact still running?), so the connection is
+   * retired rather than reused: the Session faults and closes.
+   */
+  #retiringOnTimeout<T>(
+    request: Promise<T>,
+    operation: string,
+    timeoutMs = this.#options.configurationTimeoutMs ?? this.#options.commandTimeoutMs,
+  ): Promise<T> {
+    return withTimeout(request, timeoutMs, operation, (error) => {
+      this.#retired = true;
+      this.#fault(
+        new GrokTransportError(
+          "processExited",
+          `${operation} did not answer; the connection is retired`,
+          {
+            cause: error,
+          },
+        ),
+      );
+      // Close at once too, so nothing reuses it before the Session faults.
+      void this.close().catch(() => undefined);
+    });
   }
 }

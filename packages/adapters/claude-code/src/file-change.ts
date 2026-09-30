@@ -92,7 +92,7 @@ function displayPath(nativePath: string, cwd: string): string | null {
     relative.length > 0 && relative !== ".." && !relative.startsWith(`..${path.sep}`)
       ? relative
       : resolvedPath;
-  const normalized = selected.replaceAll("\\", "/");
+  const normalized = path.sep === "\\" ? selected.replaceAll("\\", "/") : selected;
   return validNativePath(normalized) && normalized !== "." ? normalized : null;
 }
 

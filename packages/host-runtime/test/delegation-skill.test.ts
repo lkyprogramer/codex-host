@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,6 +8,7 @@ import {
   CODEXHOST_DELEGATION_SKILL,
   PREVIOUS_MANAGED_DIGESTS,
   installDelegationSkills,
+  resolveInstalledDelegationSkill,
 } from "../src/delegation-skill.js";
 
 async function home(): Promise<string> {
@@ -22,6 +23,27 @@ function paths(root: string): string[] {
 }
 
 describe("delegation Skill installation", () => {
+  it("resolves only installed regular Skill files under the selected home", async () => {
+    const root = await home();
+    const [agents, claude] = paths(root);
+    if (!agents || !claude) throw new Error("Missing Skill destinations");
+    expect(await resolveInstalledDelegationSkill(root)).toBeNull();
+    await mkdir(claude, { recursive: true });
+    expect(await resolveInstalledDelegationSkill(root)).toBeNull();
+    await rm(claude, { recursive: true });
+    await mkdir(path.dirname(claude), { recursive: true });
+    await writeFile(claude, CODEXHOST_DELEGATION_SKILL);
+    expect(await resolveInstalledDelegationSkill(root)).toEqual({
+      name: "codexhost-delegation",
+      path: claude,
+    });
+    await mkdir(path.dirname(agents), { recursive: true });
+    await writeFile(agents, CODEXHOST_DELEGATION_SKILL);
+    expect(await resolveInstalledDelegationSkill(root)).toEqual({
+      name: "codexhost-delegation",
+      path: agents,
+    });
+  });
   it("atomically installs identical managed copies", async () => {
     const root = await home();
     const results = await installDelegationSkills({ homeDirectory: root });

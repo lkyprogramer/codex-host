@@ -52,6 +52,7 @@ export function rendererModelPickerMainMenuPlacement(
   viewport: RendererViewport,
   width = RENDERER_MODEL_PICKER_MAIN_MENU_WIDTH,
 ): RendererMenuPlacement {
+  width = fitWidth(width, viewport.width);
   const maxLeft = viewport.width - COLLISION_PADDING - width;
   return {
     left: clampPosition(triggerRect.right - width, COLLISION_PADDING, maxLeft),
@@ -92,6 +93,15 @@ export function rendererModelPickerModelMenuPlacement(
   } else if (leftAvailable >= preferredWidth) {
     width = preferredWidth;
     left = leftLeft;
+  } else if (Math.max(rightAvailable, leftAvailable) < Math.min(180, preferredWidth)) {
+    // A narrow viewport cannot hold both menus side by side. Overlay the
+    // submenu at a usable width instead of squeezing model rows to a sliver.
+    width = preferredWidth;
+    left = clampPosition(
+      mainRect.right - width,
+      COLLISION_PADDING,
+      viewport.width - COLLISION_PADDING - width,
+    );
   } else if (rightAvailable >= leftAvailable) {
     width = Math.max(COLLISION_PADDING, rightAvailable);
     left = rightLeft;

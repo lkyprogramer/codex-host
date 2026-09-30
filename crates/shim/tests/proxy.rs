@@ -30,6 +30,20 @@ fn shim_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_codexhost-shim"))
 }
 
+/// The Shim, kept away from the user's process-anchor records: a Host it
+/// starts runs `codexhost-anchor --reclaim`, which must only ever see the
+/// records this test process owns.
+fn shim_command() -> Command {
+    let ledger =
+        std::env::temp_dir().join(format!("codexhost-shim-test-ledger-{}", std::process::id()));
+    let _ = fs::create_dir_all(&ledger);
+    #[cfg(unix)]
+    let _ = fs::set_permissions(&ledger, std::os::unix::fs::PermissionsExt::from_mode(0o700));
+    let mut command = Command::new(shim_path());
+    command.env("CODEXHOST_PROCESS_LEDGER_DIR", ledger);
+    command
+}
+
 fn fake_codex_path() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_fake-codex-cli"))
 }
@@ -185,7 +199,7 @@ fn run_shim(
     arguments: &[&str],
     environment: &[(&str, &str)],
 ) -> std::process::Output {
-    let mut command = Command::new(shim_path());
+    let mut command = shim_command();
     command
         .args(arguments)
         .env_remove(HOST_NODE_PATH_ENV)
@@ -244,7 +258,7 @@ fn preserves_arbitrary_bytes_and_chunk_boundaries() {
 
 #[test]
 fn forwards_response_before_stdin_eof() {
-    let mut shim = Command::new(shim_path())
+    let mut shim = shim_command()
         .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
         .env("FAKE_CODEX_STREAM_RESPONSE", "1")
         .stdin(Stdio::piped())
@@ -304,6 +318,59 @@ fn preserves_arguments_and_removes_recursive_environment() {
     assert!(stderr.contains("args=app-server|--analytics-default-enabled"));
     assert!(stderr.contains("codex_cli_path_present=false"));
     assert!(output.stdout.is_empty());
+}
+
+#[test]
+fn auxiliary_app_servers_use_stock_cli_with_host_paths_configured() {
+    for (arguments, originator, stock) in [
+        (vec!["app-server", "--stdio"], None, false),
+        (
+            vec![
+                "-c",
+                "model_provider=openai-memgen",
+                "app-server",
+                "--stdio",
+            ],
+            None,
+            true,
+        ),
+        (
+            vec![
+                "app-server",
+                "--config=model_provider=openai-memgen",
+                "--stdio",
+            ],
+            None,
+            true,
+        ),
+        (vec!["app-server", "--stdio"], Some("Computer Use"), true),
+        (vec!["app-server", "--stdio"], Some("Codex Desktop"), false),
+        (vec!["app-server", "proxy"], None, true),
+    ] {
+        let mut command = shim_command();
+        command
+            .args(&arguments)
+            .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
+            .env(HOST_NODE_PATH_ENV, fake_codex_path())
+            .env(HOST_RUNTIME_PATH_ENV, fake_codex_path())
+            .env("FAKE_CODEX_PRINT_INVOCATION", "1")
+            .env_remove("CODEXHOST_LAUNCHER_PID")
+            .env_remove("CODEXHOST_NPM_NODE_PATH")
+            .env_remove("CODEXHOST_NPM_PACKAGE_ROOT")
+            .env_remove("CODEX_INTERNAL_ORIGINATOR_OVERRIDE")
+            .stdin(Stdio::null());
+        if let Some(originator) = originator {
+            command.env("CODEX_INTERNAL_ORIGINATOR_OVERRIDE", originator);
+        }
+        let output = command.output().expect("run configured shim");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{arguments:?}: {stderr}");
+        assert_eq!(
+            stderr.contains(&format!("args={}", arguments.join("|"))),
+            stock,
+            "{arguments:?}: {stderr}",
+        );
+    }
 }
 
 #[test]
@@ -375,7 +442,7 @@ fn production_shim_ignores_gate_capture_environment() {
 
 #[test]
 fn rejects_recursion_without_stdout_output() {
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .env(STOCK_CODEX_PATH_ENV, shim_path())
         .stdin(Stdio::null())
         .output()
@@ -388,7 +455,7 @@ fn rejects_recursion_without_stdout_output() {
 #[test]
 fn rejects_missing_official_cli_without_falling_back_to_path() {
     let missing = temporary_directory().join("missing-codex.exe");
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .env(STOCK_CODEX_PATH_ENV, missing)
         .stdin(Stdio::null())
         .output()
@@ -401,7 +468,7 @@ fn rejects_missing_official_cli_without_falling_back_to_path() {
 #[cfg(any(target_os = "windows", target_os = "macos"))]
 #[test]
 fn rejects_missing_stock_cli_when_cli_override_does_not_name_the_running_shim() {
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .env_remove(STOCK_CODEX_PATH_ENV)
         .env(CODEX_CLI_PATH_ENV, fake_codex_path())
         .stdin(Stdio::null())
@@ -412,8 +479,19 @@ fn rejects_missing_stock_cli_when_cli_override_does_not_name_the_running_shim() 
     assert!(String::from_utf8_lossy(&output.stderr).contains("does not identify the running Shim"));
 }
 
+/// The official CLI inside a fixture bundle: the provisioned CLI app of
+/// current Desktops, or the legacy `Resources/codex`.
 #[cfg(target_os = "macos")]
-fn macos_fixture_bundle(directory: &std::path::Path) -> PathBuf {
+fn macos_fixture_cli(bundle: &std::path::Path, provisioned: bool) -> PathBuf {
+    if provisioned {
+        bundle.join("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+    } else {
+        bundle.join("Contents/Resources/codex")
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_fixture_bundle(directory: &std::path::Path, provisioned: bool) -> PathBuf {
     let bundle = directory.join("ChatGPT.app");
     fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
     fs::create_dir_all(bundle.join("Contents/Resources")).unwrap();
@@ -430,16 +508,32 @@ fn macos_fixture_bundle(directory: &std::path::Path) -> PathBuf {
     .unwrap();
     fs::write(bundle.join("Contents/Resources/app.asar"), b"fixture").unwrap();
     fs::copy(fake_codex_path(), bundle.join("Contents/MacOS/ChatGPT")).unwrap();
-    fs::copy(fake_codex_path(), bundle.join("Contents/Resources/codex")).unwrap();
+    let cli = macos_fixture_cli(&bundle, provisioned);
+    fs::create_dir_all(cli.parent().unwrap()).unwrap();
+    if provisioned {
+        fs::write(
+            bundle.join("Contents/Resources/codex-cli/codex-package.json"),
+            r#"{"layoutVersion":1,"entrypoint":"bin/codex"}"#,
+        )
+        .unwrap();
+    }
+    fs::copy(fake_codex_path(), cli).unwrap();
     bundle
 }
 
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_browser_helper_preserving_only_cli_override_reaches_official_cli() {
+    for provisioned in [false, true] {
+        macos_browser_helper_reaches_official_cli(provisioned);
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn macos_browser_helper_reaches_official_cli(provisioned: bool) {
     let directory = temporary_directory();
-    let bundle = macos_fixture_bundle(&directory);
-    let mut command = Command::new(shim_path());
+    let bundle = macos_fixture_bundle(&directory, provisioned);
+    let mut command = shim_command();
     for (key, _) in std::env::vars_os() {
         if key.to_string_lossy().starts_with("CODEXHOST_") {
             command.env_remove(key);
@@ -466,16 +560,19 @@ fn macos_browser_helper_preserving_only_cli_override_reaches_official_cli() {
 #[cfg(target_os = "macos")]
 #[test]
 fn macos_native_helpers_do_not_become_host_runtime_owners() {
-    for (depth, detached) in [
-        (0, false),
-        (1, false),
-        (2, false),
-        (0, true),
-        (1, true),
-        (2, true),
+    for (depth, detached, provisioned) in [
+        (0, false, false),
+        (1, false, false),
+        (2, false, false),
+        (0, true, false),
+        (1, true, false),
+        (2, true, false),
+        (0, false, true),
+        (1, false, true),
+        (2, true, true),
     ] {
         let directory = temporary_directory();
-        let bundle = macos_fixture_bundle(&directory);
+        let bundle = macos_fixture_bundle(&directory, provisioned);
         let desktop = bundle.join("Contents/MacOS/ChatGPT");
         let mut command = Command::new(if detached {
             fake_codex_path()
@@ -503,7 +600,7 @@ fn macos_native_helpers_do_not_become_host_runtime_owners() {
             .env_remove(REMOTE_SSH_MANAGED_ENV)
             .env(
                 STOCK_CODEX_PATH_ENV,
-                bundle.join("Contents/Resources/codex"),
+                macos_fixture_cli(&bundle, provisioned),
             )
             .env(CODEX_CLI_PATH_ENV, shim_path())
             .env(HOST_NODE_PATH_ENV, fake_codex_path())
@@ -528,11 +625,14 @@ fn macos_native_helpers_do_not_become_host_runtime_owners() {
         drop(stdin);
         let output = child.wait_with_output().unwrap();
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(output.status.success(), "depth={depth}: {stderr}");
+        assert!(
+            output.status.success(),
+            "depth={depth} provisioned={provisioned}: {stderr}"
+        );
         assert_eq!(
             stderr.contains("args=app-server|--listen|stdio://"),
             depth > 0,
-            "only auxiliary helpers may use stock CLI: depth={depth}, {stderr}"
+            "only auxiliary helpers may use stock CLI: depth={depth}, provisioned={provisioned}, {stderr}"
         );
         if depth > 0 {
             assert!(!directory.join("local-host-runtime-owner.lock").exists());
@@ -543,7 +643,7 @@ fn macos_native_helpers_do_not_become_host_runtime_owners() {
 
 #[test]
 fn rejects_missing_stock_cli_without_a_cli_override() {
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .env_remove(STOCK_CODEX_PATH_ENV)
         .env_remove(CODEX_CLI_PATH_ENV)
         .stdin(Stdio::null())
@@ -569,7 +669,7 @@ fn discovers_official_cli_when_browser_helper_preserves_only_codex_cli_path() {
     fs::copy(fake_codex_path(), resources.join("codex.exe"))
         .expect("install fake official Codex CLI");
 
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .args(["config", "read"])
         .env_remove(STOCK_CODEX_PATH_ENV)
         .env(CODEX_CLI_PATH_ENV, shim_path())
@@ -613,7 +713,7 @@ fn discovers_official_cli_when_browser_helper_preserves_only_codex_cli_path() {
 #[test]
 fn browser_helper_fallback_does_not_guess_an_official_cli_from_path() {
     let missing_installation = temporary_directory().join("missing-portable-codex");
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .env_remove(STOCK_CODEX_PATH_ENV)
         .env(CODEX_CLI_PATH_ENV, shim_path())
         .env(CUSTOM_INSTALL_ROOT_ENV, &missing_installation)
@@ -654,7 +754,7 @@ fn managed_remote_listener_detaches_and_reuses_a_matching_socket_owner() {
         .join("app-server-control.sock");
     let ready = directory.join("ready");
     let started = Instant::now();
-    let child = Command::new(shim_path())
+    let child = shim_command()
         .args([
             "-c",
             "features.code_mode_host=true",
@@ -731,7 +831,7 @@ fn managed_remote_listener_detaches_and_reuses_a_matching_socket_owner() {
 
     let original_socket = fs::metadata(&socket).expect("read original listener socket identity");
     let repeated_started = Instant::now();
-    let repeated = Command::new(shim_path())
+    let repeated = shim_command()
         .args([
             "-c",
             "features.code_mode_host=true",
@@ -767,7 +867,7 @@ fn managed_remote_listener_detaches_and_reuses_a_matching_socket_owner() {
 
     let alternate_stock = directory.join("alternate-fake-codex");
     fs::copy(fake_codex_path(), &alternate_stock).expect("copy alternate stock Codex fixture");
-    let mismatched = Command::new(shim_path())
+    let mismatched = shim_command()
         .args([
             "-c",
             "features.code_mode_host=true",
@@ -916,7 +1016,7 @@ fn remote_lifecycle_terminates_only_the_matching_socket_listener() {
         .parse::<u32>()
         .expect("listener root PID");
 
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .args(["--codexhost-remote-terminate", "stock", "--socket"])
         .arg(&socket)
         .arg("--stock-codex")
@@ -964,7 +1064,7 @@ fn remote_lifecycle_refuses_a_mismatched_installed_command() {
         .expect("start mismatched lifecycle listener fixture");
     let _ = wait_for_file(&ready, Duration::from_secs(2));
 
-    let output = Command::new(shim_path())
+    let output = shim_command()
         .args(["--codexhost-remote-terminate", "stock", "--socket"])
         .arg(&socket)
         .arg("--stock-codex")
@@ -1130,7 +1230,7 @@ fn process_id_from_ready(contents: &str, label: &str) -> u32 {
 
 #[cfg(any(target_os = "windows", target_os = "macos", target_os = "linux"))]
 fn host_runtime_shim(directory: &std::path::Path, ready: &std::path::Path) -> process::Child {
-    Command::new(shim_path())
+    shim_command()
         .args(["app-server", "--stdio"])
         .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
         .env(HOST_NODE_PATH_ENV, fake_codex_path())
@@ -1150,7 +1250,7 @@ fn legacy_host_runtime_shim(
     ready: &std::path::Path,
     runtime: &std::path::Path,
 ) -> process::Child {
-    Command::new(shim_path())
+    shim_command()
         .args(["app-server", "--stdio"])
         .env_remove(HOST_NODE_PATH_ENV)
         .env_remove(HOST_RUNTIME_PATH_ENV)
@@ -1257,6 +1357,19 @@ fn forwards_validated_host_runtime_paths_to_the_host_runtime() {
             .lines()
             .any(|line| line == format!("host_runtime_path={expected}")),
         "Host Runtime did not inherit the validated runtime path: {identity}"
+    );
+    // The anchor ships beside the Shim; the Host is told where only if it exists.
+    let anchor = shim_path().with_file_name("codexhost-anchor");
+    let expected_anchor = if cfg!(target_os = "windows") || !anchor.is_file() {
+        String::new()
+    } else {
+        anchor.display().to_string()
+    };
+    assert!(
+        identity
+            .lines()
+            .any(|line| line == format!("process_anchor_path={expected_anchor}")),
+        "Host Runtime did not receive the process anchor path: {identity}"
     );
 
     drop(stdin);
@@ -2439,7 +2552,7 @@ fn run_external_signal_case(signal: &str, expected_signal: i32, ignore_signal: b
     let directory = temporary_directory();
     let ready = directory.join("ready");
     let observed = directory.join("observed");
-    let mut command = Command::new(shim_path());
+    let mut command = shim_command();
     command
         .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
         .env("FAKE_CODEX_SIGNAL_READY", &ready)
@@ -2518,7 +2631,7 @@ fn converges_once_when_multiple_shutdown_signals_arrive() {
     let directory = temporary_directory();
     let ready = directory.join("ready");
     let observed = directory.join("observed");
-    let mut shim = Command::new(shim_path())
+    let mut shim = shim_command()
         .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
         .env("FAKE_CODEX_SIGNAL_READY", &ready)
         .env("FAKE_CODEX_SIGNAL_OBSERVED", &observed)
@@ -2575,7 +2688,7 @@ fn cleans_an_escaped_descendant_after_the_cli_root_exits() {
     let ready = directory.join("ready");
     let child_ready = directory.join("child-ready");
     let observations = directory.join("observations");
-    let mut shim = Command::new(shim_path())
+    let mut shim = shim_command()
         .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
         .env("FAKE_CODEX_SPAWN_CHILD", "1")
         .env("FAKE_CODEX_ROOT_EXIT", "1")
@@ -2651,7 +2764,7 @@ fn cleans_an_escaped_descendant_after_the_cli_root_exits() {
 #[cfg(target_os = "windows")]
 #[test]
 fn job_terminates_the_official_cli_tree_when_shim_is_killed() {
-    let mut shim = Command::new(shim_path())
+    let mut shim = shim_command()
         .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
         .env("FAKE_CODEX_SPAWN_CHILD", "1")
         .env("FAKE_CODEX_DELAY_MS", "60000")
@@ -2685,4 +2798,107 @@ fn job_terminates_the_official_cli_tree_when_shim_is_killed() {
         !process_exists(child_id),
         "kill-on-close Job left child PID {child_id} running"
     );
+}
+
+/// Launches the fake Host Runtime through `shim` and returns the anchor path
+/// the Host received (empty when none).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_anchor_path_through(shim: &std::path::Path, environment: &[(&str, &str)]) -> String {
+    let directory = temporary_directory();
+    let ready = directory.join("ready");
+    let mut command = Command::new(shim);
+    command
+        .args(["app-server", "--stdio"])
+        .env(STOCK_CODEX_PATH_ENV, fake_codex_path())
+        .env(HOST_NODE_PATH_ENV, fake_codex_path())
+        .env(HOST_RUNTIME_PATH_ENV, fake_codex_path())
+        .env("CODEXHOST_DATA_DIR", &directory)
+        .env("FAKE_CODEX_HOST_RUNTIME_READY", &ready)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    for (name, value) in environment {
+        command.env(name, value);
+    }
+    // The Shim was just copied: on Linux a thread of this test process that
+    // forks meanwhile holds the copy's write descriptor until its exec, and
+    // executing the file then fails with ETXTBSY. That passes; retry it.
+    let mut attempts = 0;
+    let mut shim = loop {
+        match command.spawn() {
+            Err(error)
+                if error.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 50 =>
+            {
+                attempts += 1;
+                thread::sleep(Duration::from_millis(20));
+            }
+            result => break result.expect("spawn fake Host Runtime Shim"),
+        }
+    };
+    let stdin = shim.stdin.take().expect("Host Runtime stdin");
+    let identity = wait_for_file(&ready, Duration::from_secs(5));
+    drop(stdin);
+    if !wait_for_process_exit(&mut shim, Duration::from_secs(5)) {
+        force_stop_test_process(shim.id());
+        force_stop_test_process(process_id_from_ready(&identity, "root="));
+        let _ = shim.wait();
+    }
+    let _ = fs::remove_dir_all(&directory);
+    identity
+        .lines()
+        .find_map(|line| line.strip_prefix("process_anchor_path="))
+        .expect("ready process anchor field")
+        .to_string()
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn drops_an_inherited_anchor_path_when_no_anchor_sits_beside_the_shim() {
+    let directory = temporary_directory();
+    let copied = directory.join("codexhost-shim");
+    fs::copy(shim_path(), &copied).expect("copy the Shim away from its anchor");
+    let received = host_anchor_path_through(
+        &copied,
+        &[("CODEXHOST_PROCESS_ANCHOR_PATH", "/stale/codexhost-anchor")],
+    );
+    // An inherited value is not this installation's anchor.
+    assert_eq!(received, "");
+    fs::remove_dir_all(directory).expect("remove copied Shim");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn keeps_the_profile_anchor_path_for_a_remote_ssh_wrapper() {
+    let directory = temporary_directory();
+    let copied = directory.join("codexhost-shim");
+    fs::copy(shim_path(), &copied).expect("copy the Shim away from its anchor");
+    // A remote wrapper is a copy of the Shim; its profile names the anchor.
+    let received = host_anchor_path_through(
+        &copied,
+        &[
+            ("CODEXHOST_PROCESS_ANCHOR_PATH", "/profile/codexhost-anchor"),
+            (REMOTE_SSH_MANAGED_ENV, "1"),
+        ],
+    );
+    assert_eq!(received, "/profile/codexhost-anchor");
+    fs::remove_dir_all(directory).expect("remove copied Shim");
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn finds_the_anchor_beside_the_real_shim_through_a_symlink() {
+    let anchor = shim_path()
+        .canonicalize()
+        .expect("canonical Shim path")
+        .with_file_name("codexhost-anchor");
+    if !anchor.is_file() {
+        // `cargo test --workspace` builds the anchor; a lone Shim run may not.
+        return;
+    }
+    let directory = temporary_directory();
+    let link = directory.join("codexhost-shim");
+    std::os::unix::fs::symlink(shim_path(), &link).expect("link the Shim");
+    let received = host_anchor_path_through(&link, &[]);
+    assert_eq!(received, anchor.display().to_string());
+    fs::remove_dir_all(directory).expect("remove Shim link");
 }

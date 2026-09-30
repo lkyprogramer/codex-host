@@ -1,0 +1,428 @@
+997f62a0ede22609ed42b949957100d16043ad17	2026-09-25	chore: prepare v0.10.1
+b685f36e59eb7d72c076be02d4934bf80647eccd	2026-09-25	fix(deepseek): accept fractional LLM retry delays in history (#390)
+3e8cc6f7cfbb7bc2d083690d85d7bb5dd4b3bdfc	2026-09-25	支持 DSH 0.1.7-rc.2 及后续版本使用 V4 协议 (#388)
+f14a2f3d504c996a611d7f3dec982b8c9e79cc23	2026-09-25	fix(omp): make subagent delegation visible and readable in Codex Desktop (#386)
+55868740d1b8dc642335d5e189fbdec92228bbb3	2026-09-25	fix(pi): allow realistic time for proven cancellation settlement (#389)
+f8063cf022efcec3d52a920561100fe4e5c0ef23	2026-09-24	fix: 更新 codexhost 原生概述图像
+d9fa7aa26474127bb80cbf086cd49503f7cc4ccf	2026-09-24	docs: redesign README screenshots as a Highlights grid
+4bc2cb2e5a4ad0f376b0834c1fbf8b0894ffd2f3	2026-09-24	feat: add a GitHub Star banner to the Updates page
+b9734181fae3868e226469790ed23ccdc5095090	2026-09-24	fix: refine GitHub support link icon and labels
+5c0ca7b9db8bc9cb8d8b9c04dc284c8fb315d64c	2026-09-24	feat: 对接 DSH 015rc3 与 017rc1 (#379)
+2e6e1bf1c16616ca3651a4ab8b57d066c9fad585	2026-09-23	fix: restore SSH with symlinked official Codex sockets (#380)
+c933ab2e73ff6401e70b0c1e39e01aeac97c053c	2026-09-24	docs: refresh WeChat group QR code
+8e30b919a4503fa2dc298ac2e0d66e775b0a9d9a	2026-09-24	docs: showcase Kimi Code in README
+75e2481daa8e7f779a6ed21a2da5c8ce30e5af6f	2026-09-23	docs: show hash selection in delegation examples
+efc954835a26c624b44cc9ddc802454be249ec41	2026-09-23	docs: showcase hash menu in READMEs
+df6956d4074d3f66ad07d23d72025f6e0ff45dfc	2026-09-23	chore: prepare v0.10.0
+7565ab52edac7437e4bc08c607ccd37df82fa111	2026-09-23	Merge pull request #378 from BytePioneer-AI/fix/external-harness-codex-quota-gate
+dd0cc62dcd69fdfeed97cb76ae67a6183cb032f8	2026-09-23	feat: audit the Codex usage gate contract
+0cc7d3f1b9cb89e80787cf04f44e5b40f7879aef	2026-09-23	fix: let external Harnesses submit when Codex usage is exhausted
+374654c99051ded529e4a31335c7a4d67d72a619	2026-09-23	fix: derive Kimi thinking options from ACP
+506a08faa5d83a3a2c9a50313724a61b8244c85e	2026-09-23	test: cover attachment recovery after launcher disconnects
+07e72f6fc0197a5f69b3ade39101562aaeacf9bb	2026-09-22	fix(launcher): [重复启动] 限制附件恢复重试
+142bdfc2135682beb2dc54deeae0b6d12dfbe3fc	2026-09-23	Merge PR #335: add Kimi Code harness integration
+23a6f5e9a7d11365487bd9beb513a0c947bc1259	2026-09-23	Merge pull request #373 from BytePioneer-AI/feat/workspace-live-commands
+e8f95e0cc1ebae061cc663890bf242f5b10e38a0	2026-09-23	test: type the pending-catalog command fixture
+8de2be76fb15cf937eb8386a85bcf1119e7208d1	2026-09-23	feat: show workspace live commands and skills in new drafts
+d13484a59c9065634acd83abd0e406d7f9b0ac25	2026-09-23	Merge pull request #372 from BytePioneer-AI/feat/composer-hash-delegation-menu
+5d2490530afe566a37779c4ee6f7e350c3992b01	2026-09-23	fix: preserve explicit Harness command admission errors
+8fa8d37b7a754434aba3cd3d85751f913f7235fb	2026-09-23	docs: align command inspection and DSH version policies
+a611b6b9b1bf28a1484af8f1b99157288d3d80f4	2026-09-23	fix: keep observing updates after request timeouts
+9a015338467ac5ebd59be68cffac402ad463756f	2026-09-23	fix: bound live command catalog inspection latency
+1094b03141eccca7978f66e8a7337d1ac123322e	2026-09-23	fix(hermes): skip invalid and duplicate live commands
+30e27e68b265b5484ff5c1b8cfec1c19b0756d6c	2026-09-23	fix: preserve Harness command routing and arguments during steering
+5ea5800a79b2ca9116de821533e75b44f71b36a0	2026-09-23	style: fix PR formatting checks
+2491d23df2da065c0a1149a0eeeb7973ff1ad9e3	2026-09-23	refactor: add workspace command catalog cache groundwork
+7a5ad2199e7fb6940ef3cfcb1d2e2231d2144353	2026-09-23	fix: inherit source permission mode when forking external Threads
+daaef03bf9b8221ed2ed3292d60835c9e860e744	2026-09-23	feat(deepseek): allow untested CLI versions after protocol checks
+72f5f2358d9b3f18875d57ddceaec7e6ed1892e4	2026-09-23	feat: unify Composer command entry with the hash menu
+a014fbadfdbfb6fcc1868543cef90c26af6f7ae0	2026-09-23	feat: expand live Harness command catalogs and filtering
+2049b383b1351330710e4e65e260b4bfc09c1e47	2026-09-23	feat: tag every # menu section with codexhost and drop agent id detail
+dedd14e4dc0406332fcc78ea7193ef6e6099b402	2026-09-23	feat: polish the # menu rows and put delegation first
+77b4b97541a24d487ca80a6f0055dab657692c4b	2026-09-23	feat: surface live Harness commands and skills in the # menu
+16959adf19e28fab5ea6e10d49c898c3f274968c	2026-09-23	feat: add # Composer menu for delegation mentions and Harness commands
+55a097abf78983fa791f584344690806732b7ad4	2026-09-23	fix(renderer): follow the live send button when placing Composer controls (#370)
+2cb157a1ca8155b16d36cff4351b4d9ecc8a34de	2026-09-23	fix(desktop-control): skip unattachable CDP targets during discovery (#371)
+dfc24033302972412badcf0fa99011785781e195	2026-09-23	merge: integrate upstream main into Kimi Code harness PR
+6efd72fb9510a5df79f52f39976c5a11436b85cd	2026-09-23	Merge remote-tracking branch 'origin/main' into feat/quieter-update-ui
+0873a6827f65c04572c344dda37922341874ceb5	2026-09-23	fix(desktop-control): stop re-injecting the Renderer on Agent list order drift (#369)
+53795e97903e929205a729743b6f0568ab14637f	2026-09-22	fix: reject mismatched npm platform payloads (#365)
+47d349638a49657a6663622268147b4d670e620b	2026-09-22	fix: keep sidebar agent icons on the title line when Desktop wraps titles (#362)
+b99c61e74dcd1ac7b75410f05b9f1ede4896ad2a	2026-09-23	fix: point failed update requests to GitHub Releases instead of retrying
+23aa0bd32b842fd914d400593993da4e564fccbb	2026-09-23	feat: quieter update affordances in the title bar and Updates page
+5eaaf8df32514bd1dd27cf37fa62237fe110b8bb	2026-09-23	chore: remove obsolete OpenCodex attribution
+903f1b4c8e6b474e49dcf39503263e4720e93f20	2026-09-23	feat: redraw the brand icon as a vector master
+cf017fcd78864ea5d281f10b123e5143e41b9292	2026-09-23	ci: stabilize and speed up the Windows test lane
+f12f8c92fe1881e62c8bd76d5737900fe08bd5bb	2026-09-23	fix: type the applyAgent mock in the Host-switch catalog test
+3b0e71e6f01954a573488ca846a442689a59a1f1	2026-09-22	docs: polish English README and remote guides for native readability
+91dcf1a6a941cae0ab8f6ddf0416e7c5ba965b3f	2026-09-22	docs: remove obsolete ZCode client proposal
+0c35eda5baae38f1d4a3d3c5b55e650940fbd588	2026-09-22	docs: make English the default README and simplify remote guides
+e81df5a1647719f582b371eda7e22a76bcb7ce3f	2026-09-22	chore: switch license to LGPL-3.0
+65bbcf281ef32fe8ec1366d3dd9c74b53a81e41d	2026-09-22	fix: preserve Harness selection across new drafts
+0ae7b0112ec4425ae86f60f81592389cc41ea993	2026-09-22	revert: remove CodeBuddy Host-side trust preflight (#341)
+826801b41467df7022bac0cc391a61d03fdb9e00	2026-09-22	fix: resolve remote Claude executables through Adapter discovery
+1833da05e8235cfd9438b51e98b7c27aab13c130	2026-09-22	fix: prevent connection error details from overflowing
+d7b3c56a3b0123d57ab59736cf3ad49db6a684a4	2026-09-22	feat: add Harness installation guides to connection settings
+7616cb283dd8ee7dfeb20564a55c90b9bd7fdbeb	2026-09-22	fix: prioritize active Harness and Model loading
+7306eb0189c06c5a3a71037e0d6bac7ec28ad874	2026-09-22	fix: format renderer binding tests
+debcc4c646eba117b10fd015b4df2fef2075223a	2026-09-22	chore: prepare v0.9.2
+edb6f0f2f62776b61738ddae38d38dac01a3e86f	2026-09-22	docs: restore npm installation in README
+b42ad3f192e14b575a24cf76888c0eee6228617c	2026-09-22	chore: adopt ZCode skills and document client feasibility
+af10d665acde6534bc14a54f374c083692aa4e8b	2026-09-22	fix: decouple Host connections from Composer routing
+fb36f2dfee08cb8db68d3eee362f02a7ca61d3ae	2026-09-20	merge: integrate PR #343 composer footer squeeze
+b72878a1d84dca8c24f5908e42796f4ad0fac9d0	2026-09-20	fix: honor Claude Code modelPicker.options in model discovery (#342)
+48042fb92cc7cc304c5c708f54f077d527d6dd06	2026-09-20	fix: surface CodeBuddy untrusted cwd as actionable error
+4a540ca344de648a5e406c0d283b3a7492a7d78a	2026-09-20	refactor(pi): refine imported account display
+d62d2aabbb99fb6afaad1de135d35a1c93be7ea2	2026-09-20	chore: ignore local website draft
+097268298dfb2d3ea7563a91fcf6cb60dfa27f96	2026-09-20	fix(codebuddy): scope always approval to session
+bf757fcda28dd5629735113cd0e71a2bcd18923d	2026-09-20	feat(pi): add account credential imports
+90f448c72b33662a3b90003b65a634d0e7670aab	2026-09-20	Revert "fix: preserve Harness selection across Composer replacement"
+b47391b198fd33efc842f95fad7d6d6076f9501a	2026-09-20	fix: preserve Harness selection across Composer replacement
+90c09f04761629ed0fb6adf3687fb7f625555721	2026-09-20	feat(pi): map pi-subagents workflows and child transcripts
+fb4f94d84b665ad2fb56a96cbcf6207db48aaaa8	2026-09-19	fix: squeeze composer footer chips when sidebar narrows layout
+6c49f5a18f762ec8abcd135396fe7929ea2611f1	2026-09-20	test: remove flaky Windows activation guard assertion
+e6c5cdc83cbfa390ef5ad7d7f8907e2c27116d42	2026-09-20	chore: prepare v0.9.1
+a7796ccf856670de7deded36197efa9fa6c08df6	2026-09-20	fix: satisfy regex spacing lint
+98987f1b8b133523a03b5bd45b5755f05715a9c3	2026-09-20	fix: support Windows WorkBuddy model catalog
+5fde6be4da3f463c68316d31ad49fdce4f08b148	2026-09-19	feat: unify application and installer brand icons
+72ccde3222ec66ed9782a873cc05f362ce701b1c	2026-09-19	feat: improve GitHub star prompts
+99cdf544cfd38ab786f1229da1f156404a52f97a	2026-09-19	fix(kimi-code): settle turns after usage projection failures
+3edfaabe8b4366a67307cae6d4ef9df7332a73c2	2026-09-19	fix(kimi-code): resolve upstream conflicts and review findings
+2c1faa054318c16ed579bfa8901205385be28385	2026-09-19	merge: integrate PR #334 WorkBuddy fork cursor restoration
+791f7252ef0566b3a4d154b2c5f4066921ed0559	2026-09-19	refactor: remove ZCode integration from main
+d40ae8b8c3c2185e8e80558d2b660e86f2dbbc47	2026-09-18	fix(kimi-code): restore last-message revision with native undo
+7892e80ed9bade1dd1c42ce1fdddeb5958028232	2026-09-18	style: format upstream ZCode compatibility regression
+ceccc0f668e697d18b921b8e67efe20e39ef83dc	2026-09-18	fix(kimi-code): align upstream integration and regression checks
+a4b5f134b8527c70c9a419a162836b1bb8436f5d	2026-09-18	fix(kimi-code): restore native head fork support
+9a56a4ec318e0f8364dee59ba208455ab6b06a53	2026-09-18	fix(kimi-code): preserve native history and turn lifecycle contracts
+4eb38f417da00e73dc4f317c9d30f5090891432a	2026-09-18	style(kimi-code): clean thinking option labels by removing Thinking prefix
+3066ad7cfd8f1d70e2da116ba889303ecc1857b9	2026-09-18	feat(kimi-code): format command outputs as structured markdown and strip ansi
+232269b62475a8e6d99969298c8b0b09e4834df0	2026-09-18	fix(kimi-code): provide baseline slash command catalog for composer availability
+0bf0d4ca7a9109ef447a8d5117d9661664834cc8	2026-09-18	feat(kimi-code): add dynamic slash command discovery, sync, and execution
+1ea558c2b6aa8e204ff4d46d4366eda87312b6c6	2026-09-18	feat(kimi-code): support rollbackLastTurn for revising previous message
+55c57e0ec89c9d90624e502564ee9c0657397882	2026-09-18	feat(kimi-code): support session fork and attach turn checkpoints
+57821ef321955028164cfa0cb54dc0d9e4d27745	2026-09-18	fix(kimi-code): eliminate synthetic reasoning cards and restore native folding phase lifecycle
+d0cca85944507e305f674ae00e840c6f700a9bbc	2026-09-18	fix(kimi-code): resolve native turn correlation timeout and handle delayed wire log flush
+802120426f706d01819b97b6d38bfce935da4923	2026-09-18	fix(kimi-code): unify turn process fold and eliminate correlation freeze
+92e35dd2c21043e3ff2aeb984f8c17a2366b3764	2026-09-18	fix(kimi-code): extract and emit token usage from native wire log and context window
+ae8fa939e9ba5357c2558cb5deb65bc770213fe1	2026-09-17	fix(kimi-code): emit reasoning text update before completion to align with projector contract
+897ca304d9e69c5a19a1b0d9077e9a4ead49649b	2026-09-17	fix(kimi-code): align native turn folding with reasoning envelope and clean final answer
+98dbd4639d41fe21d0873ae7abbaf20e6141a086	2026-09-17	fix(kimi-code): complete agent message cleanly without commentary phase
+2983624771ed4a10923673c816c48635aed80d5c	2026-09-17	fix(kimi-code): preserve canonical tool names and align native turn folding order
+e2767b60bf4d6de2d1deb5dda5cd929863aa9cab	2026-09-17	fix: finalize Kimi textual items cleanly and complete reasoning on transition
+685a0fd0d77739c2ae907a38e3e081f9517ab0b0	2026-09-17	fix: stabilize Kimi identity and add runtime logs
+29ddfcb02749ccdc36bf5d166788df7be44b5694	2026-09-17	fix: surface Kimi history read failures
+ed5e1964d934cdcf72743a7f0a5bfaf9ca3307dc	2026-09-17	fix: correlate Kimi native turns
+c5ee377115f1ed4ff01937e2bf110d8ad62376c6	2026-09-17	fix: retain Kimi session commands
+b41c0d11dc9dae61b07f6e42e083f779c3ef764e	2026-09-17	fix: preserve Kimi approval context
+2d8941df8e7430afc163d1eba0e333699217c79c	2026-09-17	fix: confirm Kimi session configuration
+096ed88bbf5936a78808843082e8245b93337294	2026-09-17	fix: project Kimi ACP tool fields
+37477e956da00dde57d3ee69d40f3f4f7d0a25eb	2026-09-17	fix: read Kimi ACP text content
+1923e83f0696475524462913ca14d711b663f1ad	2026-09-17	fix: publish Kimi native session identity
+84e21fbca865cab9dde0149cfb69bc718909b875	2026-09-17	fix: align Desktop readiness agents and lock Kimi workspace
+dc969eb299e1899c33cc969986051f7b345526c8	2026-09-17	feat: add Kimi Code harness adapter and Desktop integration
+26f80f448b3c681b54709f67e4f22cb2aa2c2f63	2026-09-19	fix: restore native fork cursors after ACP reload
+0d6a4865a21903b68fd0cc3d51a37abaad4c6838	2026-09-19	docs: outline ZCode official provider integration options
+22bf6d87e566cc1d9591f934c58ed1eb797abe3f	2026-09-19	fix: support ZCode process-registry protocol
+1d1b78547ab003f4cdd99be96fdb3ea6e02cb61c	2026-09-18	feat: configure ZCode and WorkBuddy installation directories
+8702dd23d5523cf059db9566e1e3b57f66c1c5aa	2026-09-18	merge: synchronize local main with remote updates
+f5abe8d74db9386615e8c790a0b08d3420814466	2026-09-18	merge: integrate PR #330 Antigravity subagent cleanup
+10fcf2c7ad98aeb8a35141829ba21d443a28ab1b	2026-09-18	Merge pull request #332 from livisity/codex/fix-omp-late-tool-events
+12f3c1f863225f863153db88efe0368d986f6db4	2026-09-18	fix(antigravity): expire only failed subagent observations
+aaf7e966dd4c5b72983f1684bbb52291548fa86f	2026-09-18	merge: resolve OMP late-event tests against main
+361d02a77f0e91c498b7173f8f8eba690a845160	2026-09-18	merge: integrate PR #326 Node runtime PATH fallback
+6537fb40086a948a67e36a7b3c4a6166af2e8639	2026-09-18	fix(qoder): stop falling back to editor launchers
+0bd83ab93eba63f35a17b50934ea7ca37f99f62b	2026-09-18	merge: integrate PR #308 CI check cleanup
+c0eb54a4a2ad90dcd6ef565ecd20dcf1e6cbf95a	2026-09-18	test(workbuddy): remove native invocation derivation test
+0ed984b7a6380cf18e8f23cc9b98105fabeedd12	2026-09-18	fix(workbuddy): handle Windows paths and derivation permissions
+f3d86c4e7f354ecba19d9b75176ce2dfe6ccb204	2026-09-18	Merge remote-tracking branch 'origin/main'
+6b77451ffc7582f220f9b571a045b8cb5b091796	2026-09-18	docs: refresh harness capability tables and brand assets
+aaeef316fbc88c49e96921d0e30fdfc82e2b2a92	2026-09-18	feat(npm): show repository star prompt after launcher readiness
+6829bfc1bb5ac65aee02e3f849d2aff9ef78ba91	2026-09-18	fix(renderer): default uninstalled harnesses to More
+5a5dcaa35a234b093e3e76b6c6d163087b624478	2026-09-18	fix(hermes): preserve canonical custom provider model references
+85c4ff80e6c8cbcf9baa9b31aa81f6e106f01125	2026-09-18	perf(workbuddy): skip telemetry wait for model-free fork copies
+e6a5cdcaecc3c96818994a58af871d0e9696b26b	2026-09-18	feat(cursor): support native historical forks and reduce session startup latency
+ba4276d5c8a6c365a500c221beb90d9d43947b6f	2026-09-18	fix(antigravity): reject invalid subagent observation timeouts
+b9b598baf1ef429c26206c658164e3e87cb11590	2026-09-18	fix(omp): tolerate late tool events from background jobs
+c5688df7aee08ccab01e93a0efba223bfa48109a	2026-09-18	merge: harden ZCode Windows discovery and recovery locally
+434f454d8a3fabd8d47d844cfb170a847bab6d1f	2026-09-18	fix: harden ZCode Windows discovery and workspace recovery
+35e638b4f1a8a9aa9bbc844af98815eed55b307c	2026-09-18	fix(antigravity): release unobservable subagent sessions
+2faa515e815076277a6ef24f6d3e8302b494709d	2026-09-18	merge: enable WorkBuddy app auto-discovery locally
+f623ae3e680b90dde3e057e2f834ea442876cbe9	2026-09-18	feat(workbuddy): discover Windows and user-installed macOS apps
+b0691a48db2d9862de14ef3e9541dbe49a1e11bd	2026-09-18	merge: fix WorkBuddy native history paths locally
+de7e80ccd25f91443f16ecb1352d7ea07731cf67	2026-09-18	fix(workbuddy): use native project directory encoding
+8a95d09ee781f163bbd39ee408a4e8fb7a06323e	2026-09-18	merge: forward WorkBuddy dynamic product catalog locally
+5af05644c231cd9b4650185c287c1d83adf7c927	2026-09-18	fix(workbuddy): forward dynamic product catalog
+012002b23ccc5935afd9080869eacd582d79fb9e	2026-09-18	merge: improve Hermes model inspection resilience locally
+dbaa8a34239492fe2913b04574476ab39482ba73	2026-09-18	fix(hermes): retain model catalog on refresh timeout
+908aff7e3d184d5fc8e9dfbd96cffe16e5b8f2ad	2026-09-18	merge: add Cursor native Fork locally
+008957818ebf3f660be8137235f1c3c8c5200998	2026-09-18	merge: add WorkBuddy harness locally
+61b3cddf835efb4a7e44768a3f2053c2e1cf0927	2026-09-18	feat(cursor): fork native sessions through isolated CLI bridge
+6e9f365e2bf8ac61716f8250475530ae790f2d2f	2026-09-18	feat: add WorkBuddy harness
+1148fb2efda8022887acc1c1d57bf8972d641648	2026-09-18	merge: add ZCode harness locally
+66a7d85b8daae7c2dfa91123089824842d0a4f11	2026-09-18	feat: add ZCode harness
+60e0da9092f1c766c16ef751c776b3938317fd27	2026-09-18	merge: fix Hermes default model locally
+59fdeba78d569abc6b98408d5bec669f358c91c2	2026-09-18	fix(hermes): resolve default model through native provider aliases
+f19c395ba895fd12c35d25fe1b85aa674acc897f	2026-09-18	merge: fix Hermes command menu locally
+7345860cfbb24f46c81415106b81d09827d3c004	2026-09-18	merge: fix Cursor command menu locally
+6428aee6ef0512e9998c1299588a259916e29c57	2026-09-18	merge: fix CodeBuddy broker command menu locally
+996d9a54b1d29436c551dabaa3f4a3f50b48db2a	2026-09-18	fix(hermes): expose native command menu metadata
+07819fd77abd5c953a3825ffdafa3b077e8e258d	2026-09-18	fix(cursor): expose native command menu metadata
+e5571241f723389214ce246a63d2759b2dd05da9	2026-09-18	fix(codebuddy): expose commands through broker plugin
+c6d538987fd5b46f3eb0c92ed81c853c6f3a8460	2026-09-18	merge: fix CodeBuddy command menu locally
+dc645c06b7e1f3e336b56b49305bd21400e78e1f	2026-09-18	fix(codebuddy): expose command catalog to Desktop menu
+fa58a9219292855e8ccc84de6637992208f6e2e3	2026-09-18	merge: enable OMP native ask in local test build
+b915b6764215efd170792f10652732c680b5e402	2026-09-18	fix(omp): enable native ask through rpc-ui mode
+6979011adb3a721870297b8b56ac083acbece150	2026-09-18	chore: prepare v0.9.1-test.2
+14423ced529cc95340519d5e86d29496e5633e39	2026-09-18	docs: align integrated harness capability notes
+5e1d8b317489c362c927fd310e0c18e124d3e462	2026-09-18	merge: integrate harness capability documentation locally
+008b917340a2b8ccda1f3cf2aaf18b3a0b41d693	2026-09-18	merge: integrate Hermes capabilities locally
+61dce0a06976a393b4e10b3c7c955d502eb5cbd4	2026-09-18	merge: integrate Cursor capabilities locally
+58a5e4f27caa624a7a15502ef493fb444350c825	2026-09-18	merge: integrate CodeBuddy capabilities locally
+8867dcdb91066ed73f4cf470a4e9d6e9c868dc10	2026-09-18	merge: integrate OMP capability improvements locally
+cc07a4af345fc94506cd82cc87551a44fc55e1aa	2026-09-18	fix(codebuddy): clean up native derivation copies
+75addea1d06e7ad58d7e4259f210a03aad0bf68d	2026-09-18	fix(hermes): isolate delegation skill registration
+b38ec454c5d78bd71be04a6bba92afdff66f2d8b	2026-09-18	chore: prepare v0.9.1-test.1
+714bf47bb2c2adcbe42a2bd0db5aaef6cc73abe7	2026-09-18	ci: publish npm with trusted publishing instead of NPM_TOKEN
+caa23f5ba4b919d05b0f71766b9c8943e1bd44a1	2026-09-18	fix(hermes): remove version-based compatibility gates
+c9ebf7fe21cb880c7ab64ec4ba2cd69ab5cfde23	2026-09-18	fix(harness-discovery): preserve selected Node runtime in PATH
+293333013bf4d49075add016c3178ba954ab29a2	2026-09-18	fix(hermes): align slash history with native dispatch
+551c77af91fd069174dbe3dbb8db69dfeb4e2d54	2026-09-18	fix(codebuddy): prevent derivation after adapter shutdown
+6c10cbf81b69cfc355e4e46202a08589d4a366d7	2026-09-18	fix(hermes): stop opening sessions after adapter closes
+938065c00b6280bb24f24bcd53aeb87dd331ad53	2026-09-18	docs: align harness capability matrix with native support
+0f515e86bf5f2d39b181c085e0dc695b4078551f	2026-09-18	feat(hermes): add verified native gateway sessions and precise history
+74caabd3a2e80081a4712e3a02f5fbd6443f45b4	2026-09-17	feat(codebuddy): derive native fork and revision sessions
+5167e38231aebb450b28138ac28cbfcc9a53b269	2026-09-17	test: remove constant-only package checks
+0728770063c96d95a3f03a2bf8b742eda574284a	2026-09-17	fix(cursor): honor explicit native command input metadata
+644d91fe720958a5390515545f5dc3ce767547cc	2026-09-17	fix(codebuddy): preserve native compaction outcomes
+7c13708d58a3e0774b5883f5b59f14f0892d3734	2026-09-17	feat: add Cursor thinking commands and outbound delegation
+69fa7047a467623d434de14ef514a6696df072ea	2026-09-17	docs(omp): keep the interaction index independently mergeable
+90abc1d31bfb7999cb180973b0c23f3c2c6a7872	2026-09-17	fix: preserve large native thread history responses (#315)
+8d5e43bdb3eae2e371fcf11d577d30dd02c5c704	2026-09-17	fix: 透传原生任务分组排序请求 (#316)
+d738e5faad1e16b9ecc66152970c11c847c1ba6c	2026-09-17	feat: add native CodeBuddy commands and delegation discovery
+5885c1a6755c0e164f0e1d32df88ec3b47aa529f	2026-09-17	feat(hermes): project native diffs and context commands
+5f0f8347a12cd1d14bc7714aec94aa6a9b6b0cb2	2026-09-17	ci: skip incremental Rust state on fresh runners
+d8950f0a0bb336cf08e90da9aa4ebfd2c7c1cbee	2026-09-17	docs(omp): leave capability matrix updates to consolidated audit
+82955692fc6edaea7d86acbe393322d998f2a487	2026-09-17	fix(omp): preserve native question details and timeout semantics
+03eefc95c9e33b918a0ed779d4dd5577605294b3	2026-09-17	feat: allow model and thinking selection during active turns
+5d10dfd361623abd3cc79ef4708fbcfdf0bbb751	2026-09-17	fix: allow installer-only release recovery
+4a431747f52fd3e0c021a116e6efff7f9039e172	2026-09-17	chore: prepare v0.9.0
+ff258869b112cf533c9a13becc8f5b9f9620eec6	2026-09-17	ci: trim duplicate platform checks
+f0b132a36ca0e3d3ebcbc4c12a3d7ef783dbd22e	2026-09-17	Merge origin/main before v0.9.0 release
+8926130af1426a467747b66d8d2dbf68f7764a7b	2026-09-16	feat(adapters): add Qoder harness adapter and Desktop integration (#289)
+95544513e434f2955f49dddf600c5d29067e0af1	2026-09-17	Merge PR #289: add Qoder Global and CN harnesses
+a880ad5b3464ab1ef2cde2fddfe22f424bc46f66	2026-09-16	docs: unify Qoder icon and label in a single badge
+bf8f4623778456e78771b8748219f4ebe3b30ce3	2026-09-16	docs: add Qoder badge and capability status
+c7bc51fa31483a07f3f1998560d38d1921231c90	2026-09-16	feat(qoder): support Global and CN plugins with shared adapter
+6233353c9fc2824f5874e70cb5d0ce2fcba1fb92	2026-09-16	fix(qoder): harden session lifecycle and limit shared changes
+9d420d528df50a98612b6620b95e055521c7d25a	2026-09-16	Merge PR #204: preserve official Computer History summarizer routing
+db18fdbc64e98610fe4dcba58b30a0e1fb1e4d4b	2026-09-16	Merge PR #231 locally for file-change summary verification
+97b52b8ccc36f66195bc71ce226028c53e08e7e0	2026-09-16	Merge PR #200 locally for settings dialog position verification
+ffc9be0ec039d6e5d35c1f31fbdaac0369a85a8e	2026-09-16	Merge PR #250 locally for settings trigger visual verification
+d99d97fd1dcc6601c4ad58c3079e99ef34a3b66e	2026-09-16	Merge pull request #249: preserve running Subagent Thread status
+a952bae4c5b962cdce91c533027057c6407ad01f	2026-09-16	test(renderer): initialize model fixture before test definitions
+84bea6cb6eec10f1e88989cf1f0cfe54fe8d4fe4	2026-09-16	test(host): align unknown history projection expectation
+cd5046e5b4a956f27cda51a881833255d6e303a7	2026-09-16	Merge pull request #273 from YanYunCY/codex/fix-remote-posix-thread-recovery
+6727259e51a7a095bea056e5c4c9947d743fbe67	2026-09-16	test(qoder): avoid non-null assertions in history tests
+c04a82cac089127649569f79c40c7c0140d3829c	2026-09-16	Merge upstream main and preserve grouped model favorites
+22570be1deee860886860cde21e87eb2ceba434b	2026-09-16	Merge pull request #298 from BreezeDoo/fix/codebuddy-reordered-tool-result
+b980b03cca824c0a5cc0736f293d0c2a721ad0d3	2026-09-16	Merge pull request #282 from qiyi71w/fix/issue-281-remote-renderer
+860e3dec091fc90c7e32b4a66a4087c9472dfda9	2026-09-16	Merge pull request #278 from CodeHourra/fix/node-repl-sandbox-cli-reentry
+ee0911fd5174f1c417c71d90d2b69553c4a57260	2026-09-16	Merge main into PR #282 and preserve multi-composer routing
+808f1927448ddeed40c6cd6160accc2742ee277a	2026-09-16	Merge remote-tracking branch 'origin/main' into resolve/pr-278
+5ca2b08f24eb22142e69ab41a16504897ca11593	2026-09-16	Merge remote-tracking branch 'origin/main' into resolve/pr-298
+626ca359979c545542f176bf6eacfc96f01a0c65	2026-09-16	fix(qoder): preserve incomplete history outcomes
+10a849bb0fb5c0da5820ba32f259746411dc279f	2026-09-16	fix: add circular hover background to model favorite buttons
+a6350949ac0a163ee262c81d9d5b6d8372634c01	2026-09-16	feat: add persistent model favorites with immediate pinning
+07d4dd4fa0d4e776a8c27adf61206a868ed8a214	2026-09-16	Merge pull request #272 from YanYunCY/codex/verify-critical-open-issues
+69cf8cdfb1f5510b18c85ffff86cae7ae245b2c8	2026-09-16	Merge pull request #302 from AIR-hl/codex/fix-side-chat-sidebar-scans
+f7291597c2a9f12148397a69b979c794efaea449	2026-09-16	feat: place uninstalled Harnesses last in Agent picker (#307)
+e6561fcd4bee922bd1054f9fd0f8f5b66631085d	2026-09-16	Merge pull request #303 from BytePioneer-AI/feat/external-harness-idle-release
+e2faa9511de0dc23a2efb65842e00c9d968db45e	2026-09-16	fix: lower idle release timeout floor
+57ef5da4a11ed866d0a9182274ad873e73275cc6	2026-09-16	fix: normalize Claude import titles
+a4b60c26a43b069a42403c8bfa9daab6223c4a6f	2026-09-16	merge: add Claude Code session import
+cc05c617c2506452c55f21fb129332fa08e61e04	2026-09-16	fix: hide unknown session activity labels
+ff8082d014c077d631935745c3f4b85a618f2987	2026-09-16	test: isolate queue RPC assertions from settings sync
+b4aa4af4ac1ae684981470b26a756d8027e8a153	2026-09-16	feat: import native Claude Code sessions
+e58a19c1dd20749d2384aeb06f1ed70d1c3aaaa1	2026-09-16	fix: expose Claude SDK sessions to native picker
+f00db6fcafcbea5f8c650ee690c6c52fe5357c0f	2026-09-16	feat: show read-only loaded sessions in resource settings
+0e12fc9e4d53e58ec5eb255d3569e3cf815e0fdd	2026-09-16	fix: retain Cursor model inspection cache until refresh
+f87577154496511c036c8c6f7afeb4dcdb3138a4	2026-09-16	feat: refine resource settings UI with scoped Tailwind styles
+62cc96e8832def797f4d4d729a456ed307cb71ee	2026-09-15	fix: stop steering before drain and preserve local client cache
+c1f53734927c8e16b5cb671301d1d1ddd2d3e528	2026-09-15	feat: release idle external Harness sessions on opt-in
+7b630f6ed0b74a9d175625b3f742700bfc9533ce	2026-09-15	docs: define external Harness idle release proposal
+2c066ed1e514d68a042761a54673655fd90f6ed6	2026-09-15	fix: keep Harness loading off the Desktop request loop
+7a19f4d3ce9b65682e7769c25865d0db7605f9ca	2026-09-15	docs: organize documentation by feature
+cd38646ba0a8a3d8b6fa0c1e0c3c3f0c70caa379	2026-09-15	perf: avoid unrelated process path reads on macOS
+5a1ae98cdf22eeee668fc2cdb4449c4088405715	2026-09-15	fix: preserve side chat routes and skip unrelated sidebar scans
+0323f438133dbab830516136d5c4b08e64fde31e	2026-09-15	fix: recover macOS mapping locks after PID reuse
+1a74ba3f7844326e22c60f921d4d577773f079b0	2026-09-15	Merge pull request #295 from magicseek/fix/harness-plugin-load-timeout
+ec202b02dc54a60574b8f16e0db544c870f6164f	2026-09-15	Merge pull request #300 from zxd-666/fix/deepseek-version-probe-node-warnings
+1adeb6207e9300e3f3d95c0d782fdfcd47f0894c	2026-09-15	test: include diff in Host release bundle dependencies
+e7c5bad5db0c3587dc1225cc3d79947d52f9d53e	2026-09-15	merge: resolve PR 231 conflicts with main
+ee45196ff8c060a91702fded8e1dee210e3b6c45	2026-09-15	fix: summarize file changes across external harnesses
+d7822d8e379d8e6c84259c53958b66d5fda6b31a	2026-09-15	fix(deepseek): tolerate ambient Node warnings in the version probe
+2d6f4ea40cc9294939ff0c2e751229544c11a751	2026-09-14	Merge remote-tracking branch 'origin/main'
+258e4e719996924590cb37db8d8316cd7fffd23c	2026-09-14	Update README.md
+f9ca3db76f00d1d96fd9c3f6894f562bab7e1a35	2026-09-14	test: fix delete assertion scope
+c4d447dc94d3860a25bcd538e701c3034042b061	2026-09-14	test: assert preserved delete
+8cd0a4d8bfb4187108be8e920fb5e8bd49570f50	2026-09-14	fix: preserve deletes after overwrite writes
+2e2e0d5daf71fddd6637ad7743509c64c3bf8240	2026-09-14	fix: keep Codex Thread quota fresh and rebind Usage subscriptions
+099b18e6a0dc497ed2b854eabc7ec1d133e8ad08	2026-09-14	fix(renderer): refresh account quota when a Turn completes
+ee42656411833c554660cc2535dc1a3c222c9102	2026-09-14	test: match controller health probes
+5b9a28c6d2f126bba60055151018e64c4e5717cf	2026-09-14	test: compare renderer agents as a set
+a0aba6d49cd9c564777e60e9225859ec89730cff	2026-09-14	test: allow controller recovery reinstall
+32c74a65a874028fde2729d227c84a3d897eadd8	2026-09-14	fix(codebuddy): tolerate a Tool result recorded before its call
+d4a3e3528987a148cae6c21beb963e39c9fb2656	2026-09-14	fix: address Qoder PR review findings
+05fce86a38b32d77e85554e37d906e1f014a25f1	2026-09-14	Merge upstream main into Qoder PR 289
+3fc1d6d783e1db6b1e7bb3b3df1fa53e47cabd15	2026-09-14	ci: cancel superseded PR runs and avoid duplicate checks
+8b14e656f26c4742a3250343893bde33ec22dfe1	2026-09-14	docs: recommend installers in README quick start
+969fbde59a927250448854b1ad4c78a2854cd4c5	2026-09-14	test: use executable fixture for release Host on Windows
+b2fee24a28c5e1deb6f136fb3f44808fc3e08fff	2026-09-14	chore: prepare v0.8.2
+45526c3a1228f86020be38670d29fac459b49806	2026-09-14	fix: initialize missing native Codex home
+a5c8ce932930e91c3d485189cfc55a6238b5acd7	2026-09-14	style: format Codex account page tests
+f3592bdb02ce9b938ed29be25b8051c48ccc50dc	2026-09-14	refactor: remove Host-owned Codex multi-account switching
+fa700d4eb2ef21873b8a642f6d562c3489abea50	2026-09-14	refactor: simplify native Codex account switching
+c820d9f44309590f230205a3068631178e7c4a56	2026-09-14	refactor: remove account startup proxy and legacy auto-import
+43ba957951779b1df9781692b4fa0e03320444ab	2026-09-14	refactor: decouple native startup from account collection
+376ff33147d1b1581c850824f9a64f5129254af9	2026-09-14	test: wait for aborted plugin factories before deleting fixtures
+29c3079b4ff7a0fa7c852fe5fb9f3d26b5efe68c	2026-09-14	fix(host-runtime): cancel plugin loading when Host closes
+a67aed315f6bf8d734bcff637688fd89e9e938c0	2026-09-14	refactor: leave native Codex authentication to official backend
+255cdb51aea7eab3aafc60bac6fc22e643b31eb1	2026-09-14	fix(host-runtime): keep later harness plugins available at startup
+0561d2b244866d8ff5c8681dcf1b7ffb8f849420	2026-09-14	fix: allow account deletion during native requests
+3292c188183cc1b1800f989f106b69cced29e90a	2026-09-14	refactor: derive current Codex account from native credentials
+9cad8a1b6c30e9bf87601b9f12ab43f02d09088f	2026-09-14	fix: accept parameterless native account logout
+7124b77b1574a6fe16019ad710758e8fbba66d9b	2026-09-14	chore: prepare v0.8.1
+87b7631830ae9714622504aa8e1665a9a2b81e3d	2026-09-14	fix: decouple native account readiness from quota queries
+89e9c16954953675ec74a9c83fac16586b2bc7c5	2026-09-14	fix: allow clean startup after supervisor receipt loss
+b45305b53c39cffeb7a45771f8f77e6ad474fe72	2026-09-14	fix(release): wait for matching CI before publishing
+22882bdb9724b5bc5e62694b167bb9d7e3791f7a	2026-09-14	chore: prepare v0.8.0
+73fc289a54af3dd4f9727e767b8f26611b24625a	2026-09-14	test: remove obsolete quota layout assertions
+13aaae01a16187b8b7e09ab5de4aef27d5974d75	2026-09-13	feat: refine harness account quota refresh and ordering
+00ccd60da865c60e4211edf9955241e8553844f4	2026-09-13	feat: render harness account quotas progressively
+fb05d84d2a48f6812f595c29ef2d651b33b5e4d7	2026-09-13	feat: refine account quota layout
+38903beed4b8f6c74d4ad6c54f4716257d9bf795	2026-09-13	fix(desktop): include Hermes in Renderer contract validation
+d6a296fb2abc4065067985c1c8c004f1edab9081	2026-09-13	fix(renderer): retain required approval and steering dependencies
+5de3972ea9ded8bb2fd3179be7af8c4898a30e33	2026-09-13	chore(qoder): remove unrelated changes from upstream PR
+8e10d75c7beb45f901e4c4a310f2b3e0fae510dc	2026-09-13	docs: refine harness badges
+bd5828cdb8f5ce6ee539138b4e9aa6b07e3a8ac5	2026-09-13	chore(qoder): trim docs and add capability summary
+a7abb44748a8a887be6b16880e867a08cbc0cc10	2026-09-13	fix(qoder): project native contextCompaction item lifecycle for /compact and compact_boundary
+54b82c9bbc611bc7743dbf09b97a16f8b512f242	2026-09-13	fix(host-runtime): increase timeout budget in plugin loader test for windows ci
+2fe9d9d92bc64e6d0f54de700b3c12ec3e41517c	2026-09-13	fix(qoder): harden slash command sanitization and dynamic message error handling
+1e111c7fdb330bb8a1d7a441fe154a199ba87729	2026-09-13	fix(host-runtime): increase plugin load timeout for windows ci
+ff4b85d2273241f012e2b88c32633adde0085483	2026-09-13	fix(qoder): dynamically map sdk commands and restrict headless execution to compact
+b67212009191635a6d04a7fdd8354a5ee20823e8	2026-09-13	feat(qoder): add native slash command catalog and execution support
+fff9fd055b751ffbad54fbd8410965c43ffd274e	2026-09-13	fix(renderer): refresh request bridge for message editing
+6da48bfaf99602a1fd99d58c3fee0b24294d4b4c	2026-09-12	fix(qoder): enrich usage extraction from sdk context and usage info
+448040a9ebfcaacf89a42429c248e717c9ed03b8	2026-09-12	fix(qoder): omit sessionId in QoderOptions when resuming existing session
+3668e648ba976756e68f41f43853f6eb5a2b519e	2026-09-12	fix(protocol-core): emit raw file content for added and deleted files in item change to prevent extra git diff header lines
+c9739c04e9bdaeed224b22ef0489181d93a55bce	2026-09-12	feat(qoder): enable model reasoning effort / thinking option selection
+f2f0b6e814fc08ea1825cf59be08f5e2a6b93d9b	2026-09-12	feat(qoder): implement rollbackLastTurn to support editing previous messages
+74179be7735dedcd8e52c119dda620ed4a53906e	2026-09-12	fix(qoder): track context window, total tokens and informative usage metrics
+f506c9fd4994f33af72174a4705b64881583a3e4	2026-09-12	fix(protocol-core): coalesce multiple file changes for the same path in turn diff
+e6ebdce8fcc060dffed09266d068f26c2abad7f1	2026-09-12	fix(protocol-core): normalize file paths and format git diff headers for file mutating tools
+b535faae8c4a62d5ff91ee6fa72e3742ff717aaa	2026-09-12	feat(qoder): support thread fork and history snapshot
+e29a479dbd75a5290a61adf5694b857076d8ccbf	2026-09-12	fix(qoder): echo toolUseID in permissions and tag pre-tool text as commentary
+94077a8d731a8c43edbfd229887da6f64fffda2f	2026-09-12	fix(qoder): provide nativeTurnRef on turn completion for thread persistence
+fae0e843edf81b709d5bdd87db2202b35e6f1de5	2026-09-12	fix(renderer): distinguish Qoder model group headings
+60dfeed9552007ccf0d2826fbc3258421d3cffd9	2026-09-12	fix(qoder): preserve native model groups and BYOK
+2664d60adf6a50ea43bda970d32b29f63f3f72cc	2026-09-12	fix(qoder): restore authenticated model discovery
+f6462561001e3214db0367fcb1b0c7db0c5de42f	2026-09-12	fix(desktop): include Qoder in production renderer agents
+8ed186a8d23378544707b6e27c3f737112917d57	2026-09-12	fix(renderer): wait for request route before harness probing
+cbe545da4dc3102f01ac953e154468604d82e865	2026-09-11	fix(qoder): use official Qoder icon asset
+5c385aabb044b4b2ff314974d4d1c6537a6dc413	2026-09-11	fix(qoder): update host runtime plugin test, return empty catalog on error, and ensure query close
+ead8bd60d34caa4b20fd48dd9aa1fd1c3d11a2df	2026-09-11	fix(qoder): provide permission mode catalog, dynamic models, cancel cleanup, and fix lint
+74eca4def7a4e4261156340b9e14396ad2c5f6d8	2026-09-11	fix(qoder): update sdk dependency, forward session options, and fix event projection
+a9f216642e5667b91fd2fb4c838528b86f752351	2026-09-11	feat(adapters): add Qoder harness adapter and Desktop integration
+5b7c37278119888ae63aa095f6795c5880827847	2026-09-13	Merge pull request #262 from BytePioneer-AI/feat/codex-native-account-switching
+ee5ee1f41d120ce9466dd4b484a12a1ade2e1514	2026-09-13	fix(launcher): import Command for Linux tests
+1a5b2d68ede2a7667b23cdb1468d031935a25305	2026-09-13	docs: synchronize localized README cleanup
+144ba13f6efa1cad2b3da93d70527ed98dac3194	2026-09-13	fix(renderer): clear restored Hermes model and correct picker test callback
+66199dc0a1285f2abec567f3cba012eee3aed628	2026-09-13	Merge remote-tracking branch 'origin/main' into feat/codex-native-account-switching
+8db38d0171006170dcfeff3a3d86de896a9666dd	2026-09-13	style(test): format native Desktop login assertion
+1a6b87addddbb962e5f51d350af8dc448c5b3671	2026-09-13	merge: integrate main into native account switching
+f4f87714fefe2c527b381445b73c20410e313e7d	2026-09-13	refactor(accounts): remove idle tracking and simplify account controls
+7ef2bcd5ed41ad4c1a90edb22c2d4e1ee3f0593d	2026-09-13	test: clean up Hermes test imports
+54faf4338a854437058ae1ca3901134fa5bfecfd	2026-09-13	docs: limit Hermes mention to badges and matrix
+1ef08d8bf1f2fb524362e9cf0eb6f564225c8872	2026-09-13	docs: add Hermes to feature matrix
+f7d9107c5585194d8f50a1b6f2d9c6fb063b0afe	2026-09-13	fix(renderer): improve Hermes icon contrast
+710ec03824bad786455c555b9987849b071761d1	2026-09-13	docs: add contrast behind Hermes badge mark
+d6e9c4bc659a34c2510680e2f3cd83d685f29d53	2026-09-13	docs: use muted navy for Hermes badge
+897a57c63e625eeeaafe2784af0ef79f0523b708	2026-09-13	docs: restore official Hermes avatar colors
+c1a178ccd0a061328c5f55933a363e081bc97034	2026-09-13	docs: restore previous Hermes badge icon
+3f2d233f7a5f66288d7c4737ab544f5346bf1031	2026-09-13	docs: darken Hermes badge blue
+bc569e224af9bf366a4fb85b3ebb8635e2f9aad9	2026-09-13	docs: use official Hermes girl vector
+658d4a519dfcb01f50becf1ac934b481655422d9	2026-09-13	docs: improve Hermes badge contrast
+5266362b82085cceed98b7b96c541d62a0a534d8	2026-09-13	docs: use Hermes blue for badge
+abe02a6e8a28677c39cc966afdf102c76ebde2ad	2026-09-13	docs: use official Hermes avatar in badge
+35b08bf2b46321a29868c0c3c759c5f58ee20125	2026-09-13	docs: add Hermes badge to README
+23d7cd57ce58ad03f05b6fc61e5a1b21325dd9ca	2026-09-13	fix(renderer): retain Hermes draft model selection
+8581656369d532eeebf6c1595904afb21d44472c	2026-09-13	refactor(accounts): unify backend-stop switching and trim obsolete paths
+c1ced05847b532ea73bc4affa6228cf1f7f90f5b	2026-09-13	fix(hermes): resolve Windows inventory runtime
+d7a4791a391cc1782671775fe8324754aa11cf42	2026-09-13	merge: integrate Hermes adapter into main
+34ff17f376e51dfc45c5e0ed499fb6876bdd78dc	2026-09-13	fix: restore main external turn ordering
+6dccbbb9cd40c309557bd545c738174bf8702c72	2026-09-13	test: remove Hermes process fixtures
+5e97efe44021e45b70e39fdbc4ed081dd8998c8a	2026-09-13	refactor: store native account credentials without encryption
+b1552ce8878f8f63faa25095c656e89986409d63	2026-09-13	fix: allow Codex startup alongside external backends
+e87ce09888e84bed293f1c1c3c61aaea641c0362	2026-09-12	fix(desktop-control): route remote drafts through host registry
+8bb27d6ab79ddbba4372aa2d6480553b7f4e3012	2026-09-12	fix(macos): resolve CLI for sanitized node_repl sandbox launches
+8245ca923f1b13e431a3c265ecfe3f0a0ecf3c3f	2026-09-12	fix(accounts): drain quota reads before switching
+2a9517d634b06ab5dd4258ff8a1cbf8e3dc88f0a	2026-09-12	fix(accounts): restore the selected thread after switching
+896bcbb6ef161b0025a85283ed042e3fb30883fa	2026-09-12	merge origin/main into codex/verify-critical-open-issues
+c55fd9dcac168e1c2afd32bfd20cd686796fcb12	2026-09-12	Merge pull request #275 from BytePioneer-AI/chore/ci-remove-max-parallel
+bf5add2c750ab8332d5743a4bd9c003c5f242567	2026-09-12	fix(accounts): adopt legacy credentials and retain switch replies
+91458d2eeb384d1e7de28110ae43b176e26f0f1c	2026-09-12	ci: run all platform checks in parallel
+398eb20398abffa05e911800c51167dbf193142f	2026-09-12	Merge pull request #274 from YanYunCY/codex/fix-app-server-host-test-race
+f2e0153f4aa11a6cdb8d309911020425576c6680	2026-09-12	test: tolerate Windows CI scheduling variance
+bf9c32f5143010e77447774b5a0023910159615b	2026-09-12	test: tolerate Windows CI scheduling variance
+5d82c0bf42b22114ca9af0c5908d108b5ccc8950	2026-09-12	test(host-runtime): await fixture startup before account binding
+6556012436a88b84d2227eeeab0e93ccd05210dc	2026-09-12	fix(remote-control): narrow POSIX bridge fallback matching
+857998512f6f38c8b73d16fadf3ccdeb67be24ac	2026-09-12	fix(remote-control): narrow POSIX bridge fallback matching
+095c822584aeadccaaaf6be04d7ba9782600bd47	2026-09-12	Merge pull request #143 from YanYunCY/fix/codex-shell-env-guidance
+8f5d7bafd1b6cd514a19b1b2964628f5000e79a6	2026-09-12	Merge branch 'main' into fix/codex-shell-env-guidance
+5ccc2d2ad851979a955af9293c826d04b66c2e55	2026-09-12	Merge pull request #266 from Cresscendoll/fix/opencode-writable-cwd
+8ff0ec74a3f7e332eb1c0e67ea46ac238525c8b7	2026-09-12	fix(remote-control): recover native threads through POSIX relays
+d19f37e0ad9e4f4935040d02869e5e151cdd285c	2026-09-12	fix(remote-control): recover native threads through POSIX relays
+895240ecc5d9c5017406ab596228601b1a8adcb4	2026-09-12	test(opencode): satisfy exact optional property types
+2f2ab4ea37fdbc1ae2b94923973d4f80b1f9df4d	2026-09-12	fix(opencode): isolate managed server working directory
+0370dfb64b1430374f560eeb13fc87d8d4c2458a	2026-09-12	Merge pull request #267 from YanYunCY/codex/fix-claude-held-subagent-settlement
+1c925299dc5d80570100706582d17d0618183fa6	2026-09-12	fix(accounts): retain safe native startup for legacy homes
+e83412a48daa4049d7667616708a6fddb1591f81	2026-09-12	Merge branch 'main' into feat/codex-native-account-switching
+e6adb05095aff8aba5241230b07619c8b8aa8db4	2026-09-12	chore: prepare v0.7.1
+70df7beb0eb0ab0bd83ce57ccfba417d722825c9	2026-09-12	Merge pull request #270 from keyboardone/fix/renderer-request-manager-hook-wrapper
+c54e62bd1f23d6205755590669fc8ff4c38277df	2026-09-12	fix(renderer): 识别 Desktop 26.908 的 Request Manager 包装与 draft 身份
+2622e7fb868e3c4d552c5eff81ca2a67cf9cbe77	2026-09-12	fix: settle held Claude turns after background completion
+7a6fb671b54785683cb6dce14afc6bfb9db9d300	2026-09-12	fix(opencode): spawn managed server from a writable cwd
+a53d82e47c2c2d9f49d52027df1890a1cd1e9af3	2026-09-12	merge: sync main and retain single native catalog
+1a2b4533d55f00148339d4f112cf9ec115ef3002	2026-09-12	fix(accounts): preserve Desktop startup and native login lifecycle
+71900975ea1c06f9a2baeb804234d64793de4145	2026-09-11	merge: integrate main with native account switching
+ead8028d716c809b10128ff6a7559c949dde93ad	2026-09-11	feat(accounts): switch Codex accounts through native profiles
+c0b58467474ff32b210b74f639d8cb14d76de2be	2026-09-11	style: fix prettier formatting drift in hermes adapter
+f55752685ffecba7b80e652cf94a6815c41204a1	2026-09-10	fix(renderer): mount settings trigger before native header actions
+3cd01e5814991cb055cb7dac6bb89b88946adba0	2026-09-10	fix(host-runtime): keep a Subagent Thread active while its Subagent runs
+8ea1057d11178eb32e896bf9c3ed21e1a22b7b73	2026-09-10	Merge remote-tracking branch 'origin/main' into fix/codex-shell-env-guidance
+e7db71637a8a88c83d6d03eaedfda0675e604692	2026-09-09	fix(deepseek): deduplicate repeated file changes
+5a9f05d3707057b3d835fe079a819eb7b3854eae	2026-09-08	fix(hermes): unshard warm transports across working directories
+26fd6a1650df11a3d146949b92ae1cf662669b2f	2026-09-08	fix(hermes): project the post-selection label instead of the native id
+5abab819142f521d03f7caeb981998ddb6d3a758	2026-09-08	fix(hermes): unshard warm transports from Host Thread identity
+a85a7a48701c438a288ef02133883ef5fb67537c	2026-09-08	fix(hermes): harden replay and warm transport state
+cd8be4877411ff12f0c32c746c5ab8f0d7e0e4f6	2026-09-08	fix(hermes): preserve turn and probe state
+ac67743b39d80c8f426bf612329db79eafe7a58c	2026-09-08	Merge remote-tracking branch 'origin/main' into fix/hermes-lifecycle
+4d218d8a110906a608574f1e965564667878eec4	2026-09-08	fix(hermes): close remaining review gaps
+53c83ba1484324f8f3397fc3aee027918cd230e4	2026-09-08	fix(hermes): address lifecycle review findings
+ca62a0f756ffd1e87bc551759c099a5ed9f380a7	2026-09-08	docs: remove internal Hermes execution notes
+66bedaede2ae67e8351b12cd0edfdf9c8496d1c1	2026-09-08	fix(shim): 隔离计算机历史摘要进程
+4ab61568b77014451fedd52a8b9d6e7dd6afce38	2026-09-08	test: drop unused Playwright titlebar e2e
+313f99d0c72b23daf5609a62a1b3f514b06a142d	2026-09-08	fix: retain active Hermes turn when cancel fails
+ef44ea62a34b4e8db5249ae47fb04275b2a3e05d	2026-09-08	fix: type Hermes approval waiter identities
+6fc9fec45175ae631bd6e404c5a6a65be3fa23df	2026-09-08	fix: harden Hermes lifecycle integration
+045968395df039aabc62d5f4ffd3dd29fa3875e0	2026-09-08	fix: hide unavailable Hermes virtual models
+f7a248340f12ea8754ce54644a000570687f4604	2026-09-08	docs: record Hermes lifecycle boundaries
+eb81c5123a451904b9adba9027f34baac2222251	2026-09-08	feat: integrate Hermes renderer controls
+db138c5b06eb39312cd5890164c1f258623ad0f7	2026-09-08	feat: ship and prewarm Hermes adapter
+750eb9539b3ec4a77d08254275b71e06df3da05c	2026-09-08	fix: finalize external thread status before turn completion
+635cc9a6622e1b2c268b4746caeaafec73a0e77f	2026-09-08	fix: report Hermes model and startup errors accurately
+11cf678d1b7d2e5a000b331c62bdb186827fa719	2026-09-08	docs: plan Hermes lifecycle fixes
+2d1e47803df817d5a6f6a4fd1812c6bdfd3af0ac	2026-09-08	test: guard missing settings fixture bundle
+7cc560883ced798114954bfb19c756985a563d3b	2026-09-08	fix: keep settings dialog below Windows titlebar
+3a6cdc7686d5adddeec1f818294dee17b4b239d0	2026-09-03	fix: diagnose filtered Host runtime environment

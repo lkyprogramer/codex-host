@@ -13,6 +13,11 @@ import {
   type OmpTurnEvent,
 } from "../src/omp-rpc-session.js";
 
+/** Fakes own no OS process, so their tree must never signal a real pid. */
+function owned(child: unknown): never {
+  return { child, tree: { close: async () => undefined }, anchored: false } as never;
+}
+
 class FakeOmpProcess extends EventEmitter {
   readonly stdin = new PassThrough();
   readonly stdout = new PassThrough();
@@ -21,6 +26,9 @@ class FakeOmpProcess extends EventEmitter {
   exitCode: number | null = null;
   signalCode: NodeJS.Signals | null = null;
   readonly commands: Record<string, unknown>[] = [];
+  /** Commands the native side receives but never answers. */
+  readonly silent = new Set<string>();
+  promptFrames: Record<string, unknown>[] = [];
   #buffer = "";
   #sessionId = "omp-session";
 
@@ -57,6 +65,10 @@ class FakeOmpProcess extends EventEmitter {
     this.stdout.write(`${JSON.stringify(value)}\n`);
   }
 
+  emitFrame(value: Record<string, unknown>): void {
+    this.#output(value);
+  }
+
   #response(command: Record<string, unknown>, data: Record<string, unknown> = {}): void {
     this.#output({ id: command.id, type: "response", command: command.type, success: true, data });
   }
@@ -79,6 +91,7 @@ class FakeOmpProcess extends EventEmitter {
 
   #handle(command: Record<string, unknown>): void {
     this.commands.push(command);
+    if (typeof command.type === "string" && this.silent.has(command.type)) return;
     if (command.type === "extension_ui_response") {
       if (this.terminalMessageMode === "approval") {
         const message = {
@@ -152,6 +165,7 @@ class FakeOmpProcess extends EventEmitter {
     if (command.type === "prompt") {
       this.#response(command);
       queueMicrotask(() => {
+        for (const frame of this.promptFrames) this.#output(frame);
         if (this.terminalMessageMode === "approval") {
           this.#output({
             type: "extension_ui_request",
@@ -290,9 +304,33 @@ describe("OMP RPC session", () => {
     ).toMatchObject({ arguments: ["--mode", "rpc", "--fork", "/tmp/omp.jsonl"] });
   });
 
+  it("retires the connection when a Model write never answers", async () => {
+    const process = new FakeOmpProcess();
+    process.silent.add("set_model");
+    const onFault = vi.fn();
+    const session = new OmpRpcSession(
+      { cwd: "/synthetic", commandTimeoutMs: 50, onFault },
+      { spawn: () => owned(process) },
+    );
+    try {
+      await session.start();
+      await expect(session.selectModel({ provider: "synthetic", id: "omp-model" })).rejects.toThrow(
+        "'set_model' command timed out",
+      );
+      expect(onFault).toHaveBeenCalledWith(
+        expect.objectContaining({ message: "Omp RPC 'set_model' command timed out" }),
+      );
+      await expect(session.runTurn("after", () => undefined)).rejects.toThrow();
+    } finally {
+      await session.close();
+    }
+  });
+
   it("starts through ready/negotiation and settles a streamed text turn on agent_end", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -304,9 +342,74 @@ describe("OMP RPC session", () => {
     await session.close();
   });
 
+  it("ignores late and duplicate untracked Tool updates while a later Turn remains valid", async () => {
+    const process = new FakeOmpProcess();
+    const onFault = vi.fn();
+    const session = new OmpRpcSession(
+      { cwd: "/synthetic", commandTimeoutMs: 2_000, onFault },
+      { spawn: () => owned(process) },
+    );
+    await session.start();
+    await session.runTurn("first", () => undefined);
+
+    process.emitFrame({ type: "tool_execution_update", toolCallId: "old-tool" });
+    process.emitFrame({ type: "tool_execution_end", toolCallId: "old-tool" });
+    process.promptFrames = [
+      { type: "tool_execution_start", toolCallId: "new-tool", toolName: "read", args: {} },
+      { type: "tool_execution_update", toolCallId: "old-tool" },
+      { type: "tool_execution_end", toolCallId: "old-tool" },
+      { type: "tool_execution_update", toolCallId: "new-tool", partialResult: "reading" },
+      { type: "tool_execution_end", toolCallId: "new-tool", toolName: "read", result: "done" },
+      { type: "tool_execution_end", toolCallId: "new-tool", toolName: "read", result: "done" },
+    ];
+    const events: OmpTurnEvent[] = [];
+    await expect(session.runTurn("second", (event) => events.push(event))).resolves.toMatchObject({
+      text: "PONG",
+      cancelled: false,
+    });
+    expect(events.filter((event) => event.type.startsWith("tool."))).toEqual([
+      { type: "tool.started", callId: "new-tool", toolName: "read", arguments: {} },
+      { type: "tool.updated", callId: "new-tool", output: "reading" },
+      {
+        type: "tool.completed",
+        callId: "new-tool",
+        toolName: "read",
+        result: "done",
+        isError: false,
+      },
+    ]);
+    expect(onFault).not.toHaveBeenCalled();
+    await session.close();
+  });
+
+  it.each([
+    [{ type: "tool_execution_update", toolCallId: "active-tool" }, "invalid Tool update"],
+    [
+      { type: "tool_execution_end", toolCallId: "active-tool", toolName: "wrong", result: "done" },
+      "invalid Tool end",
+    ],
+  ])("faults on malformed events for a tracked Tool", async (frame, expected) => {
+    const process = new FakeOmpProcess();
+    process.promptFrames = [
+      { type: "tool_execution_start", toolCallId: "active-tool", toolName: "read", args: {} },
+      frame,
+    ];
+    const onFault = vi.fn();
+    const session = new OmpRpcSession(
+      { cwd: "/synthetic", commandTimeoutMs: 2_000, onFault },
+      { spawn: () => owned(process) },
+    );
+    await session.start();
+    await expect(session.runTurn("bad tool", () => undefined)).rejects.toThrow(expected);
+    expect(onFault).toHaveBeenCalledWith(expect.objectContaining({ kind: "protocolError" }));
+    await session.close();
+  });
+
   it("requests lossless Subagent forwarding when the native RPC supports it", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
 
     await session.start();
@@ -319,7 +422,9 @@ describe("OMP RPC session", () => {
 
   it("keeps Subagent forwarding disabled when an older native RPC rejects the subscription", async () => {
     const process = new FakeOmpProcess("complete", undefined, "none", false);
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
 
     await session.start();
@@ -330,7 +435,9 @@ describe("OMP RPC session", () => {
 
   it("does not replay Assistant messages from agent_end after message_end", async () => {
     const process = new FakeOmpProcess("complete", undefined, "replay");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -350,7 +457,9 @@ describe("OMP RPC session", () => {
 
   it("recovers the final Assistant message from agent_end when message_end is absent", async () => {
     const process = new FakeOmpProcess("complete", undefined, "fallback");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -370,7 +479,9 @@ describe("OMP RPC session", () => {
 
   it("bridges blocking OMP RPC UI requests and sends the selected response", async () => {
     const process = new FakeOmpProcess("complete", undefined, "approval");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -403,7 +514,9 @@ describe("OMP RPC session", () => {
 
   it("projects Subagent lifecycle frames from the RPC stream", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     const events: OmpTurnEvent[] = [];
@@ -434,7 +547,9 @@ describe("OMP RPC session", () => {
 
   it("correlates manual Compact RPC events without an active Prompt Turn", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     const events: OmpTurnEvent[] = [];
     await session.start();
@@ -451,7 +566,9 @@ describe("OMP RPC session", () => {
 
   it("fails a manual Compact when native compaction never reaches a terminal event", async () => {
     const process = new FakeOmpProcess("stalled");
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const onFault = vi.fn();
     const session = new OmpRpcSession(
       {
@@ -508,7 +625,9 @@ describe("OMP RPC session", () => {
         .join("\n") + "\n",
     );
     const process = new FakeOmpProcess("complete", sessionFile);
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession(
       { cwd: directory, sessionFile, commandTimeoutMs: 2_000 },
       adapter,
@@ -535,7 +654,9 @@ describe("OMP RPC session", () => {
 
   it("branches to a distinct OMP session through the RPC branch command", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     await expect(session.fork("entry-1")).resolves.toMatchObject({
@@ -546,7 +667,9 @@ describe("OMP RPC session", () => {
 
   it("reads a Subagent transcript through OMP RPC", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const session = new OmpRpcSession({ cwd: "/synthetic", commandTimeoutMs: 2_000 }, adapter);
     await session.start();
     await expect(
@@ -561,7 +684,9 @@ describe("OMP RPC session", () => {
 
   it("forwards background Subagent frames after the parent Turn is idle", async () => {
     const process = new FakeOmpProcess();
-    const adapter: OmpRpcProcessAdapter = { spawn: () => process as never };
+    const adapter: OmpRpcProcessAdapter = {
+      spawn: () => owned(process),
+    };
     const events: OmpTurnEvent[] = [];
     const session = new OmpRpcSession(
       {

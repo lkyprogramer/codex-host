@@ -1,8 +1,13 @@
 import type { CdpClient } from "./cdp-client.js";
+import { createDraftPrewarmPolicyBridge } from "./renderer-draft-prewarm-runtime.js";
+import { committedReactAncestors } from "./renderer-react-ownership.js";
 import {
-  installDraftPrewarmPolicyBridge,
-  installDraftPrewarmPolicyInRenderer,
-} from "./renderer-draft-prewarm-runtime.js";
+  discoverRendererHosts,
+  requestManagerFromHookState,
+  resolveRendererHostManager,
+} from "./renderer-host-discovery.js";
+import { installRendererHostRouting } from "./renderer-host-routing.js";
+export { requestManagerFromHookState } from "./renderer-host-discovery.js";
 
 interface InspectorEvaluator {
   evaluate<T>(expression: string): Promise<T>;
@@ -13,147 +18,30 @@ export interface RendererDraftPrewarmPolicyStatus {
   reason: "owned-request-bridge";
 }
 
-export interface RendererRequestManagerCandidate<Manager = object, RequestClient = object> {
-  manager: Manager;
-  requestClient: RequestClient;
-  hostId: unknown;
-  prewarmedThreadManager: unknown;
-}
-
-export function selectRendererRequestManager<Manager, RequestClient>(
-  candidates: readonly RendererRequestManagerCandidate<Manager, RequestClient>[],
-  activeHostIds: readonly unknown[],
-): RendererRequestManagerCandidate<Manager, RequestClient> | null {
-  const unique = new Map<Manager, RendererRequestManagerCandidate<Manager, RequestClient>>();
-  for (const candidate of candidates) unique.set(candidate.manager, candidate);
-
-  const hosts = new Set(
-    activeHostIds.filter((value): value is string => typeof value === "string" && value.length > 0),
-  );
-  if (hosts.size > 1) return null;
-
-  const activeHostId = hosts.values().next().value as string | undefined;
-  const eligible = [...unique.values()].filter(
-    (candidate) => activeHostId === undefined || candidate.hostId === activeHostId,
-  );
-  return eligible.length === 1 ? (eligible[0] ?? null) : null;
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export function requestManagerFromHookState(value: unknown): object | null {
-  const asRecord = (candidate: unknown): candidate is Record<string, unknown> =>
-    typeof candidate === "object" && candidate !== null && !Array.isArray(candidate);
-  const isManager = (candidate: unknown): candidate is Record<string, unknown> => {
-    if (!asRecord(candidate) || !asRecord(candidate.requestClient)) return false;
-    const client = candidate.requestClient;
-    const prewarmed = asRecord(candidate.prewarmedThreadManager)
-      ? candidate.prewarmedThreadManager
-      : null;
-    return (
-      typeof client.prewarmThreadStart === "function" &&
-      typeof client.sendRequest === "function" &&
-      typeof client.enqueueRequest === "function" &&
-      typeof prewarmed?.discardAllPrewarmedThreads === "function" &&
-      typeof candidate.sendRequest === "function"
-    );
-  };
-  if (isManager(value)) return value;
-  return asRecord(value) && isManager(value.manager) ? value.manager : null;
-}
-
-const FIND_REQUEST_MANAGER_EXPRESSION = `(() => {
-  const editors = [...document.querySelectorAll(
-    '[data-codex-composer], [contenteditable="true"][role="textbox"]',
-  )];
-  if (editors.length !== 1) {
-    return { candidateCount: 0, hostId: null, sendRequest: null };
-  }
-  let element = editors[0];
-  let fiber = null;
-  while (element != null && fiber == null) {
-    const key = Object.getOwnPropertyNames(element).find((name) =>
-      name.startsWith('__reactFiber$'),
-    );
-    if (key != null) fiber = element[key];
-    element = element.parentElement;
-  }
-  const managers = new Set();
-  const activeHostIds = new Set();
-  for (let depth = 0; fiber != null && depth < 200; depth += 1, fiber = fiber.return) {
-    const props = fiber.memoizedProps;
-    if (props != null && typeof props === 'object') {
-      for (const name of ['executionTargetHostId', 'permissionsHostId']) {
-        const value = props[name];
-        if (typeof value === 'string' && value.length > 0) activeHostIds.add(value);
-      }
-    }
-    let hook = fiber.memoizedState;
-    for (let index = 0; hook != null && index < 120; index += 1, hook = hook.next) {
-      const manager = (${requestManagerFromHookState.toString()})(hook.memoizedState);
-      if (manager) managers.add(manager);
-    }
-  }
-  const candidates = [...managers].map((manager) => {
-    const requestClient =
-      typeof manager.requestClient?.sendRequest === 'function' &&
-      typeof manager.requestClient?.prewarmThreadStart === 'function' &&
-      typeof manager.requestClient?.enqueueRequest === 'function'
-        ? manager.requestClient
-        : manager;
-    return {
-      manager,
-      requestClient,
-      hostId: manager?.getHostId?.() ?? requestClient?.hostId ?? null,
-      prewarmedThreadManager: manager?.prewarmedThreadManager ?? null,
-    };
-  });
-  const selected = (${selectRendererRequestManager.toString()})(candidates, [...activeHostIds]);
-  return {
-    candidateCount: selected == null ? candidates.length : 1,
-    hostId: selected?.hostId ?? null,
-    manager: selected?.manager ?? null,
-    requestClient: selected?.requestClient ?? null,
-    prewarmedThreadManager: selected?.prewarmedThreadManager ?? null,
-  };
-})()`;
-
-const INSTALL_RENDERER_POLICY_FUNCTION = `function(requestClient, hostId, prewarmedThreadManager) {
-  return (${installDraftPrewarmPolicyBridge.toString()})(
-    this,
-    requestClient,
-    hostId,
-    window,
-    prewarmedThreadManager,
-  );
-}`;
 const REQUEST_MANAGER_WAIT_TIMEOUT_MS = 60_000;
 const REQUEST_MANAGER_POLL_INTERVAL_MS = 25;
 
 function directRendererInstaller(): string {
-  return `(async () => {
-    const selected = ${FIND_REQUEST_MANAGER_EXPRESSION};
-    if (
-      selected.candidateCount !== 1 ||
-      typeof selected.hostId !== 'string' ||
-      selected.hostId.length === 0 ||
-      selected.manager == null ||
-      selected.requestClient == null
-    ) {
+  return `(() => {
+    const committedReactAncestors = ${committedReactAncestors.toString()};
+    const requestManagerFromHookState = ${requestManagerFromHookState.toString()};
+    const discoverRendererHosts = ${discoverRendererHosts.toString()};
+    const resolveRendererHostManager = ${resolveRendererHostManager.toString()};
+    const createDraftPrewarmPolicyBridge = ${createDraftPrewarmPolicyBridge.toString()};
+    const discover = (root) => discoverRendererHosts(root, committedReactAncestors, requestManagerFromHookState);
+    const discovery = discover(document);
+    if (!window.__codexhostHostRoutingV1 && discovery.managers.length === 0 && discovery.registries.length === 0) {
       throw new Error('Renderer request manager is ambiguous');
     }
-    if (selected.prewarmedThreadManager == null) {
-      throw new Error('Renderer prewarmed Thread manager is unavailable');
-    }
-    return (${installDraftPrewarmPolicyBridge.toString()})(
-      selected.manager,
-      selected.requestClient,
-      selected.hostId,
-      window,
-      selected.prewarmedThreadManager,
-    );
+    const routing = (${installRendererHostRouting.toString()})(document, window, discover,
+      (state, hostId) => resolveRendererHostManager(state, hostId, requestManagerFromHookState),
+      createDraftPrewarmPolicyBridge, committedReactAncestors);
+    routing.forComposer();
+    return { state: 'ready', reason: 'owned-request-bridge' };
   })()`;
 }
 
@@ -164,11 +52,10 @@ function mainProcessInstaller(rendererWebContentsId: number): string {
       ? mainModule.require('electron')
       : process.getBuiltinModule('module').createRequire(process.execPath)('electron');
     const contents = electron.webContents.fromId(${rendererWebContentsId});
-    return (${installDraftPrewarmPolicyInRenderer.toString()})(
-      contents,
-      ${JSON.stringify(FIND_REQUEST_MANAGER_EXPRESSION)},
-      ${JSON.stringify(INSTALL_RENDERER_POLICY_FUNCTION)}
-    );
+    if (!contents || contents.isDestroyed() || contents.getType() !== 'window') {
+      throw new Error('Owned Renderer is unavailable for draft prewarm policy');
+    }
+    return contents.executeJavaScript(${JSON.stringify(directRendererInstaller())});
   }`;
 }
 

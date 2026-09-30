@@ -21,6 +21,7 @@ use crate::PlatformError;
 pub const NATIVE_HARNESS_BROKER_LABEL: &str = "ai.bytepioneer.codexhost.native-harness-broker";
 const NATIVE_HARNESS_BROKER_ARGUMENT: &str = "--codexhost-harness-broker";
 const NATIVE_HARNESS_BROKER_THROTTLE_SECONDS: u32 = 10;
+const PROCESS_ANCHOR_PATH_ENV: &str = "CODEXHOST_PROCESS_ANCHOR_PATH";
 
 #[derive(Debug, Clone, Copy)]
 pub struct NativeHarnessBrokerPaths<'a> {
@@ -28,6 +29,9 @@ pub struct NativeHarnessBrokerPaths<'a> {
     pub home: &'a Path,
     pub node: &'a Path,
     pub host_runtime: &'a Path,
+    /// The native process anchor the broker's Harness processes are spawned
+    /// through. Without it the broker falls back to observing its children.
+    pub process_anchor: Option<&'a Path>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -149,7 +153,10 @@ pub fn plan_native_harness_broker_launch_agent(
     plan_native_harness_broker_launch_agent_with_environment(paths, console_uid, &[])
 }
 
-fn launch_agent_environment_xml(environment: &[(String, String)]) -> Result<String, PlatformError> {
+fn launch_agent_environment_xml(
+    environment: &[(String, String)],
+    process_anchor: Option<&str>,
+) -> Result<String, PlatformError> {
     const ALLOWED: [&str; 9] = [
         "HTTP_PROXY",
         "http_proxy",
@@ -161,13 +168,19 @@ fn launch_agent_environment_xml(environment: &[(String, String)]) -> Result<Stri
         "no_proxy",
         "NODE_USE_ENV_PROXY",
     ];
-    if environment.is_empty() {
+    if environment.is_empty() && process_anchor.is_none() {
         return Ok(String::new());
     }
     let mut values = environment.to_vec();
     values.sort_by(|left, right| left.0.cmp(&right.0));
     let mut prior: Option<String> = None;
     let mut xml = String::from("<key>EnvironmentVariables</key>\n<dict>\n");
+    if let Some(anchor) = process_anchor {
+        xml.push_str(&format!(
+            "<key>{PROCESS_ANCHOR_PATH_ENV}</key>\n<string>{}</string>\n",
+            xml_text(anchor)
+        ));
+    }
     for (name, value) in values {
         if !ALLOWED.contains(&name.as_str()) {
             return Err(PlatformError::Invalid(format!(
@@ -240,7 +253,11 @@ pub fn plan_native_harness_broker_launch_agent_with_environment(
     } else {
         format!("    <string>{}</string>\n", xml_text(paths.harness_id))
     };
-    let environment_xml = launch_agent_environment_xml(environment)?;
+    let process_anchor = paths
+        .process_anchor
+        .map(|anchor| required_absolute_path(anchor, "process anchor"))
+        .transpose()?;
+    let environment_xml = launch_agent_environment_xml(environment, process_anchor.as_deref())?;
     let plist_xml = format!(
         "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n\
 <!DOCTYPE plist PUBLIC \"-//Apple//DTD PLIST 1.0//EN\" \"https://www.apple.com/DTDs/PropertyList-1.0.dtd\">\n\
@@ -958,6 +975,7 @@ mod tests {
                     home: Path::new("/Users/test"),
                     node: Path::new("/runtime/node"),
                     host_runtime: Path::new("/app/host-runtime.mjs"),
+                    process_anchor: None,
                 },
                 501,
             )
@@ -996,6 +1014,7 @@ mod tests {
                 host_runtime: Path::new(
                     "/Applications/codexhost.app/Contents/Resources/app/host-runtime.mjs",
                 ),
+                process_anchor: None,
             },
             501,
         )
@@ -1067,6 +1086,7 @@ mod tests {
             home: Path::new("/Users/moka"),
             node: Path::new("/opt/codexhost/node"),
             host_runtime: Path::new("/opt/codexhost/host-runtime.mjs"),
+            process_anchor: None,
         };
         let plan = plan_native_harness_broker_launch_agent_with_environment(
             paths,
@@ -1086,6 +1106,38 @@ mod tests {
                 paths,
                 501,
                 &[("CLAUDE_TOKEN".into(), "secret".into())],
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn launch_agent_names_the_process_anchor_for_broker_spawned_harnesses() {
+        let plan = plan_native_harness_broker_launch_agent(
+            NativeHarnessBrokerPaths {
+                harness_id: "claude-code",
+                home: Path::new("/Users/moka"),
+                node: Path::new("/opt/codexhost/node"),
+                host_runtime: Path::new("/opt/codexhost/host-runtime.mjs"),
+                process_anchor: Some(Path::new("/opt/codexhost/libexec/codexhost-anchor")),
+            },
+            501,
+        )
+        .expect("anchored plan");
+        assert!(plan.plist_xml.contains(
+            "<key>CODEXHOST_PROCESS_ANCHOR_PATH</key>\n<string>/opt/codexhost/libexec/codexhost-anchor</string>"
+        ));
+
+        assert!(
+            plan_native_harness_broker_launch_agent(
+                NativeHarnessBrokerPaths {
+                    harness_id: "claude-code",
+                    home: Path::new("/Users/moka"),
+                    node: Path::new("/opt/codexhost/node"),
+                    host_runtime: Path::new("/opt/codexhost/host-runtime.mjs"),
+                    process_anchor: Some(Path::new("libexec/codexhost-anchor")),
+                },
+                501,
             )
             .is_err()
         );
@@ -1148,6 +1200,7 @@ mod tests {
                 home: &home,
                 node: Path::new("/opt/codexhost/node"),
                 host_runtime: Path::new("/opt/codexhost/host-runtime.mjs"),
+                process_anchor: None,
             },
             uid,
         )
@@ -1233,6 +1286,7 @@ mod tests {
                 home: &home,
                 node: Path::new("/opt/codexhost/node"),
                 host_runtime: Path::new("/opt/codexhost/host-runtime.mjs"),
+                process_anchor: None,
             },
             uid,
         )

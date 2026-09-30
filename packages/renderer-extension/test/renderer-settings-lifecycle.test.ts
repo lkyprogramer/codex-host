@@ -153,4 +153,26 @@ describe("Renderer Settings lifecycle", () => {
     expect(events).toEqual(["opened", "closed"]);
     lifecycle.dispose();
   });
+
+  it("passes a fresh Resources client getter through to the Settings page", () => {
+    const first = { listLoadedSessions: vi.fn(async () => ({ sessions: [] })) };
+    const second = { listLoadedSessions: vi.fn(async () => ({ sessions: [] })) };
+    let current: typeof first | null = first;
+    const ownerWindow = {
+      navigator: { languages: ["en"] },
+      document: {},
+      setTimeout,
+      clearTimeout,
+    } as unknown as Window;
+    const lifecycle = installRendererSettingsLifecycle(ownerWindow, {
+      getResourcesClient: () => current,
+    });
+    const getClient = vi.mocked(createDefaultRendererSettingsPages).mock.calls.at(-1)?.[6];
+    expect(getClient?.()).toBe(first);
+    current = second;
+    expect(getClient?.()).toBe(second);
+    current = null;
+    expect(getClient?.()).toBeNull();
+    lifecycle.dispose();
+  });
 });

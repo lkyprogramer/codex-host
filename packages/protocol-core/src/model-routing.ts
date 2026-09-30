@@ -39,6 +39,7 @@ export const EXTERNAL_HARNESS_IDS = [
 export type ExternalHarnessId = string;
 export type RoutedHarnessId = "codex" | ExternalHarnessId;
 
+/** Default model ids earlier releases wrote; read back, never written. */
 const transportModelByHarness: Readonly<Record<string, string>> = {
   pi: PI_NATIVE_TRANSPORT_MODEL_ID,
   "claude-code": CLAUDE_CODE_NATIVE_TRANSPORT_MODEL_ID,
@@ -70,10 +71,7 @@ function isJsonObject(value: unknown): value is Record<string, unknown> {
 }
 
 export function transportModelIdForHarness(harnessId: ExternalHarnessId): string {
-  const legacy = Object.hasOwn(transportModelByHarness, harnessId)
-    ? transportModelByHarness[harnessId]
-    : undefined;
-  return legacy ?? encodeHarnessPluginRoute({ harnessId: harnessPluginIdSchema.parse(harnessId) });
+  return encodeHarnessPluginRoute({ harnessId: harnessPluginIdSchema.parse(harnessId) });
 }
 
 export interface ExternalConfigurationSelection {
@@ -496,60 +494,19 @@ export function decodeDeepSeekHarnessTransportSelection(
   };
 }
 
+/**
+ * The structured route every external Thread's selection is written as, the
+ * same carrier the Renderer sends. Records written earlier in a Harness's
+ * legacy format are still read by `decodeExternalTransportSelection`.
+ */
 export function encodeExternalTransportSelection(
   harnessId: ExternalHarnessId,
   selection: ExternalConfigurationSelection,
 ): string {
-  // Legacy Harness-specific carriers require a Model token. The generic route
-  // is the backwards-readable carrier for a real no-model Session that still
-  // exposes permission or thinking configuration.
-  if (!selection.model && (selection.permissionModeId || selection.thinkingOptionId)) {
-    return encodeHarnessPluginRoute({
-      harnessId: harnessPluginIdSchema.parse(harnessId),
-      ...selection,
-    });
-  }
-  switch (harnessId) {
-    case "pi":
-      return encodePiTransportModel(selection.model, selection.thinkingOptionId);
-    case "claude-code":
-      return encodeClaudeTransportModel(
-        selection.model,
-        selection.permissionModeId,
-        selection.thinkingOptionId,
-      );
-    case "deepseek-harness":
-      return encodeDeepSeekHarnessTransportModel(selection.model, selection.permissionModeId);
-    case "opencode":
-      return encodeOpenCodeTransportModel(
-        selection.model,
-        selection.permissionModeId,
-        selection.thinkingOptionId,
-      );
-    case "grok":
-      return encodeGrokTransportModel(
-        selection.model,
-        selection.permissionModeId,
-        selection.thinkingOptionId,
-      );
-    case "omp":
-      return encodeOmpTransportModel(
-        selection.model,
-        selection.thinkingOptionId,
-        selection.permissionModeId,
-      );
-    case "antigravity":
-      return encodeAntigravityTransportModel(
-        selection.model,
-        selection.permissionModeId,
-        selection.thinkingOptionId,
-      );
-    default:
-      return encodeHarnessPluginRoute({
-        harnessId: harnessPluginIdSchema.parse(harnessId),
-        ...selection,
-      });
-  }
+  return encodeHarnessPluginRoute({
+    harnessId: harnessPluginIdSchema.parse(harnessId),
+    ...selection,
+  });
 }
 
 export function decodeExternalTransportSelection(

@@ -1,5 +1,6 @@
 [workspace]
 members = [
+  "crates/anchor",
   "crates/launcher",
   "crates/platform",
   "crates/shim",
@@ -7,6 +8,7 @@ members = [
   "tools/gate-a/native",
 ]
 default-members = [
+  "crates/anchor",
   "crates/launcher",
   "crates/platform",
   "crates/shim",
@@ -15,7 +17,7 @@ default-members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.7.0-local.11"
+version = "0.10.1"
 edition = "2024"
 rust-version = "1.97.1"
 publish = false

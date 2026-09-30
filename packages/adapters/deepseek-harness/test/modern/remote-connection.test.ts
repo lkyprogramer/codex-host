@@ -435,7 +435,7 @@ describe("DeepSeek Harness Modern Web Remote connection", () => {
     expect(spawn).toHaveBeenCalledWith(
       "dsh",
       ["--fixture-prefix", "web", "--no-open", "--host", "127.0.0.1", "--port", "0"],
-      expect.objectContaining({ stdio: "pipe", windowsHide: true }),
+      expect.objectContaining({ closeTimeoutMs: expect.any(Number) }),
     );
     expect(requests[0]?.url).toBe(`http://127.0.0.1:4567/?token=${TOKEN}`);
     expect(requests[0]?.init).toMatchObject({ method: "GET", redirect: "manual" });
@@ -1079,14 +1079,14 @@ describe("DeepSeek Harness Modern Web Remote connection", () => {
     const [spawnedCommand, spawnedArguments, spawnedOptions] = spawn.mock.calls[0] as unknown as [
       string,
       string[],
-      { windowsVerbatimArguments: boolean; detached: boolean },
+      { windowsVerbatimArguments: boolean },
     ];
     expect(spawnedCommand).toBe(environment.ComSpec);
     expect(spawnedArguments.slice(0, 4)).toEqual(["/d", "/v:off", "/s", "/c"]);
     expect(spawnedArguments.at(-1)).toContain(
       String.raw`"C:\Program Files\100%% tools\dsh.cmd" "--offline" "--no-install" "@deepseek-ai/dsh" "web" "--no-open" "--host" "127.0.0.1" "--port" "0"`,
     );
-    expect(spawnedOptions).toMatchObject({ windowsVerbatimArguments: true, detached: false });
+    expect(spawnedOptions).toMatchObject({ windowsVerbatimArguments: true });
     await connection.close();
   });
 

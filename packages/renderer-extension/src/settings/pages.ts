@@ -29,6 +29,7 @@ import {
 import { createAppearanceSettingsPage } from "./appearance-page.js";
 import { createReleaseNotesElement } from "./release-notes.js";
 import { createAccountsSettingsPage, type RendererCodexAccountClient } from "./accounts-page.js";
+import { createResourcesSettingsPage, type RendererResourcesClient } from "./resources-page.js";
 
 export type {
   RendererConnectionAgentSnapshot,
@@ -42,7 +43,6 @@ import {
 } from "./update-request.js";
 
 export const CODEXHOST_GITHUB_REPOSITORY_URL = "https://github.com/BytePioneer-AI/codex-host";
-export const CODEXHOST_RELEASES_LATEST_URL = `${CODEXHOST_GITHUB_REPOSITORY_URL}/releases/latest`;
 export const CODEXHOST_NPM_MANUAL_UPDATE_COMMAND = "npm install -g @codexhost/cli@latest";
 
 interface RendererUserAgentData {
@@ -62,17 +62,10 @@ function isWindowsRenderer(window: Window | null | undefined): boolean {
   return /windows|win32|win64/iu.test(identity);
 }
 
-function windowsInstallerDownloadUrl(window: Window | null | undefined, version: string): string {
-  const navigator = window?.navigator;
-  const hints = navigator ? rendererUserAgentData(navigator) : undefined;
-  const identity = `${hints?.architecture ?? ""} ${hints?.platform ?? ""} ${navigator?.platform ?? ""} ${navigator?.userAgent ?? ""}`;
-  const architecture = /arm64|aarch64|\barm\b/iu.test(identity) ? "arm64" : "x64";
-  return `https://github.com/BytePioneer-AI/codex-host/releases/download/v${version}/codexhost-${version}-windows-${architecture}.exe`;
-}
-
 export const DEFAULT_RENDERER_SETTINGS_PAGE_IDS = [
   "connections",
   "accounts",
+  "resources",
   "session-import",
   "appearance",
   "updates",
@@ -299,13 +292,14 @@ function updatesPage(
       manualWindowsInstallerActions.className = "settings-update-actions";
       const manualWindowsInstallerLink = document.createElement("a");
       manualWindowsInstallerLink.className = "settings-update-link";
-      manualWindowsInstallerLink.href = CODEXHOST_RELEASES_LATEST_URL;
+      manualWindowsInstallerLink.hidden = true;
       manualWindowsInstallerLink.target = "_blank";
       manualWindowsInstallerLink.rel = "noopener noreferrer";
       manualWindowsInstallerLink.append(
-        messages.updateDownloadWindowsInstaller,
+        messages.updateDownloadFromReleases,
         createRendererSettingsIcon("external-link", 14),
       );
+      manualWindowsInstallerActions.hidden = true;
       manualWindowsInstallerActions.append(manualWindowsInstallerLink);
       manualWindowsInstaller.append(
         manualWindowsInstallerDescription,
@@ -313,9 +307,10 @@ function updatesPage(
       );
       const actions = document.createElement("div");
       actions.className = "settings-update-actions";
+      actions.hidden = true;
       const releaseLink = document.createElement("a");
       releaseLink.className = "settings-update-link";
-      releaseLink.href = CODEXHOST_RELEASES_LATEST_URL;
+      releaseLink.hidden = true;
       releaseLink.target = "_blank";
       releaseLink.rel = "noopener noreferrer";
       releaseLink.append(
@@ -347,6 +342,7 @@ function updatesPage(
       let pollTimer: number | undefined;
       let pollAttempts = 0;
       let pending = false;
+      let startAttempted = false;
 
       const clearPoll = (): void => {
         if (pollTimer !== undefined) {
@@ -377,29 +373,50 @@ function updatesPage(
         );
       };
 
-      const scheduleStatusPoll = (client: RendererUpdateClient, resetAttempts = false): void => {
+      const scheduleStatusPoll = (resetAttempts = false): void => {
         clearPoll();
         if (resetAttempts) pollAttempts = 0;
         if (pollAttempts >= 320) {
-          renderPendingStatus(null, messages.updateRequestTimeout, "failed");
+          renderPendingStatus(null, messages.updateRequestTimeout);
+          const retry = document.createElement("button");
+          retry.type = "button";
+          retry.className = "settings-command-button";
+          retry.append(createRendererSettingsIcon("refresh", 16), messages.updateRetry);
+          retry.addEventListener("click", () => {
+            pollAttempts = 0;
+            readStatus();
+          });
+          panel.append(createPanelActions(document, retry));
           return;
         }
         pollAttempts += 1;
         pollTimer = document.defaultView?.setTimeout(() => {
-          void context.runLatest(
-            (signal) => runBoundedRendererUpdateRequest(() => client.readUpdateStatus(), signal),
-            {
-              success(result) {
-                const message = statusMessage(result.status, messages);
-                if (isPendingStatus(result.status)) scheduleStatusPoll(client);
-                if (message) renderPendingStatus(result.status, message);
-              },
-              failure(error) {
-                renderRequestFailure(error);
-              },
-            },
-          );
+          readStatus();
         }, 750);
+      };
+
+      const readStatus = (): void => {
+        clearPoll();
+        void context.runLatest(
+          (signal) =>
+            runBoundedRendererUpdateRequest(() => {
+              const client = getClient();
+              return client ? client.readUpdateStatus() : Promise.resolve({ status: null });
+            }, signal),
+          {
+            success(result) {
+              const message = statusMessage(result.status, messages);
+              if (message) renderPendingStatus(result.status, message);
+              if (result.status === null || isPendingStatus(result.status)) {
+                scheduleStatusPoll();
+              }
+            },
+            failure() {
+              // A status read failure says nothing about the background operation.
+              scheduleStatusPoll();
+            },
+          },
+        );
       };
 
       const renderPendingStatus = (
@@ -435,14 +452,18 @@ function updatesPage(
           retry.type = "button";
           retry.className = "settings-command-button";
           retry.append(createRendererSettingsIcon("refresh", 16), messages.updateRetry);
-          retry.addEventListener("click", () => void load());
+          retry.addEventListener("click", () => {
+            startAttempted = false;
+            void load();
+          });
           panel.append(createPanelActions(document, retry));
         }
       };
 
       const start = (client: RendererUpdateClient): void => {
-        if (pending) return;
+        if (pending || startAttempted) return;
         pending = true;
+        startAttempted = true;
         renderPendingStatus(null, messages.updatePreparing);
         void context.runLatest(
           (signal) => runBoundedRendererUpdateRequest(() => client.startUpdate(), signal),
@@ -453,11 +474,15 @@ function updatesPage(
                 result.status,
                 statusMessage(result.status, messages) ?? messages.updatePreparing,
               );
-              if (isPendingStatus(result.status)) scheduleStatusPoll(client, true);
+              if (isPendingStatus(result.status)) scheduleStatusPoll(true);
             },
             failure(error) {
               pending = false;
-              renderRequestFailure(error);
+              if (error instanceof RendererUpdateRequestTimeoutError) {
+                scheduleStatusPoll(true);
+              } else {
+                renderRequestFailure(error);
+              }
             },
           },
         );
@@ -472,20 +497,20 @@ function updatesPage(
         installationValue.textContent = installationLabel(result.installation, messages);
         manualNpm.hidden = result.installation !== "npm";
         manualWindowsInstaller.hidden = !windows || result.installation !== "windows-installer";
-        releaseLink.hidden = windows;
+        releaseLink.hidden = windows || !result.releaseNotesUrl;
+        actions.hidden = releaseLink.hidden;
         manualTitle.hidden =
           windows && !["npm", "windows-installer"].includes(result.installation ?? "");
-        if (windows && result.installation === "windows-installer" && result.latestVersion) {
-          manualWindowsInstallerLink.href = windowsInstallerDownloadUrl(
-            document.defaultView,
-            result.latestVersion,
-          );
+        manualWindowsInstallerLink.hidden = !result.releaseNotesUrl;
+        manualWindowsInstallerActions.hidden = manualWindowsInstallerLink.hidden;
+        if (result.releaseNotesUrl) {
+          manualWindowsInstallerLink.href = result.releaseNotesUrl;
+          releaseLink.href = result.releaseNotesUrl;
         }
-        if (result.releaseNotesUrl) releaseLink.href = result.releaseNotesUrl;
         const operationMessage = statusMessage(result.status, messages);
         if (isPendingStatus(result.status)) {
           renderPendingStatus(result.status, operationMessage ?? messages.updatePreparing);
-          scheduleStatusPoll(client, true);
+          scheduleStatusPoll(true);
           return;
         }
         const actionableStatus =
@@ -584,10 +609,12 @@ export function createDefaultRendererSettingsPages(
   getSessionImportClient: () => RendererSessionImportClient | null = () => null,
   openImportedThread: RendererImportedThreadOpener = () =>
     Promise.reject(new Error("Imported Thread navigation is unavailable")),
+  getResourcesClient: () => RendererResourcesClient | null = () => null,
 ): readonly RendererSettingsPageDefinition[] {
   return Object.freeze([
     createConnectionsSettingsPage(messages, getDiagnostics),
     createAccountsSettingsPage(messages, getAccountClient),
+    createResourcesSettingsPage(messages, getResourcesClient),
     createSessionImportSettingsPage(messages, getSessionImportClient, openImportedThread),
     createAppearanceSettingsPage(messages),
     updatesPage(messages, getUpdateClient),
@@ -602,6 +629,7 @@ export function createDefaultRendererSettingsRegistry(
   getAccountClient: () => RendererCodexAccountClient | null = () => null,
   getSessionImportClient: () => RendererSessionImportClient | null = () => null,
   openImportedThread?: RendererImportedThreadOpener,
+  getResourcesClient: () => RendererResourcesClient | null = () => null,
 ): RendererSettingsPageRegistry {
   return createRendererSettingsPageRegistry(
     createDefaultRendererSettingsPages(
@@ -611,6 +639,7 @@ export function createDefaultRendererSettingsRegistry(
       getAccountClient,
       getSessionImportClient,
       openImportedThread,
+      getResourcesClient,
     ),
   );
 }

@@ -4,6 +4,7 @@ import { awaitWithSignal } from "./abortable-read.js";
 
 import type {
   HarnessCommandCapability,
+  HarnessErrorCode,
   HarnessIdleSuspendResult,
   HarnessIdleSuspendSignal,
   HarnessOutput,
@@ -29,21 +30,92 @@ import type {
   TurnStartAccepted,
   TurnStartCommand,
 } from "@codexhost/harness-adapter";
-import type { HarnessId } from "@codexhost/shared-contracts";
+import type { HarnessId, LoadedSessionResourceState } from "@codexhost/shared-contracts";
 
 type SessionOperation<T> = (session: HarnessSession) => Promise<T>;
+
+/**
+ * How long one queued Harness operation (a read, a command, a resume, an idle
+ * suspension) may take. Every operation shares one queue, so an adapter that
+ * never answers would otherwise block every later operation, close included.
+ */
+export const DEFAULT_OPERATION_TIMEOUT_MS = 120_000;
+/**
+ * An idle suspension or an owned-job stop releases native processes and may
+ * wait out a Harness's own cleanup grace, which is 2-3 s for every shipped
+ * adapter (the anchor waits up to twice that plus a few seconds). The bound
+ * is still short: every later operation, a user's wake included, queues
+ * behind a release that hangs.
+ */
+export const DEFAULT_RELEASE_TIMEOUT_MS = 5 * 60_000;
+
+/**
+ * Delays before retrying a native close that failed. Adapters keep what they
+ * could not release owned and retry it on the next close, so a transient
+ * failure (a process slow to exit) usually clears on a later attempt.
+ */
+export const DEFAULT_CLOSE_RETRY_DELAYS_MS: readonly number[] = [1_000, 5_000, 30_000];
+
+const SUSPEND_STATUSES = new Set(["suspended", "busy", "unknown", "releaseFailed", "unsupported"]);
+
+/**
+ * A plugin built against a newer contract may report a status this Host does
+ * not know. Treating it as `unknown` (nothing decided, retry later) keeps the
+ * Session instead of faulting it over a vocabulary mismatch.
+ */
+function knownSuspendResult(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const status = (value as { status?: unknown }).status;
+  if (typeof status !== "string" || SUSPEND_STATUSES.has(status)) return value;
+  return {
+    status: "unknown",
+    reason: `Harness reported an unrecognised suspension status '${status}'`,
+  };
+}
 
 interface PumpCompletion {
   promise: Promise<Error | null>;
   resolve(error: Error | null): void;
 }
 
-function incompatible(message: string): Error {
-  return new Error(`Resumed Harness Session is incompatible: ${message}`);
+/** A resumed native Session that does not match the one it replaces. */
+class ResumeIncompatibleError extends Error {
+  override name = "ResumeIncompatibleError";
 }
 
-function sameJson(left: unknown, right: unknown): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
+function incompatible(message: string): Error {
+  return new ResumeIncompatibleError(`Resumed Harness Session is incompatible: ${message}`);
+}
+
+/** Why a resume failed: a mismatch is the adapter's state, not its process. */
+function resumeFailureCode(error: Error): HarnessErrorCode {
+  return error instanceof ResumeIncompatibleError ? "invalidState" : "nativeFailure";
+}
+
+/**
+ * Structural equality of JSON-like values. Key order does not matter, unlike
+ * comparing JSON.stringify output: two equal capability objects built in a
+ * different order are the same capabilities.
+ */
+function sameValue(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true;
+  if (typeof left !== "object" || typeof right !== "object" || left === null || right === null)
+    return false;
+  if (Array.isArray(left) !== Array.isArray(right)) return false;
+  if (Array.isArray(left) && Array.isArray(right))
+    return (
+      left.length === right.length && left.every((value, index) => sameValue(value, right[index]))
+    );
+  const leftRecord = left as Record<string, unknown>;
+  const rightRecord = right as Record<string, unknown>;
+  const keys = Object.keys(leftRecord).filter((key) => leftRecord[key] !== undefined);
+  const otherKeys = Object.keys(rightRecord).filter((key) => rightRecord[key] !== undefined);
+  return (
+    keys.length === otherKeys.length &&
+    keys.every(
+      (key) => Object.hasOwn(rightRecord, key) && sameValue(leftRecord[key], rightRecord[key]),
+    )
+  );
 }
 
 function sameNativeSessionIdentity(
@@ -68,12 +140,7 @@ function unavailable<T>(message: string): HarnessResult<T> {
 function validSuspendResult(value: unknown): value is HarnessIdleSuspendResult {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
   const result = value as { status?: unknown; scope?: unknown; reason?: unknown };
-  if (
-    result.status !== "suspended" &&
-    result.status !== "busy" &&
-    result.status !== "unknown" &&
-    result.status !== "unsupported"
-  ) {
+  if (typeof result.status !== "string" || !SUSPEND_STATUSES.has(result.status)) {
     return false;
   }
   if (result.status === "suspended" && (typeof result.scope !== "string" || !result.scope.trim())) {
@@ -93,7 +160,7 @@ export interface ResumeOptions {
   historyOnly?: boolean;
 }
 
-export class ManagedHarnessSession {
+export class ManagedHarnessSession implements HarnessSession {
   readonly harnessId: HarnessId;
   readonly initialUsage;
   readonly outputs: AsyncIterable<HarnessOutput>;
@@ -102,6 +169,9 @@ export class ManagedHarnessSession {
   readonly #onActivity: () => void;
   readonly #onFault: (error: Error) => void;
   readonly #outputEndTimeoutMs: number;
+  readonly #operationTimeoutMs: number;
+  readonly #releaseTimeoutMs: number;
+  readonly #closeRetryDelaysMs: readonly number[];
   readonly #initialCapabilities: HarnessSessionCapabilities;
   readonly #requiresResourceLifecycle: boolean;
   #admissionClosed = false;
@@ -123,6 +193,9 @@ export class ManagedHarnessSession {
     onActivity(): void;
     onFault(error: Error): void;
     outputEndTimeoutMs?: number;
+    operationTimeoutMs?: number;
+    releaseTimeoutMs?: number;
+    closeRetryDelaysMs?: readonly number[];
   }) {
     this.harnessId = input.session.harnessId;
     this.initialUsage = input.session.initialUsage;
@@ -134,6 +207,9 @@ export class ManagedHarnessSession {
     this.#onActivity = input.onActivity;
     this.#onFault = input.onFault;
     this.#outputEndTimeoutMs = input.outputEndTimeoutMs ?? 5_000;
+    this.#operationTimeoutMs = input.operationTimeoutMs ?? DEFAULT_OPERATION_TIMEOUT_MS;
+    this.#releaseTimeoutMs = input.releaseTimeoutMs ?? DEFAULT_RELEASE_TIMEOUT_MS;
+    this.#closeRetryDelaysMs = input.closeRetryDelaysMs ?? DEFAULT_CLOSE_RETRY_DELAYS_MS;
     this.#deferredLive = input.session.executionReady === false;
     this.outputs = this.#channel.outputs;
     this.#attach(input.session);
@@ -180,14 +256,44 @@ export class ManagedHarnessSession {
   }
 
   get resourceLifecycle(): HarnessResourceLifecycle | undefined {
-    return this.#current.resourceLifecycle
-      ? { suspend: (signal) => this.#suspend(signal) }
-      : undefined;
+    const lifecycle = this.#current.resourceLifecycle;
+    if (!lifecycle) return undefined;
+    return {
+      suspend: (signal) => this.#suspend(signal),
+      ...(lifecycle.workLevel
+        ? {
+            // A suspended Session runs nothing native until it resumes.
+            workLevel: () =>
+              this.#suspended
+                ? { level: "idle" as const }
+                : (this.#current.resourceLifecycle?.workLevel?.() ?? { level: "idle" as const }),
+          }
+        : {}),
+      ...(lifecycle.stopOwnedJobs
+        ? {
+            // Never wakes a suspended Session only to stop its jobs.
+            stopOwnedJobs: () =>
+              this.withCurrentSession(async (current) => {
+                const stop = current.resourceLifecycle?.stopOwnedJobs;
+                if (!stop) throw new Error("Harness Session no longer stops owned jobs");
+                return stop.call(current.resourceLifecycle);
+              }),
+          }
+        : {}),
+    };
   }
 
   /** Native process was released; the next Host read or execute must resume it. */
   get nativeSuspended(): boolean {
     return this.#suspended !== null;
+  }
+
+  /** Cached lifecycle facts only; observing never resumes or probes native resources. */
+  get resourceState(): LoadedSessionResourceState {
+    if (this.#admissionClosed) return "unavailable";
+    if (this.#suspended) return "suspended";
+    if (this.#suspendingGeneration !== null) return "suspending";
+    return this.#deferredLive ? "historyOnly" : "loaded";
   }
 
   refreshUsage(): Promise<void> {
@@ -230,32 +336,99 @@ export class ManagedHarnessSession {
       | PermissionModeSelectCompleted
     >
   > {
+    if (command.type === "turn.cancel") return this.#cancel(command);
     return this.#use((session) => session.execute(command as TurnStartCommand));
   }
 
+  /**
+   * A cancellation skips the operation queue: waiting behind a slow read or
+   * a configuration write would defeat its purpose. It goes to the current
+   * native Session directly; a suspended or resuming Session has no running
+   * Turn, so there is nothing for it to race.
+   */
+  async #cancel(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>> {
+    this.#onActivity();
+    if (this.#admissionClosed) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidState",
+          message: "Managed Harness Session is closed",
+          retryable: false,
+        },
+      };
+    }
+    if (this.#suspended) {
+      return {
+        ok: false,
+        error: {
+          code: "invalidState",
+          message: "No Turn is running in a suspended Harness Session",
+          retryable: false,
+        },
+      };
+    }
+    return this.#current.execute(command);
+  }
+
+  /**
+   * Resolves once the native Session confirmed its release, however long that
+   * takes: callers that must not start a second native process for the same
+   * Session wait on it. Callers with a budget bound their own wait. A failed
+   * close is retried in the background on DEFAULT_CLOSE_RETRY_DELAYS_MS, each
+   * failure reported; the promise rejects only when every attempt failed.
+   * Outputs end after the first attempt, as before.
+   */
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     this.#admissionClosed = true;
     this.#closePromise = this.#enqueue(async () => {
+      let failure: unknown;
       try {
         await this.#current.close();
+        return;
+      } catch (error) {
+        failure = error;
       } finally {
         this.#pumpCompletions.clear();
         this.#pendingPumpEnds.clear();
         this.#suspendedOutputs.clear();
         this.#channel.end();
       }
-    });
+      await this.#retryClose(failure);
+    }, null);
     return this.#closePromise;
   }
 
-  /** Internal Host lease for legacy destructive release hooks. It never wakes a suspended Session. */
+  async #retryClose(failure: unknown): Promise<void> {
+    let last = failure;
+    for (const delay of this.#closeRetryDelaysMs) {
+      const message = last instanceof Error ? last.message : String(last);
+      this.#onFault(
+        new Error(`Closing the native Session failed; retrying in ${delay} ms: ${message}`, {
+          cause: last,
+        }),
+      );
+      await new Promise<void>((resolve) => {
+        setTimeout(resolve, delay).unref?.();
+      });
+      try {
+        await this.#current.close();
+        return;
+      } catch (error) {
+        last = error;
+      }
+    }
+    throw last instanceof Error ? last : new Error(String(last));
+  }
+
+  /** Internal Host lease on the current native Session. It never wakes a suspended Session. */
   withCurrentSession<T>(operation: (session: HarnessSession) => Promise<T>): Promise<T> {
     return this.#enqueue(async () => {
       this.#assertOpen();
       if (this.#suspended) throw new Error("Managed Harness Session is suspended");
       return operation(this.#current);
-    });
+    }, this.#releaseTimeoutMs);
   }
 
   /** Checks a candidate before Host persistence observes a resumed native Session. */
@@ -326,24 +499,30 @@ export class ManagedHarnessSession {
       try {
         // Do not race this call with the AbortSignal. The adapter sees cancellation
         // and the following wake remains queued until native cleanup settles.
-        result = await lifecycle.suspend(signal);
+        result = knownSuspendResult(await lifecycle.suspend(signal)) as HarnessIdleSuspendResult;
       } catch (error) {
         this.#suspendingGeneration = null;
         this.#flushSuspendedOutputs(generation);
-        this.#fail(error instanceof Error ? error : new Error(String(error)));
+        this.#fail(error instanceof Error ? error : new Error(String(error)), "nativeFailure");
         return { status: "unknown", reason: "Native idle suspension failed" };
       }
       if (!validSuspendResult(result)) {
         this.#suspendingGeneration = null;
         this.#flushSuspendedOutputs(generation);
-        this.#fail(new Error("Harness returned an invalid idle suspension result"));
+        this.#fail(
+          new Error("Harness returned an invalid idle suspension result"),
+          "protocolError",
+        );
         return { status: "unknown", reason: "Native idle suspension result is invalid" };
       }
       if (result.status === "suspended") {
         const activity = this.#flushSuspendedOutputs(generation);
         if (activity || this.#admissionClosed) {
           this.#suspendingGeneration = null;
-          this.#fail(new Error("Native activity was observed during idle suspension"));
+          this.#fail(
+            new Error("Native activity was observed during idle suspension"),
+            "invalidState",
+          );
           return { status: "unknown", reason: "Native activity was observed during suspension" };
         }
         // A successful lifecycle contract must end its old native output stream.
@@ -361,7 +540,10 @@ export class ManagedHarnessSession {
           this.#suspendingGeneration = null;
           this.#pumpCompletions.delete(generation);
           this.#flushSuspendedOutputs(generation);
-          this.#fail(new Error("Native idle suspension did not end its output stream"));
+          this.#fail(
+            new Error("Native idle suspension did not end its output stream"),
+            "protocolError",
+          );
           return { status: "unknown", reason: "Native output did not end after suspension" };
         }
         this.#suspendingGeneration = null;
@@ -372,7 +554,10 @@ export class ManagedHarnessSession {
           return { status: "unknown", reason: "Native output ended with a failure" };
         }
         if (lateActivity || this.#admissionClosed) {
-          this.#fail(new Error("Native activity was observed during idle suspension"));
+          this.#fail(
+            new Error("Native activity was observed during idle suspension"),
+            "invalidState",
+          );
           return { status: "unknown", reason: "Native activity was observed during suspension" };
         }
         this.#suspended = result;
@@ -387,7 +572,7 @@ export class ManagedHarnessSession {
         this.#fail(ended ?? new Error("External Harness output ended during rejected suspension"));
       }
       return result;
-    });
+    }, this.#releaseTimeoutMs);
   }
 
   async #resumeIfNeeded(options?: { historyOnly?: boolean }): Promise<HarnessSession> {
@@ -404,17 +589,18 @@ export class ManagedHarnessSession {
         await previous.close();
       } catch (error) {
         const failure = error instanceof Error ? error : new Error(String(error));
-        this.#fail(failure);
+        this.#fail(failure, resumeFailureCode(failure));
         throw failure;
       }
       let resumed: HarnessSession | undefined;
       try {
         resumed = await this.#resume({ skipSnapshot: true });
+        this.#assertStillOpenAfterResume();
         this.#validateResume(resumed);
       } catch (error) {
         await resumed?.close().catch(() => undefined);
         const failure = error instanceof Error ? error : new Error(String(error));
-        this.#fail(failure);
+        this.#fail(failure, resumeFailureCode(failure));
         throw failure;
       }
       this.#attach(resumed);
@@ -424,11 +610,12 @@ export class ManagedHarnessSession {
     let resumed: HarnessSession | undefined;
     try {
       resumed = await this.#resume(options?.historyOnly ? { historyOnly: true } : undefined);
+      this.#assertStillOpenAfterResume();
       this.#validateResume(resumed);
     } catch (error) {
       await resumed?.close().catch(() => undefined);
       const failure = error instanceof Error ? error : new Error(String(error));
-      this.#fail(failure);
+      this.#fail(failure, resumeFailureCode(failure));
       throw failure;
     }
     this.#suspended = null;
@@ -437,9 +624,20 @@ export class ManagedHarnessSession {
     return resumed;
   }
 
+  /**
+   * A resume that outlived its deadline finishes after the Session faulted
+   * and closed. Its new native Session must be closed, not attached: nothing
+   * would ever close it otherwise.
+   */
+  #assertStillOpenAfterResume(): void {
+    if (this.#admissionClosed) {
+      throw new Error("Managed Harness Session closed while the native Session was resuming");
+    }
+  }
+
   #validateResume(session: HarnessSession): void {
     if (session.harnessId !== this.harnessId) throw incompatible("Harness identity changed");
-    if (!sameJson(session.capabilities, this.#initialCapabilities)) {
+    if (!sameValue(session.capabilities, this.#initialCapabilities)) {
       throw incompatible("capabilities changed");
     }
     const expectedNativeRef = this.#lastState.nativeRef;
@@ -520,7 +718,12 @@ export class ManagedHarnessSession {
     this.#fail(failure ?? new Error("External Harness output ended before a terminal event"));
   }
 
-  #fail(error: Error): void {
+  /**
+   * Faults the Session. `code` says why: the native process was lost (the
+   * default, when its output ended), it did not answer in time, it broke the
+   * protocol, or its state no longer matched.
+   */
+  #fail(error: Error, code: HarnessErrorCode = "processExited"): void {
     if (this.#admissionClosed) return;
     this.#admissionClosed = true;
     this.#onFault(error);
@@ -528,7 +731,7 @@ export class ManagedHarnessSession {
       kind: "event",
       event: {
         type: "session.faulted",
-        error: { code: "processExited", message: error.message, retryable: true },
+        error: { code, message: error.message, retryable: true },
       },
     });
     this.#channel.end();
@@ -579,12 +782,49 @@ export class ManagedHarnessSession {
     if (this.#admissionClosed) throw new Error("Managed Harness Session is closed");
   }
 
-  #enqueue<T>(operation: () => Promise<T>): Promise<T> {
-    const pending = this.#operationTail.then(operation, operation);
+  /**
+   * Runs `operation` after every earlier one. With a timeout, an operation
+   * that does not settle in time faults the Session and frees the queue; its
+   * late result is ignored, and the fault's close runs next.
+   */
+  #enqueue<T>(
+    operation: () => Promise<T>,
+    timeoutMs: number | null = this.#operationTimeoutMs,
+  ): Promise<T> {
+    const run = () => (timeoutMs === null ? operation() : this.#bounded(operation, timeoutMs));
+    const pending = this.#operationTail.then(run, run);
     this.#operationTail = pending.then(
       () => undefined,
       () => undefined,
     );
     return pending;
+  }
+
+  #bounded<T>(operation: () => Promise<T>, timeoutMs: number): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const error = new Error(`External Harness did not answer within ${timeoutMs} ms`);
+        reject(error);
+        this.#fail(error, "unavailable");
+      }, timeoutMs);
+      // Started synchronously, like an unbounded operation: callers that
+      // fire and forget observe the adapter call at the same point.
+      let started: Promise<T>;
+      try {
+        started = operation();
+      } catch (error) {
+        started = Promise.reject(error as Error);
+      }
+      started.then(
+        (value) => {
+          clearTimeout(timer);
+          resolve(value);
+        },
+        (error: unknown) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+      );
+    });
   }
 }

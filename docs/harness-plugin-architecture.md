@@ -36,6 +36,8 @@ flowchart TD
 | `harness-adapter` | Adapter / Session / Plugin 合同、公共输出、Usage 校验、conformance 入口 | 某个 Harness 的私有协议或文件格式 |
 | `harness-discovery` | 可执行文件发现、调用参数辅助、spawn 时绑定的受管进程树关闭 | Session 权限、历史恢复和 Turn 状态 |
 | `adapters/*` | 原生通信、能力确认、交互、历史、版本 profile 与资源清理 | 修改 Desktop 私有状态或重复 Host 映射事务 |
+| `adapters/acp-core` | ACP 代理进程的启动、连接、故障上报、协议协商与截止时间（Grok、Kiro 使用）；不是插件 | Session、权限、扩展、错误分类与历史语义 |
+| `adapters/pi-family` | Pi 与 OMP 共用的模型身份与目录、会话历史映射、工具输出与文件变更推导、RPC 辅助；不是插件，打进两者各自的 Bundle | 两者行为不同的协议与 Session 逻辑（仍在各自 Adapter） |
 | `protocol-core` | 路由解码、事件身份和 Desktop 协议投影 | 解释原生 `_meta` 或调用 SDK |
 | `mapping-store` | Thread / Native Ref、配置 carrier、执行意图与委派关系 | 取代 Harness 的权威历史正文 |
 | `host-runtime` | 加载插件、编排操作、持久化提交、故障终结、恢复与委派 | 静态 import 具体 Adapter 或按名字模拟能力 |
@@ -114,7 +116,7 @@ ACP 实现的可复用边界见[ACP 接入与复用](acp-layer-follow-up.md)。
 
 [发行清单](../scripts/release/harness-plugins.json)拥有当前十个预装插件及各自运行依赖白名单。构建为每个插件生成独立 Bundle、资源、Manifest 和 `build-receipt.json`，记录 Bundle hash、实际依赖版本/许可、API 版本和 Node target。SDK 版本不是用户安装的原生 Harness 版本；未知 native version 为 `null`。
 
-API v1 采用整数精确匹配；加性可选字段保持兼容，破坏性合同变化需要新的 API 版本。不引入插件市场、自动依赖安装、热替换或任意插件 UI。实际发行集合与 Host 运行时注册分开维护。
+插件 API 版本是整数，Host 维护一个支持集合（当前 `1` 与 `2`）；加性可选字段保持兼容，破坏性合同变化需要新的 API 版本。v2 把原生资源能力改为显式声明：Host 只依据 `capabilities.resources` 与配置语义声明行事，不再探测方法，也不按 Harness 名称分支；v1 插件由加载器补出等价声明。不引入插件市场、自动依赖安装、热替换或任意插件 UI。实际发行集合与 Host 运行时注册分开维护。
 
 Rust 负责原生启动、进程身份和更新安装。TS 更新状态目录从 runtime descriptor 推导，与 Launcher 一致；下载总期限和无进度期限释放更新锁。Remote uninstall 在验证并停止 owned listener 后清理安装文件。macOS Broker 替换失败时恢复已验证旧 plist / generation，并要求新的 readiness descriptor；这些平台路径的实机验证独立于 TypeScript 测试。
 

@@ -1,9 +1,21 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  assistantMessageId,
+  assistantReasoning,
+  assistantText,
+  message,
+  nonBlankString,
+  waitForLeaderExit,
+} from "@codexhost/adapter-pi-family";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { parseHostUsage, sanitizeDiagnosticTail, type HostUsage } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import {
+  spawnOwnedProcess,
+  type OwnedProcess,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 import {
   harnessThinkingOptionIdSchema,
   jsonValueSchema,
@@ -27,22 +39,6 @@ import type { OmpNativeModel, OmpNativeModelRef } from "./omp-model-catalog.js";
 import type { OmpPermissionMode } from "./omp-permission-modes.js";
 import { readOmpSessionHistory, verifyOmpSessionCwd } from "./omp-session-file.js";
 import { OmpFrameDecoder } from "./omp-protocol.js";
-
-function waitForLeaderExit(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number,
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const finish = (): void => {
-      clearTimeout(timer);
-      child.removeListener("exit", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    child.once("exit", finish);
-  });
-}
 
 export interface OmpSessionState {
   sessionId: string;
@@ -211,8 +207,17 @@ export interface OmpRpcProcessOptions {
   permissionMode?: OmpPermissionMode;
 }
 
+/** How the Session's native process is owned and when its cleanup failed. */
+export interface OmpRpcProcessOwnership {
+  closeTimeoutMs: number;
+  onExitCleanupFailure(error: unknown): void;
+}
+
 export interface OmpRpcProcessAdapter {
-  spawn(options: OmpRpcProcessOptions): ChildProcessWithoutNullStreams;
+  spawn(
+    options: OmpRpcProcessOptions,
+    ownership: OmpRpcProcessOwnership,
+  ): OwnedProcess<ChildProcessWithoutNullStreams>;
 }
 
 interface PendingCommand {
@@ -250,17 +255,21 @@ interface ActiveTurn {
 }
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+/**
+ * OMP sends larger payloads as rpc_chunk frames (see omp-protocol.ts), so a
+ * single line stays near 1 MiB; one far beyond that without a newline is a
+ * broken stream, not a slow one.
+ */
+const MAX_FRAME_BYTES = 4 * 1024 * 1024;
+/**
+ * Writes whose timeout leaves the native Session in an unknown state: was
+ * the Model switched, the branch taken? The connection is retired rather
+ * than reused. A read that times out is only refused.
+ */
+const RETIRING_COMMANDS = new Set(["set_model", "set_thinking_level", "branch"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function message(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
-}
-
-function nonBlankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 function parseNativeModel(value: unknown, context: string): OmpNativeModelRef | null {
@@ -374,40 +383,6 @@ function subagentStatus(value: unknown): OmpSubagentTurnStatus {
   throw new OmpRpcFaultError("protocolError", "Omp RPC Subagent status is invalid");
 }
 
-function assistantText(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) return null;
-  return value.content
-    .filter(
-      (content): content is Record<string, unknown> =>
-        isRecord(content) && content.type === "text" && typeof content.text === "string",
-    )
-    .map((content) => content.text as string)
-    .join("");
-}
-
-function assistantMessageId(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant") return null;
-  return nonBlankString(value.responseId) ? value.responseId : null;
-}
-
-function extractReasoningText(content: unknown): string | null {
-  if (!isRecord(content)) return null;
-  const type = String(content.type ?? "");
-  if (type === "thinking" || type === "reasoning" || type === "thought") {
-    const text = content.thinking ?? content.reasoning ?? content.text ?? content.delta;
-    return typeof text === "string" ? text : null;
-  }
-  return null;
-}
-
-function assistantReasoning(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) return null;
-  return value.content
-    .map(extractReasoningText)
-    .filter((text): text is string => typeof text === "string")
-    .join("");
-}
-
 function assistantFailure(value: unknown): Error | null | undefined {
   if (!isRecord(value) || value.role !== "assistant") return undefined;
   if (value.stopReason !== "error" && value.stopReason !== "aborted") return null;
@@ -482,18 +457,31 @@ export function ompRpcProcessCommand(
 }
 
 const nodeProcessAdapter: OmpRpcProcessAdapter = {
-  spawn(options) {
+  spawn(options, ownership) {
     const invocation = ompRpcProcessCommand(options);
-    return spawn(invocation.command, invocation.arguments, {
+    return spawnOwnedProcess(invocation.command, invocation.arguments, {
       cwd: options.cwd,
       env: options.environment,
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      ...ownership,
     });
   },
 };
+
+/** Races a startup step against a deadline whose timer never outlives it. */
+async function withDeadline<T>(step: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      step,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export class OmpRpcSession {
   readonly #options: Required<
@@ -522,9 +510,15 @@ export class OmpRpcSession {
   #stderrTail = "";
   #frameDecoder = new OmpFrameDecoder();
   #readyResolve: (() => void) | null = null;
-  readonly #ready = new Promise<void>((resolve) => {
+  #readyReject: ((error: Error) => void) | null = null;
+  /** Settles on the native ready signal, or on the first fault before it. */
+  readonly #ready = new Promise<void>((resolve, reject) => {
     this.#readyResolve = resolve;
+    this.#readyReject = reject;
   });
+  // A fault may settle it before startup awaits it (or after startup already
+  // failed another way); that must never surface as an unhandled rejection.
+  readonly #readyObserved = this.#ready.catch(() => undefined);
 
   constructor(
     options: OmpRpcSessionOptions,
@@ -561,33 +555,37 @@ export class OmpRpcSession {
 
   async start(): Promise<this> {
     if (this.#child || this.#closed) throw new Error("Omp RPC Session cannot be started twice");
-    const child = this.#processAdapter.spawn({
-      cwd: this.#options.cwd,
-      ...(this.#options.command ? { command: this.#options.command } : {}),
-      environment: withNodeRuntimeOnPath({
-        ...process.env,
-        ...this.#options.environment,
-        OMP_SKIP_VERSION_CHECK: "1",
-        OMP_TELEMETRY: "0",
-      }),
-      ...(this.#options.sessionFile ? { sessionFile: this.#options.sessionFile } : {}),
-      ...(this.#options.forkSessionFile ? { forkSessionFile: this.#options.forkSessionFile } : {}),
-      ...(this.#options.model ? { model: this.#options.model } : {}),
-      ...(this.#options.permissionMode ? { permissionMode: this.#options.permissionMode } : {}),
-    });
-    this.#child = child;
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
-      closeTimeoutMs: this.#options.closeTimeoutMs,
-      onExitCleanupFailure: (error) =>
-        this.#fail(
-          new OmpRpcFaultError(
-            "processExited",
-            `Omp RPC owned process cleanup failed: ${message(error)}`,
-            this.stderrTail,
+    const { child, tree } = this.#processAdapter.spawn(
+      {
+        cwd: this.#options.cwd,
+        ...(this.#options.command ? { command: this.#options.command } : {}),
+        environment: withNodeRuntimeOnPath({
+          ...process.env,
+          ...this.#options.environment,
+          OMP_SKIP_VERSION_CHECK: "1",
+          OMP_TELEMETRY: "0",
+        }),
+        ...(this.#options.sessionFile ? { sessionFile: this.#options.sessionFile } : {}),
+        ...(this.#options.forkSessionFile
+          ? { forkSessionFile: this.#options.forkSessionFile }
+          : {}),
+        ...(this.#options.model ? { model: this.#options.model } : {}),
+        ...(this.#options.permissionMode ? { permissionMode: this.#options.permissionMode } : {}),
+      },
+      {
+        closeTimeoutMs: this.#options.closeTimeoutMs,
+        onExitCleanupFailure: (error) =>
+          this.#fail(
+            new OmpRpcFaultError(
+              "processExited",
+              `Omp RPC owned process cleanup failed: ${message(error)}`,
+              this.stderrTail,
+            ),
           ),
-        ),
-    });
+      },
+    );
+    this.#child = child;
+    this.#ownedProcessTree = tree;
     child.stdout.on("data", (chunk: Buffer) => this.#push(chunk));
     child.stdout.on("end", () => {
       if (this.#buffer.length !== 0) {
@@ -614,27 +612,19 @@ export class OmpRpcSession {
         );
       }
     });
-    await Promise.race([
+    await withDeadline(
       new Promise<void>((resolve, reject) => {
         child.once("spawn", resolve);
         child.once("error", reject);
       }),
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(
-          () => reject(new Error("Omp RPC start timed out")),
-          this.#options.commandTimeoutMs,
-        ),
-      ),
-    ]);
-    await Promise.race([
+      this.#options.commandTimeoutMs,
+      "Omp RPC start timed out",
+    );
+    await withDeadline(
       this.#ready,
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(
-          () => reject(new Error("Omp RPC ready signal timed out")),
-          this.#options.commandTimeoutMs,
-        ),
-      ),
-    ]);
+      this.#options.commandTimeoutMs,
+      "Omp RPC ready signal timed out",
+    );
     await this.#send("negotiate_protocol", { protocolVersion: 2 }).catch(() => undefined);
     try {
       await this.#send("set_subagent_subscription", { level: "events" });
@@ -1031,6 +1021,12 @@ export class OmpRpcSession {
       }
       newline = this.#buffer.indexOf(0x0a);
     }
+    if (this.#buffer.length > MAX_FRAME_BYTES) {
+      this.#buffer = Buffer.alloc(0);
+      this.#fail(
+        new OmpRpcFaultError("protocolError", `Omp RPC frame exceeds ${MAX_FRAME_BYTES} bytes`),
+      );
+    }
   }
 
   #handle(value: Record<string, unknown>): void {
@@ -1038,6 +1034,7 @@ export class OmpRpcSession {
     if (value.type === "ready") {
       this.#readyResolve?.();
       this.#readyResolve = null;
+      this.#readyReject = null;
       return;
     }
     if (value.type === "response") {
@@ -1428,8 +1425,12 @@ export class OmpRpcSession {
 
   #updateTool(active: ActiveTurn, value: Record<string, unknown>): void {
     const callId = value.toolCallId;
+    if (typeof callId !== "string" || callId.length === 0) {
+      throw new OmpRpcFaultError("protocolError", "Omp RPC returned an invalid Tool update");
+    }
+    if (!active.tools.has(callId)) return;
     const outputResult = jsonValueSchema.safeParse(value.partialResult);
-    if (typeof callId !== "string" || !active.tools.has(callId) || !outputResult.success) {
+    if (!outputResult.success) {
       throw new OmpRpcFaultError("protocolError", "Omp RPC returned an invalid Tool update");
     }
     active.onEvent({ type: "tool.updated", callId, output: outputResult.data });
@@ -1437,11 +1438,14 @@ export class OmpRpcSession {
 
   #completeTool(active: ActiveTurn, value: Record<string, unknown>): void {
     const callId = value.toolCallId;
+    if (typeof callId !== "string" || callId.length === 0) {
+      throw new OmpRpcFaultError("protocolError", "Omp RPC returned an invalid Tool end");
+    }
+    if (!active.tools.has(callId)) return;
     const toolName = value.toolName;
     const result = jsonValueSchema.safeParse(value.result);
-    const expectedName = typeof callId === "string" ? active.tools.get(callId) : undefined;
+    const expectedName = active.tools.get(callId);
     if (
-      typeof callId !== "string" ||
       typeof toolName !== "string" ||
       expectedName !== toolName ||
       (value.isError !== undefined && typeof value.isError !== "boolean") ||
@@ -1621,7 +1625,7 @@ export class OmpRpcSession {
       if (this.#pending.get(id) !== pending) return;
       pending.timeout = null;
       const error = new Error(`Omp RPC '${pending.command}' command timed out`);
-      if (pending.command !== "prompt") {
+      if (pending.command !== "prompt" && !RETIRING_COMMANDS.has(pending.command)) {
         this.#pending.delete(id);
         pending.reject(error);
         return;
@@ -1686,6 +1690,11 @@ export class OmpRpcSession {
   #fail(error: OmpRpcFaultError): void {
     if (this.#closed || this.#failed) return;
     this.#failed = true;
+    // A process that dies before its ready signal must fail startup now, not
+    // after the whole command timeout.
+    this.#readyReject?.(error);
+    this.#readyResolve = null;
+    this.#readyReject = null;
     this.#rejectAll(error);
     this.#options.onFault?.(error);
   }

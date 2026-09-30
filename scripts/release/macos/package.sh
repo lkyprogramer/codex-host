@@ -24,6 +24,7 @@ for relative in \
   bin/codexhost \
   libexec/codexhost-shim \
   libexec/codexhost-updater \
+  libexec/codexhost-anchor \
   runtime/node \
   app/codexhost-distribution.json \
   app/desktop-controller.mjs \
@@ -66,6 +67,7 @@ chmod 755 \
   "$CONTENTS/MacOS/codexhost" \
   "$RESOURCES/libexec/codexhost-shim" \
   "$RESOURCES/libexec/codexhost-updater" \
+  "$RESOURCES/libexec/codexhost-anchor" \
   "$RESOURCES/runtime/node"
 
 mkdir -p "$ASSETS_DIR"
@@ -121,6 +123,7 @@ PLIST
 /usr/bin/codesign --force --sign - "$RESOURCES/runtime/node"
 /usr/bin/codesign --force --sign - "$RESOURCES/libexec/codexhost-shim"
 /usr/bin/codesign --force --sign - "$RESOURCES/libexec/codexhost-updater"
+/usr/bin/codesign --force --sign - "$RESOURCES/libexec/codexhost-anchor"
 /usr/bin/codesign --force --sign - "$CONTENTS/MacOS/codexhost"
 /usr/bin/codesign --force --sign - "$APP_PATH"
 /usr/bin/codesign --verify --deep --strict --verbose=2 "$APP_PATH"

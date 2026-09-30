@@ -23,7 +23,7 @@ Renderer 集成失败会在后台恢复，不会显示兼容弹窗，也不会�
 
 ## 进程所有权
 
-codexhost 不会接管独立运行的 ChatGPT App。启动 codexhost 前，请完全退出 ChatGPT。受管启动会直接启动已校验的 Desktop 可执行文件，并通过 `/proc` 监督它；普通 ChatGPT 启动仍使用官方启动器。只有重新校验 PID、启动时间和可执行文件身份后才会发送关闭信号。
+codexhost 不会接管独立运行的 ChatGPT App。启动 codexhost 前，请完全退出 ChatGPT。受管启动会直接启动已校验的 Desktop 可执行文件，并通过 `/proc` 监督它；普通 ChatGPT 启动仍使用官方启动器。只有重新校验 PID、启动时间和可执行文件身份后才会发送关闭信号。每个外部 Harness 都由原生 `codexhost-anchor` 启动，它会收养通过 `setsid` 脱离的后代，并在 Host 以任何方式退出时结束整棵 Harness 进程树。
 
 ## 诊断
 

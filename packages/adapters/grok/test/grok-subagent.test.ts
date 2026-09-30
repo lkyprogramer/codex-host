@@ -98,6 +98,7 @@ describe("Grok Subagent ACP mapping", () => {
       grokSubagentWaitSettlements({
         name: "get_command_or_subagent_output",
         rawInput: { task_ids: ["child-1"], timeout_ms: 30_000 },
+        // Text alone is for the model; it is not read as a task's status.
         content: [
           {
             type: "content",
@@ -108,7 +109,15 @@ describe("Grok Subagent ACP mapping", () => {
           },
         ],
       }),
-    ).toEqual([{ id: "child-1", status: "completed" }]);
+    ).toEqual([]);
+    // A single wait whose Result omits the id settles the one awaited task.
+    expect(
+      grokSubagentWaitSettlements({
+        name: "get_command_or_subagent_output",
+        rawInput: { task_ids: ["child-1"], timeout_ms: 30_000 },
+        rawOutput: { type: "TaskOutput", Result: { status: "failed" } },
+      }),
+    ).toEqual([{ id: "child-1", status: "failed" }]);
     expect(
       grokSubagentWaitSettlements({
         name: "get_command_or_subagent_output",

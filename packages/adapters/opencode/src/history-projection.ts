@@ -178,15 +178,14 @@ export async function readProjection(
   const [session, messages, paths] = await Promise.all([
     transport.getSession(sessionID),
     transport.getMessages(sessionID),
-    strictFileChanges
-      ? transport.getPaths().catch((error: unknown) => {
-          throw new OpenCodeTransportError(
-            "protocolError",
-            "OpenCode could not verify worktree paths",
-            { cause: error },
-          );
-        })
-      : undefined,
+    transport.getPaths().catch((error: unknown) => {
+      if (!strictFileChanges) return undefined;
+      throw new OpenCodeTransportError(
+        "protocolError",
+        "OpenCode could not verify worktree paths",
+        { cause: error },
+      );
+    }),
   ]);
   const worktree = paths ? verifiedOpenCodeWorktree(session.directory, paths) : undefined;
   if (strictFileChanges && !worktree) {
@@ -214,6 +213,7 @@ export async function readProjection(
     session,
     messages,
     diffsByUserMessageId: new Map(diffEntries),
+    ...(worktree ? { worktree } : {}),
     toolOutputLimit,
   });
   const model = nativeModelFromSession(session, messages);

@@ -2,7 +2,7 @@
 
 use std::env;
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -29,12 +29,16 @@ pub type ShimResult<T> = Result<T, Box<dyn Error>>;
 
 pub const HOST_NODE_PATH_ENV: &str = "CODEXHOST_HOST_NODE_PATH";
 pub const HOST_RUNTIME_PATH_ENV: &str = "CODEXHOST_HOST_RUNTIME_PATH";
+/// Where the Host finds the native process anchor that owns each Harness.
+pub const PROCESS_ANCHOR_PATH_ENV: &str = "CODEXHOST_PROCESS_ANCHOR_PATH";
 pub const REMOTE_SSH_MANAGED_ENV: &str = "CODEXHOST_REMOTE_SSH_MANAGED";
 const DATA_DIRECTORY_ENV: &str = "CODEXHOST_DATA_DIR";
 const LAUNCHER_PID_ENV: &str = "CODEXHOST_LAUNCHER_PID";
 const NPM_NODE_PATH_ENV: &str = "CODEXHOST_NPM_NODE_PATH";
 const NPM_PACKAGE_ROOT_ENV: &str = "CODEXHOST_NPM_PACKAGE_ROOT";
 const REMOTE_LISTENER_CHILD_ENV: &str = "CODEXHOST_REMOTE_LISTENER_CHILD";
+const INTERNAL_ORIGINATOR_OVERRIDE_ENV: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
+const DESKTOP_ORIGINATOR: &str = "Codex Desktop";
 
 /// Optional lifecycle hooks for diagnostics around the byte-transparent proxy core.
 pub trait ProxyObserver {
@@ -163,11 +167,17 @@ fn wait_for_child(
 ) -> ShimResult<ChildOutcome> {
     const POLL_INTERVAL: Duration = Duration::from_millis(20);
     const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+    /// Process anchors were asked to end their Harness groups with the rest
+    /// of the tree. Once everything else is killed they confirm the groups
+    /// empty and exit; only an anchor that overstays this is killed, since
+    /// killing one strands whatever its group still holds.
+    const SELF_RELEASE_BUDGET: Duration = Duration::from_secs(5);
 
     let mut root_status = None;
     let mut forwarded_signal = None;
     let mut deadline = None;
     let mut forced = false;
+    let mut self_release_deadline = None;
     let mut terminated_descendants = false;
     let mut desktop_input_closed = false;
     let mut last_process_tree_refresh = None;
@@ -228,8 +238,24 @@ fn wait_for_child(
             deadline = Some(Instant::now() + TERMINATION_GRACE);
         }
         if !forced && deadline.is_some_and(|deadline| Instant::now() >= deadline) {
-            child.force_terminate()?;
+            if child.force_terminate_sparing_self_releasing()? {
+                self_release_deadline = Some(Instant::now() + SELF_RELEASE_BUDGET);
+            }
             forced = true;
+        }
+        if self_release_deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            child.force_terminate()?;
+            self_release_deadline = None;
+        } else if self_release_deadline.is_some()
+            && refresh_process_tree
+            // Anchors are still finishing; every other owned process forked
+            // since the forced round (a kept escapee included) is killed as
+            // it appears, not only when their budget runs out. A failed
+            // round is retried on the next observation rather than ending
+            // the wait, which would also skip the reclaim after it.
+            && let Err(error) = child.force_terminate_sparing_self_releasing()
+        {
+            eprintln!("codexhost shim: forced round while anchors finish failed: {error}");
         }
         thread::sleep(POLL_INTERVAL);
     }
@@ -343,6 +369,34 @@ pub fn app_server_subcommand_index(arguments: &[OsString]) -> Option<usize> {
     None
 }
 
+/// Recognizes the dedicated provider selected by official memory summarization.
+/// Routing exception adapted from BytePioneer-AI/codex-host@66bedaed
+/// (`crates/shim/src/lib.rs`), published under MIT at that commit.
+fn selects_memory_provider(arguments: &[OsString]) -> bool {
+    let mut index = 0;
+    let mut selected = false;
+    while index < arguments.len() {
+        let Some(argument) = arguments[index].to_str() else {
+            return false;
+        };
+        let value = if argument == "-c" || argument == "--config" {
+            index += 1;
+            arguments.get(index).and_then(|value| value.to_str())
+        } else {
+            argument
+                .strip_prefix("-c=")
+                .or_else(|| argument.strip_prefix("--config="))
+        };
+        if let Some((key, configured)) = value.and_then(|value| value.split_once('='))
+            && key.trim() == "model_provider"
+        {
+            selected = configured.trim().trim_matches(['\'', '"']) == "openai-memgen";
+        }
+        index += 1;
+    }
+    selected
+}
+
 /// Returns whether this invocation starts an app-server instance owned by the Host Runtime.
 ///
 /// App-server management commands such as `proxy` and `daemon` must stay on the stock Codex CLI.
@@ -351,6 +405,16 @@ pub fn app_server_subcommand_index(arguments: &[OsString]) -> Option<usize> {
 /// would corrupt the WebSocket transport.
 #[must_use]
 pub fn should_start_host_runtime(arguments: &[OsString]) -> bool {
+    should_start_host_runtime_for_originator(
+        arguments,
+        env::var_os(INTERNAL_ORIGINATOR_OVERRIDE_ENV).as_deref(),
+    )
+}
+
+fn should_start_host_runtime_for_originator(
+    arguments: &[OsString],
+    internal_originator: Option<&OsStr>,
+) -> bool {
     const VALUE_OPTIONS: &[&str] = &[
         "-c",
         "--config",
@@ -370,6 +434,12 @@ pub fn should_start_host_runtime(arguments: &[OsString]) -> bool {
     let Some(mut index) = app_server_subcommand_index(arguments).map(|index| index + 1) else {
         return false;
     };
+    if internal_originator.is_some_and(|originator| {
+        !originator.is_empty() && originator != OsStr::new(DESKTOP_ORIGINATOR)
+    }) || selects_memory_provider(arguments)
+    {
+        return false;
+    }
     while let Some(argument) = arguments.get(index).and_then(|value| value.to_str()) {
         if VALUE_OPTIONS.contains(&argument) {
             if arguments.get(index + 1).is_none() {
@@ -689,6 +759,21 @@ fn child_command(
                 if inherited_remote_profile {
                     command.env_remove(DATA_DIRECTORY_ENV);
                 }
+                #[cfg(any(target_os = "macos", target_os = "linux"))]
+                match process_anchor_path(current_executable) {
+                    Some(anchor) => {
+                        command.env(PROCESS_ANCHOR_PATH_ENV, anchor);
+                    }
+                    // A remote SSH wrapper is a copy of the Shim; its profile
+                    // names the anchor beside the original. Anywhere else an
+                    // inherited value is not this installation's anchor.
+                    None if env::var_os(REMOTE_SSH_MANAGED_ENV).as_deref()
+                        != Some(std::ffi::OsStr::new("1")) =>
+                    {
+                        command.env_remove(PROCESS_ANCHOR_PATH_ENV);
+                    }
+                    None => {}
+                }
                 command.envs(remote_proxy_environment);
                 configure_background_command(&mut command);
                 return Ok(command);
@@ -719,11 +804,66 @@ fn child_command(
         .env_remove(CODEX_CLI_PATH_ENV)
         .env_remove(HOST_NODE_PATH_ENV)
         .env_remove(HOST_RUNTIME_PATH_ENV)
+        .env_remove(PROCESS_ANCHOR_PATH_ENV)
         .env_remove(REMOTE_SSH_MANAGED_ENV)
         .env_remove(REMOTE_LISTENER_CHILD_ENV);
     command.envs(remote_proxy_environment);
     configure_background_command(&mut command);
     Ok(command)
+}
+
+/// A reclaim ends within about three seconds; the Shim waits no longer.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+const RECLAIM_BUDGET: Duration = Duration::from_secs(5);
+
+/// Ends Harness groups whose anchor is gone, from the records anchors keep
+/// (`codexhost-anchor --reclaim`). Without `wait` it runs in the background;
+/// with it the Shim waits up to that long and then leaves it to finish.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reclaim_abandoned_groups(anchor: &Path, wait: Option<Duration>) {
+    let Ok(mut reclaim) = Command::new(anchor)
+        .arg("--reclaim")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return;
+    };
+    let deadline = wait.map(|wait| Instant::now() + wait);
+    while let Some(deadline) = deadline
+        && Instant::now() < deadline
+    {
+        if !matches!(reclaim.try_wait(), Ok(None)) {
+            return;
+        }
+        thread::sleep(Duration::from_millis(20));
+    }
+    thread::spawn(move || {
+        let _ = reclaim.wait();
+    });
+}
+
+/// The anchor the Host's Harness processes run under: the installed one, or
+/// for a remote SSH wrapper (a copy of the Shim) the one its profile names.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn host_process_anchor(shim: &Path) -> Option<PathBuf> {
+    process_anchor_path(shim).or_else(|| {
+        (env::var_os(REMOTE_SSH_MANAGED_ENV).as_deref() == Some(std::ffi::OsStr::new("1")))
+            .then(|| env::var_os(PROCESS_ANCHOR_PATH_ENV))
+            .flatten()
+            .map(PathBuf::from)
+    })
+}
+
+/// The anchor ships beside the Shim in every layout: `libexec/` when
+/// installed, the Cargo target directory in a source checkout.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn process_anchor_path(shim: &Path) -> Option<PathBuf> {
+    // Resolve a symlinked invocation to the real installation first.
+    let shim = std::fs::canonicalize(shim).unwrap_or_else(|_| shim.to_path_buf());
+    let anchor = shim.with_file_name("codexhost-anchor");
+    anchor.is_file().then_some(anchor)
 }
 
 /// Resolve the official CLI for both the launcher-managed process tree and
@@ -801,7 +941,21 @@ pub fn run_proxy_with_observer(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    // Only a Host runs Harnesses under anchors; the stock CLI never does.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    let host_anchor = (command.get_program() != stock_codex_path.as_os_str())
+        .then(|| host_process_anchor(&current_executable))
+        .flatten();
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(anchor) = &host_anchor {
+        // Groups whose anchor an earlier session lost (killed, crashed).
+        reclaim_abandoned_groups(anchor, None);
+    }
     let mut child = spawn_supervised(&mut command)?;
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(anchor) = &host_anchor {
+        child.set_self_releasing_executable(anchor);
+    }
     let child_id = child.id();
     if let Some(lease) = &mut local_runtime_lease
         && let Err(error) = lease.set_child_process_id(child_id)
@@ -833,6 +987,11 @@ pub fn run_proxy_with_observer(
         &shutdown_signals,
         local_host_runtime.then_some(&stdin_receiver),
     )?;
+    // An anchor this session had to kill left its group to a reclaim.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    if let Some(anchor) = &host_anchor {
+        reclaim_abandoned_groups(anchor, Some(RECLAIM_BUDGET));
+    }
     stdout_pump
         .join()
         .map_err(|_| "official CLI stdout pump panicked")??;
@@ -903,7 +1062,7 @@ mod tests {
     use super::{PROCESS_TREE_REFRESH_INTERVAL, ShutdownSignals, process_tree_refresh_due};
     use super::{
         app_server_subcommand_index, is_default_remote_unix_listener, select_host_paths,
-        should_start_host_runtime,
+        should_start_host_runtime, should_start_host_runtime_for_originator,
     };
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
@@ -985,6 +1144,94 @@ mod tests {
             "app-server",
             "generate-json-schema",
         ])));
+    }
+
+    #[test]
+    fn routes_only_selected_memory_provider_to_stock_codex() {
+        for invocation in [
+            vec![
+                "-c",
+                "model_provider=\"openai-memgen\"",
+                "app-server",
+                "--stdio",
+            ],
+            vec![
+                "--config=model_provider=openai-memgen",
+                "app-server",
+                "--stdio",
+            ],
+            vec![
+                "app-server",
+                "--stdio",
+                "--config=model_provider='openai-memgen'",
+            ],
+            vec![
+                "app-server",
+                "-c",
+                "model_provider = openai-memgen",
+                "--stdio",
+            ],
+            vec![
+                "-c",
+                "model_provider=openai",
+                "app-server",
+                "--stdio",
+                "--config=model_provider=openai-memgen",
+            ],
+        ] {
+            assert!(!should_start_host_runtime_for_originator(
+                &arguments(&invocation),
+                None
+            ));
+        }
+        for invocation in [
+            vec![
+                "-c",
+                "model_providers.openai-memgen.name=OpenAI",
+                "app-server",
+                "--stdio",
+            ],
+            vec!["-c", "model_provider=openai", "app-server", "--stdio"],
+            vec!["app-server", "--stdio", "--config=other=openai-memgen"],
+            vec![
+                "-c",
+                "model_provider=openai-memgen",
+                "app-server",
+                "--stdio",
+                "--config=model_provider=openai",
+            ],
+        ] {
+            assert!(should_start_host_runtime_for_originator(
+                &arguments(&invocation),
+                None
+            ));
+        }
+    }
+
+    #[test]
+    fn routes_internal_auxiliary_originators_to_stock_codex() {
+        let app_server = arguments(&["app-server", "--stdio"]);
+        for originator in ["skysight", "Computer Use"] {
+            assert!(!should_start_host_runtime_for_originator(
+                &app_server,
+                Some(std::ffi::OsStr::new(originator)),
+            ));
+        }
+        for originator in [None, Some(""), Some("Codex Desktop")] {
+            assert!(should_start_host_runtime_for_originator(
+                &app_server,
+                originator.map(std::ffi::OsStr::new),
+            ));
+        }
+        for command in [
+            arguments(&["app-server", "proxy"]),
+            arguments(&["app-server", "daemon", "start"]),
+        ] {
+            assert!(!should_start_host_runtime_for_originator(
+                &command,
+                Some(std::ffi::OsStr::new("Codex Desktop")),
+            ));
+        }
     }
 
     #[test]

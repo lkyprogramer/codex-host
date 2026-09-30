@@ -87,6 +87,8 @@ export class ExternalTurnSteering {
   >();
   #closed = false;
 
+  // This bounds the replacement request, not native cancellation. A slower native
+  // settlement may still complete afterwards, but must never start an expired replacement.
   constructor(readonly timeoutMs = 20_000) {}
 
   hasPending(threadId?: string): boolean {

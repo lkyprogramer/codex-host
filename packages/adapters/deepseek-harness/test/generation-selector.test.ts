@@ -66,7 +66,7 @@ function dependencies(
   overrides: Partial<DeepSeekGenerationProbeDependencies> = {},
 ): DeepSeekGenerationProbeDependencies {
   return {
-    spawn: vi.fn(() => child),
+    spawn: vi.fn(() => ({ child, tree: null, anchored: false })),
     terminateProcessTree: vi.fn(() => {
       queueMicrotask(() => close(child, null, "SIGKILL"));
     }),
@@ -269,10 +269,8 @@ describe("DeepSeek executable generation probe", () => {
     });
     expect(probeDependencies.spawn).toHaveBeenCalledWith(command, ["--version"], {
       env: environment,
-      detached: process.platform !== "win32",
-      stdio: "pipe",
-      windowsHide: true,
       windowsVerbatimArguments: false,
+      closeTimeoutMs: expect.any(Number),
     });
   });
 

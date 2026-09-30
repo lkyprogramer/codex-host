@@ -17,6 +17,7 @@ import {
 } from "@codexhost/shared-contracts";
 import {
   encodeClaudeTransportModel,
+  encodeExternalTransportSelection,
   encodeGrokTransportModel,
   encodeOmpTransportModel,
   encodeOpenCodeTransportModel,
@@ -57,6 +58,64 @@ function record(): StoredThreadRecordV1 {
 }
 
 describe("ExternalThreadRuntime register", () => {
+  it("uses only the live child status when registering an opened Subagent Thread", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const active = new Set<string>([hostThreadId]);
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: { find: async () => null } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      subagentRunning: (id) => active.has(id),
+    });
+    try {
+      const childRecord = {
+        ...record(),
+        subagent: {
+          parentHostThreadId: hostThreadIdSchema.parse("parent"),
+          nativeSubagentId: "native-child",
+        },
+      };
+      const child = runtime.register({
+        record: childRecord,
+        session: opened.value,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId, status: { type: "idle" } },
+        turns: [],
+      });
+      expect(child.running).toBe(true);
+      expect(child.thread.status).toEqual({ type: "active", activeFlags: [] });
+
+      active.clear();
+      runtime.remove(hostThreadId);
+      const ended = runtime.register({
+        record: childRecord,
+        session: opened.value,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId, status: { type: "idle" } },
+        turns: [],
+      });
+      expect(ended.running).toBe(false);
+      expect(ended.thread.status).toEqual({ type: "idle" });
+
+      active.add(hostThreadId);
+      runtime.remove(hostThreadId);
+      const ordinary = runtime.register({
+        record: record(),
+        session: opened.value,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId, status: { type: "idle" } },
+        turns: [],
+      });
+      expect(ordinary.running).toBe(false);
+      expect(ordinary.thread.status).toEqual({ type: "idle" });
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
   it("passes restored mode before a plugin resolves persisted execution policy", async () => {
     const id = harnessIdSchema.parse("policy-fixture");
     const permissionModeId = harnessPermissionModeIdSchema.parse("plan");
@@ -163,6 +222,8 @@ describe("ExternalThreadRuntime register", () => {
       null,
       permissionModes,
     );
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = { resumeMayChangeConfiguration: true };
     const writeMode = harnessPermissionModeIdSchema.parse("write");
     const created = await adapter.open({
       kind: "create",
@@ -216,11 +277,11 @@ describe("ExternalThreadRuntime register", () => {
       effectiveModel: actualModel,
       effectiveThinkingOptionId: actualThinking,
     });
-    const effectiveTransportModelId = encodeOmpTransportModel(
-      actualModel,
-      actualThinking,
-      writeMode,
-    );
+    const effectiveTransportModelId = encodeExternalTransportSelection("omp", {
+      model: actualModel,
+      thinkingOptionId: actualThinking,
+      permissionModeId: writeMode,
+    });
     expect(resolved.thread.record.transportModelId).toBe(effectiveTransportModelId);
     expect(setTransportModelId).toHaveBeenCalledWith(hostThreadId, effectiveTransportModelId);
 
@@ -230,6 +291,8 @@ describe("ExternalThreadRuntime register", () => {
   it("does not restore persisted Thinking when live OMP state omits it", async () => {
     const ompHarnessId = harnessIdSchema.parse("omp");
     const adapter = new FakeHarnessAdapter(ompHarnessId);
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = { resumeMayChangeConfiguration: true };
     const created = await adapter.open({ kind: "create", cwd: "/synthetic" });
     if (!created.ok) throw new Error(created.error.message);
 
@@ -275,7 +338,9 @@ describe("ExternalThreadRuntime register", () => {
     });
     expect(resolved.thread.stateObserver.state.effectiveThinkingOptionId).toBeUndefined();
     expect(resolved.thread.requestedThinkingOptionId).toBeUndefined();
-    expect(resolved.thread.transportModelId).toBe(encodeOmpTransportModel(actualModel));
+    expect(resolved.thread.transportModelId).toBe(
+      encodeExternalTransportSelection("omp", { model: actualModel }),
+    );
 
     await adapter.close();
   });
@@ -283,6 +348,8 @@ describe("ExternalThreadRuntime register", () => {
   it("keeps OMP restore successful when live selection persistence fails", async () => {
     const ompHarnessId = harnessIdSchema.parse("omp");
     const adapter = new FakeHarnessAdapter(ompHarnessId);
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = { resumeMayChangeConfiguration: true };
     const created = await adapter.open({ kind: "create", cwd: "/synthetic" });
     if (!created.ok) throw new Error(created.error.message);
 
@@ -332,7 +399,10 @@ describe("ExternalThreadRuntime register", () => {
     });
     expect(resolved.thread.record.transportModelId).toBe(staleTransportModelId);
     expect(resolved.thread.transportModelId).toBe(
-      encodeOmpTransportModel(actualModel, actualThinking),
+      encodeExternalTransportSelection("omp", {
+        model: actualModel,
+        thinkingOptionId: actualThinking,
+      }),
     );
     expect(setTransportModelId).toHaveBeenCalledOnce();
     expect(diagnose).toHaveBeenCalledWith(expect.any(Error));
@@ -359,6 +429,11 @@ describe("ExternalThreadRuntime register", () => {
       null,
       permissionModes,
     );
+    // Declared as the real Adapter does.
+    adapter.configurationDeclarations = {
+      restoresNativePermissionMode: true,
+      resumeMayChangeConfiguration: true,
+    };
     const model = adapter.catalog.defaultModel;
     if (!model) throw new Error("Fake OpenCode catalog has no default Model");
     const created = await adapter.open({
@@ -413,13 +488,13 @@ describe("ExternalThreadRuntime register", () => {
     const liveThinking = created.value.initialState.effectiveThinkingOptionId;
     expect(execute).not.toHaveBeenCalled();
     expect(resolved.thread.stateObserver.state.effectivePermissionModeId).toBe(askMode);
-    expect(resolved.thread.transportModelId).toBe(
-      encodeOpenCodeTransportModel(model, askMode, liveThinking),
-    );
-    expect(setTransportModelId).toHaveBeenCalledWith(
-      hostThreadId,
-      encodeOpenCodeTransportModel(model, askMode, liveThinking),
-    );
+    const written = encodeExternalTransportSelection("opencode", {
+      model,
+      permissionModeId: askMode,
+      ...(liveThinking ? { thinkingOptionId: liveThinking } : {}),
+    });
+    expect(resolved.thread.transportModelId).toBe(written);
+    expect(setTransportModelId).toHaveBeenCalledWith(hostThreadId, written);
 
     await adapter.close();
   });
@@ -487,6 +562,7 @@ describe("ExternalThreadRuntime register", () => {
       });
       const restoringAdapter: HarnessAdapter = {
         harnessId: adapter.harnessId,
+        permissionModeScope: adapter.permissionModeScope,
         inspect: (input): Promise<HarnessInspection> => adapter.inspect(input),
         open,
         close: () => adapter.close(),
@@ -663,6 +739,136 @@ describe("deferred live resume", () => {
   });
 });
 
+describe("retiring a faulted Thread", () => {
+  it("does not start a second native Session until the retired one closed", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    let finishClose!: () => void;
+    const sessions: FakeHarnessSession[] = [];
+    const open = vi.fn(async () => {
+      const opened = new FakeHarnessSession(
+        harnessId,
+        undefined,
+        undefined,
+        stored.nativeSessionRef,
+      );
+      if (sessions.length === 0) {
+        // The first native Session is slow to release.
+        vi.spyOn(opened, "close").mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finishClose = resolve;
+            }),
+        );
+      }
+      sessions.push(opened);
+      return { ok: true as const, value: opened };
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([
+        [
+          "pi",
+          {
+            harnessId: adapter.harnessId,
+            inspect: (input) => adapter.inspect(input),
+            open,
+            close: () => adapter.close(),
+          } satisfies HarnessAdapter,
+        ],
+      ]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    try {
+      const first = await runtime.resolve(hostThreadId);
+      if (first.kind !== "external") throw new Error("Thread did not restore");
+      const closing = runtime.retire(first.thread);
+      expect(runtime.get(hostThreadId)).toBeUndefined();
+
+      const second = runtime.resolve(hostThreadId);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      expect(open).toHaveBeenCalledTimes(1);
+
+      finishClose();
+      await closing;
+      await expect(second).resolves.toMatchObject({ kind: "external" });
+      expect(open).toHaveBeenCalledTimes(2);
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("says a restore waits on the previous Session rather than on history", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const stored = record();
+    let finishClose!: () => void;
+    const sessions: FakeHarnessSession[] = [];
+    const open = vi.fn(async () => {
+      const opened = new FakeHarnessSession(
+        harnessId,
+        undefined,
+        undefined,
+        stored.nativeSessionRef,
+      );
+      if (sessions.length === 0) {
+        // The first native Session is slow to release.
+        vi.spyOn(opened, "close").mockImplementation(
+          () =>
+            new Promise<void>((resolve) => {
+              finishClose = resolve;
+            }),
+        );
+      }
+      sessions.push(opened);
+      return { ok: true as const, value: opened };
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([
+        [
+          "pi",
+          {
+            harnessId: adapter.harnessId,
+            inspect: (input) => adapter.inspect(input),
+            open,
+            close: () => adapter.close(),
+          } satisfies HarnessAdapter,
+        ],
+      ]),
+      repository: {
+        find: async () => stored,
+        alignSnapshot: async () => ({ record: stored, turns: [] }),
+        sessionTreeId: async () => hostThreadId,
+      } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      historyRestoreTimeoutMs: 30,
+    });
+    try {
+      const first = await runtime.resolve(hostThreadId);
+      if (first.kind !== "external") throw new Error("Thread did not restore");
+      const closing = runtime.retire(first.thread);
+      expect(runtime.get(hostThreadId)).toBeUndefined();
+
+      await expect(runtime.resolve(hostThreadId)).resolves.toMatchObject({
+        kind: "error",
+        error: { message: "External Thread's previous native Session is still closing" },
+      });
+      expect(open).toHaveBeenCalledTimes(1);
+      finishClose();
+      await closing;
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+});
+
 describe("bounded native history", () => {
   function delay(ms: number): Promise<void> {
     return new Promise((resolve) => {
@@ -729,6 +935,58 @@ describe("bounded native history", () => {
       expect(alignSnapshot).not.toHaveBeenCalled();
     } finally {
       release();
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("bounds and cancels a new generation waiting for an aborted native read", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const entered = Promise.withResolvers<undefined>();
+    const release = Promise.withResolvers<undefined>();
+    const original = opened.value.readSnapshot.bind(opened.value);
+    const read = vi.spyOn(opened.value, "readSnapshot").mockImplementation(async () => {
+      entered.resolve(undefined);
+      await release.promise;
+      return original();
+    });
+    const alignSnapshot = vi.fn();
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      historyReadTimeoutMs: 20,
+      repository: { alignSnapshot } as unknown as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+    });
+    const thread = runtime.register({
+      record: record(),
+      session: opened.value,
+      sessionId: hostThreadId,
+      thread: { id: hostThreadId },
+      turns: [],
+    });
+    try {
+      const previous = new AbortController();
+      const initial = runtime.refresh(thread, previous.signal);
+      await entered.promise;
+      previous.abort();
+      await expect(initial).resolves.toMatchObject({ code: -32081 });
+      const next = new AbortController();
+      const cancelled = runtime.refresh(thread, next.signal);
+      next.abort();
+      await expect(cancelled).resolves.toMatchObject({ code: -32081 });
+      await expect(runtime.refresh(thread, new AbortController().signal)).resolves.toMatchObject({
+        code: -32081,
+        message: "External Thread history read timed out",
+      });
+      expect(read).toHaveBeenCalledTimes(1);
+      release.resolve(undefined);
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(alignSnapshot).not.toHaveBeenCalled();
+    } finally {
+      release.resolve(undefined);
       runtime.clear();
       await adapter.close();
     }
@@ -962,6 +1220,49 @@ describe("idle native resource lifecycle", () => {
       });
       await vi.waitFor(() => expect(suspend).toHaveBeenCalledOnce());
       expect(session.closed).toBe(true);
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
+  it("reports every failed idle release and retries it", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok || !(opened.value instanceof FakeHarnessSession)) {
+      throw new Error("Missing fake Session");
+    }
+    const session = opened.value;
+    const suspend = vi.fn(async () => ({
+      status: "releaseFailed" as const,
+      reason: "process group is still alive",
+    }));
+    Object.defineProperty(session, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend },
+    });
+    const diagnostics: string[] = [];
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: {} as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: (error) => diagnostics.push(String(error)),
+      idleSuspendTimeoutMs: 5,
+    });
+    try {
+      runtime.register({
+        record: record(),
+        session,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId },
+        turns: [],
+      });
+      await vi.waitFor(() => expect(suspend.mock.calls.length).toBeGreaterThanOrEqual(2));
+      const reported = diagnostics.filter((line) =>
+        line.includes("idle release failed: process group is still alive"),
+      );
+      expect(reported.length).toBeGreaterThanOrEqual(2);
+      expect(session.closed).toBe(false);
     } finally {
       runtime.clear();
       await adapter.close();

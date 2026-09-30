@@ -84,17 +84,25 @@ function loopbackUrl(value: string, protocols: readonly string[]): URL {
   return url;
 }
 
-function parseTarget(value: unknown): CdpTarget {
+function optionalText(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function parseTarget(value: unknown): CdpTarget | null {
   if (!isRecord(value)) throw new Error("CDP target must be an object");
-  const target = {
-    id: nonEmptyString(value.id, "id"),
-    type: nonEmptyString(value.type, "type"),
+  const id = optionalText(value.id);
+  const type = optionalText(value.type);
+  const url = optionalText(value.url);
+  const webSocketDebuggerUrl = optionalText(value.webSocketDebuggerUrl);
+  if (webSocketDebuggerUrl) loopbackUrl(webSocketDebuggerUrl, ["ws:", "wss:"]);
+  if (!id || !type || !url || !webSocketDebuggerUrl) return null;
+  return {
+    id,
+    type,
     title: typeof value.title === "string" ? value.title : "",
-    url: nonEmptyString(value.url, "url"),
-    webSocketDebuggerUrl: nonEmptyString(value.webSocketDebuggerUrl, "webSocketDebuggerUrl"),
+    url,
+    webSocketDebuggerUrl,
   };
-  loopbackUrl(target.webSocketDebuggerUrl, ["ws:", "wss:"]);
-  return target;
 }
 
 function defaultFetch(url: string): Promise<CdpFetchResponse> {
@@ -157,7 +165,7 @@ export async function listCdpTargets(
   if (!response.ok) throw new Error(`CDP target discovery failed with HTTP ${response.status}`);
   const value = await response.json();
   if (!Array.isArray(value)) throw new Error("CDP target discovery did not return an array");
-  return value.map(parseTarget);
+  return value.map(parseTarget).filter((target): target is CdpTarget => target !== null);
 }
 
 export async function waitForRendererTarget(
@@ -180,7 +188,7 @@ export async function waitForRendererTarget(
         (target) => target.type === "page" && target.url.startsWith("app://"),
       );
       if (renderer) return renderer;
-      lastError = new Error("CDP has no app:// page target");
+      lastError = new Error("CDP has no attachable app:// page target");
     } catch (error) {
       lastError = error;
     }

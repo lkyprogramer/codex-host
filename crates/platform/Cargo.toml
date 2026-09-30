@@ -20,6 +20,8 @@ rustix = { version = "1.1.4", features = ["process"] }
 serde_json = "1.0.145"
 
 [target.'cfg(target_os = "macos")'.dependencies]
+libc = "0.2.189"
+serde_json = "1.0.145"
 libproc = "0.14.11"
 plist = { version = "1.10.0", default-features = false }
 system-configuration = "0.7.0"

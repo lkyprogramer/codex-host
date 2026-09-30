@@ -31,6 +31,7 @@ import {
   type OpenCodeProviderCatalog,
 } from "../src/model-catalog.js";
 import { OpenCodeAdapter, type OpenCodeAdapterDependencies } from "../src/opencode-adapter.js";
+import { openCodeNativeCommandCatalog } from "../src/native-commands.js";
 import type {
   OpenCodePromptInput,
   OpenCodeTransport,
@@ -175,7 +176,8 @@ class FakeOpenCodeTransport implements OpenCodeTransport {
     return providerCatalog();
   }
 
-  async commands() {
+  async commands(_signal?: AbortSignal) {
+    void _signal;
     return this.commandsValue;
   }
 
@@ -758,7 +760,7 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
-  it("rejects a native event or a new Host operation that races idle suspension", async () => {
+  it("declines idle suspension when a native event races the idle check", async () => {
     const transport = new FakeOpenCodeTransport();
     const { adapter, session } = await openFixture(transport);
     const lifecycle = session.resourceLifecycle;
@@ -769,18 +771,70 @@ describe("OpenCode HarnessAdapter", () => {
         resolveStatuses = resolve;
       });
     const suspension = lifecycle.suspend(new AbortController().signal);
-    await expect(session.execute(turn("racing-turn"))).resolves.toMatchObject({
-      ok: false,
-      error: { code: "sessionBusy" },
-    });
     transport.listener?.onEvent({ id: "idle-race", type: "server.connected", properties: {} });
-    resolveStatuses?.({ "session-1": { type: "idle" } });
+    resolveStatuses?.({});
 
-    await expect(suspension).resolves.toMatchObject({ status: "busy" });
+    await expect(suspension).resolves.toEqual({
+      status: "busy",
+      reason: "OpenCode native state changed during idle check",
+    });
     expect(transport.closed).toBe(0);
-    expect(transport.promptCalls).toHaveLength(0);
     await session.close();
     await adapter.close();
+  });
+
+  it("admits a Host operation during the idle check, then declines the release", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const { adapter, session } = await openFixture(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+    let resolveStatuses: ((value: Record<string, SessionStatus>) => void) | undefined;
+    const getStatuses = transport.getStatuses.bind(transport);
+    transport.getStatuses = () =>
+      new Promise<Record<string, SessionStatus>>((resolve) => {
+        resolveStatuses = resolve;
+      });
+    const suspension = lifecycle.suspend(new AbortController().signal);
+    const snapshot = session.readSnapshot();
+    transport.getStatuses = getStatuses;
+    resolveStatuses?.({});
+
+    await expect(snapshot).resolves.toMatchObject({ ok: true });
+    await expect(suspension).resolves.toMatchObject({ status: "busy" });
+    expect(transport.closed).toBe(0);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("faults the Session when its idle release closes only part of the native resources", async () => {
+    const transport = new FakeOpenCodeTransport();
+    const { adapter, session } = await openFixture(transport);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("OpenCode Session did not expose resource lifecycle");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const close = transport.close.bind(transport);
+    transport.close = async () => {
+      transport.closed += 1;
+      throw new Error("synthetic transport close failure");
+    };
+
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "releaseFailed",
+    });
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { kind: "event", event: { type: "session.faulted" } },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    await expect(session.execute(turn("after-fault"))).resolves.toMatchObject({
+      ok: false,
+      error: { code: "invalidState" },
+    });
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toMatchObject({
+      status: "unknown",
+    });
+    transport.close = close;
+    await adapter.close().catch(() => undefined);
   });
 
   it("closes the managed Server when transport cleanup rejects", async () => {
@@ -1224,7 +1278,10 @@ describe("OpenCode HarnessAdapter", () => {
         selectThinkingOption: true,
         selectPermissionMode: true,
         permissionModeScope: "live",
+        restoresNativePermissionMode: true,
+        resumeMayChangeConfiguration: true,
       },
+      resources: { idleRelease: true, ownedJobs: false },
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
     });
     await expect(
@@ -1505,7 +1562,66 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
-  it("lists only static compaction without native discovery and rejects dynamic commands", async () => {
+  it.each(["success", "failure"])(
+    "holds native resources during a command catalog read (%s)",
+    async (outcome) => {
+      const transport = new FakeOpenCodeTransport();
+      let resolveNative: ((commands: Command[]) => void) | undefined;
+      let rejectNative: ((error: Error) => void) | undefined;
+      vi.spyOn(transport, "commands").mockImplementation(
+        () =>
+          new Promise((resolve, reject) => {
+            resolveNative = resolve;
+            rejectNative = reject;
+          }),
+      );
+      const { adapter, session } = await openFixture(transport);
+      const commands = session.commands;
+      const lifecycle = session.resourceLifecycle;
+      if (!commands || !lifecycle) throw new Error("Missing OpenCode capabilities");
+      try {
+        const pending = commands.list();
+        expect(lifecycle.workLevel?.()).toMatchObject({ level: "busy" });
+        await expect(lifecycle.suspend({ aborted: false })).resolves.toMatchObject({
+          status: "busy",
+        });
+        expect(transport.closed).toBe(0);
+        if (outcome === "success") resolveNative?.([]);
+        else rejectNative?.(new Error("Catalog unavailable"));
+        await expect(pending).resolves.toMatchObject({ ok: outcome === "success" });
+        expect(lifecycle.workLevel?.()).toEqual({ level: "idle" });
+        await expect(lifecycle.suspend({ aborted: false })).resolves.toMatchObject({
+          status: "suspended",
+        });
+        await expect(commands.list()).resolves.toMatchObject({
+          ok: false,
+          error: { code: "invalidState" },
+        });
+      } finally {
+        resolveNative?.([]);
+        await adapter.close();
+      }
+    },
+  );
+
+  it("drops a command catalog response after Session close", async () => {
+    const transport = new FakeOpenCodeTransport();
+    let finish: ((commands: Command[]) => void) | undefined;
+    vi.spyOn(transport, "commands").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    );
+    const { adapter, session } = await openFixture(transport);
+    const pending = session.commands?.list();
+    await session.close();
+    finish?.([]);
+    await expect(pending).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    await adapter.close();
+  });
+
+  it("reports native discovery failure and keeps static compaction available", async () => {
     const transport = new FakeOpenCodeTransport();
     transport.commandsValue = [
       {
@@ -1522,7 +1638,7 @@ describe("OpenCode HarnessAdapter", () => {
     const commands = session.commands;
     if (!commands) throw new Error("OpenCode Session did not expose commands");
     const catalog = await commands.list();
-    expect(catalog).toEqual({ ok: true, value: adapter.commandCatalog });
+    expect(catalog).toMatchObject({ ok: false, error: { code: "unavailable" } });
     expect(adapter.commandCatalog.commands).toEqual([
       expect.objectContaining({ id: "opencode.compact", invocation: "/compact" }),
     ]);
@@ -1533,7 +1649,7 @@ describe("OpenCode HarnessAdapter", () => {
         arguments: { text: "security" },
       }),
     ).resolves.toMatchObject({ ok: false, error: { code: "unsupported" } });
-    expect(discover).not.toHaveBeenCalled();
+    expect(discover).toHaveBeenCalledOnce();
     expect(transport.commandCalls).toEqual([]);
     const iterator = session.outputs[Symbol.asyncIterator]();
 
@@ -1551,6 +1667,317 @@ describe("OpenCode HarnessAdapter", () => {
     expect(await nextEvent(iterator)).toMatchObject({ type: "item.completed" });
     expect(await nextEvent(iterator)).toMatchObject({ type: "turn.completed" });
     expect(transport.summarizeCalls).toEqual(["session-1"]);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("discovers native command and skill metadata without creating a Session", async () => {
+    const transport = new FakeOpenCodeTransport();
+    transport.commandsValue = [
+      { name: "review", source: "command", template: "Review $ARGUMENTS", hints: [] },
+      { name: "skill:review", source: "skill", template: "Review skill", hints: [] },
+      { name: "compact", source: "command", template: "Compact", hints: [] },
+      { name: "model", source: "command", template: "Change model", hints: [] },
+      { name: "model", source: "skill", template: "Model skill", hints: [] },
+      { name: "settings", source: "skill", template: "Settings skill", hints: [] },
+    ];
+    let connectionClosed = 0;
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            connectionClosed += 1;
+          },
+        }),
+        createTransport: () => transport,
+        randomUUID: () => "uuid",
+      },
+    );
+    const result = await adapter.inspectCommands({ cwd, signal: new AbortController().signal });
+    expect(result).toMatchObject({
+      ok: true,
+      value: {
+        source: "live",
+        commands: [
+          expect.objectContaining({ invocation: "/review", kind: "command" }),
+          expect.objectContaining({ invocation: "/skill:review", kind: "skill" }),
+          expect.objectContaining({ invocation: "/compact" }),
+          expect.objectContaining({ invocation: "/settings", kind: "skill" }),
+        ],
+      },
+    });
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.commands.some(({ invocation }) => invocation === "/model")).toBe(false);
+    expect(transport.createSessionCalls).toEqual([]);
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+    await adapter.close();
+  });
+
+  it("rejects a stale skill ID when native command and skill names become ambiguous", async () => {
+    const transport = new FakeOpenCodeTransport();
+    transport.commandsValue = [
+      { name: "model", source: "command", template: "Change model", hints: [] },
+      { name: "model", source: "skill", template: "Model skill", hints: [] },
+    ];
+    const stale = openCodeNativeCommandCatalog([
+      { name: "model", source: "skill", template: "Model skill", hints: [] },
+    ]).commands[0];
+    if (!stale) throw new Error("Missing stale skill ID");
+    const { adapter, session } = await openFixture(transport);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("ambiguous-model"),
+        commandId: stale.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(await nextEvent(iterator)).toMatchObject({ type: "turn.started" });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "failed" },
+    });
+    expect(transport.commandCalls).toEqual([]);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("aborts native metadata transport and closes the managed Server on cancellation", async () => {
+    const transport = new FakeOpenCodeTransport();
+    transport.commands = async (signal) =>
+      new Promise<Command[]>((_resolve, reject) => {
+        signal?.addEventListener("abort", () => reject(new Error("command list cancelled")), {
+          once: true,
+        });
+      });
+    let connectionClosed = 0;
+    const adapter = new OpenCodeAdapter(
+      {},
+      {
+        createConnection: () => ({
+          stderrTail: "",
+          client: async () => ({}) as never,
+          close: async () => {
+            connectionClosed += 1;
+          },
+        }),
+        createTransport: () => transport,
+        randomUUID: () => "uuid",
+      },
+    );
+    const controller = new AbortController();
+    const pending = adapter.inspectCommands({ cwd, signal: controller.signal });
+    controller.abort();
+    await expect(pending).resolves.toMatchObject({ ok: false });
+    expect(transport.closed).toBe(1);
+    expect(connectionClosed).toBe(1);
+    await adapter.close();
+  });
+
+  it("runs a cataloged native command through session.command and reconciles its Turn", async () => {
+    const transport = new FakeOpenCodeTransport();
+    transport.commandsValue = [
+      { name: "review", source: "command", template: "Review", hints: [] },
+    ];
+    const { adapter, session } = await openFixture(transport);
+    const catalog = await session.commands?.list();
+    expect(catalog).toMatchObject({ ok: true, value: { source: "live" } });
+    if (!catalog?.ok) throw new Error("Missing OpenCode native catalog");
+    const native = catalog.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("review-turn"),
+        commandId: native.id,
+        arguments: { text: "  security  " },
+      }),
+    ).resolves.toEqual({ ok: true, value: { turnId: "review-turn" } });
+    await vi.waitFor(() => expect(transport.commandCalls).toHaveLength(1));
+    expect(transport.commandCalls).toMatchObject([
+      { command: "review", arguments: "  security  " },
+    ]);
+    expect(transport.promptCalls).toEqual([]);
+    const events = [];
+    for (let count = 0; count < 12; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed") break;
+    }
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "succeeded" },
+    });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("cancels during native metadata, drops its late result, and admits a later Turn", async () => {
+    const transport = new FakeOpenCodeTransport();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const commands = vi.spyOn(transport, "commands").mockImplementation(async () => {
+      await gate;
+      return [{ name: "review", source: "command", template: "Review", hints: [] }];
+    });
+    const { adapter, session } = await openFixture(transport);
+    const native = openCodeNativeCommandCatalog([
+      { name: "review", source: "command", template: "Review", hints: [] },
+    ]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("pending-review"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    await vi.waitFor(() => expect(commands).toHaveBeenCalledOnce());
+    await expect(session.resourceLifecycle?.suspend({ aborted: false })).resolves.toMatchObject({
+      status: "busy",
+    });
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("pending-review") }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.started",
+      turnId: "pending-review",
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.completed",
+      turnId: "pending-review",
+      outcome: { status: "cancelled" },
+    });
+    release?.();
+    await flush();
+    expect(transport.commandCalls).toEqual([]);
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("later-compact"),
+        commandId: "opencode.compact",
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    const later = [];
+    for (let count = 0; count < 6; count += 1) {
+      const event = await nextEvent(iterator);
+      later.push(event);
+      if (event.type === "turn.completed" && event.turnId === "later-compact") break;
+    }
+    expect(later.at(-1)).toMatchObject({
+      type: "turn.completed",
+      turnId: "later-compact",
+      outcome: { status: "succeeded" },
+    });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("closes a Session during pending native metadata without late command dispatch", async () => {
+    const transport = new FakeOpenCodeTransport();
+    let release: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    vi.spyOn(transport, "commands").mockImplementation(async () => {
+      await gate;
+      return [{ name: "review", source: "command", template: "Review", hints: [] }];
+    });
+    const { adapter, session } = await openFixture(transport);
+    const native = openCodeNativeCommandCatalog([
+      { name: "review", source: "command", template: "Review", hints: [] },
+    ]).commands[0];
+    if (!native) throw new Error("Missing review command");
+    await session.commands?.execute({
+      turnId: hostTurnIdSchema.parse("closing-review"),
+      commandId: native.id,
+    });
+    await expect(session.close()).resolves.toBeUndefined();
+    release?.();
+    await flush();
+    expect(transport.commandCalls).toEqual([]);
+    expect(transport.closed).toBe(1);
+    await adapter.close();
+  });
+
+  it("cancels a native command and ignores its late HTTP completion", async () => {
+    const transport = new FakeOpenCodeTransport();
+    transport.commandsValue = [
+      { name: "review", source: "command", template: "Review", hints: [] },
+    ];
+    const execute = transport.executeCommand.bind(transport);
+    let release: (() => void) | undefined;
+    const pending = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    transport.executeCommand = async (input) => {
+      const response = await execute(input);
+      await pending;
+      return response;
+    };
+    const { adapter, session } = await openFixture(transport);
+    const catalog = await session.commands?.list();
+    if (!catalog?.ok) throw new Error("Missing OpenCode native catalog");
+    const native = catalog.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await session.commands?.execute({
+      turnId: hostTurnIdSchema.parse("review-cancel"),
+      commandId: native.id,
+    });
+    await vi.waitFor(() => expect(transport.commandCalls).toHaveLength(1));
+    await expect(
+      session.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("review-cancel") }),
+    ).resolves.toEqual({ ok: true, value: { cancellationRequested: true } });
+    const events = [];
+    for (let count = 0; count < 5; count += 1) {
+      const event = await nextEvent(iterator);
+      events.push(event);
+      if (event.type === "turn.completed") break;
+    }
+    expect(events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "cancelled" },
+    });
+    release?.();
+    await flush();
+    expect(transport.promptCalls).toEqual([]);
+    await session.close();
+    await adapter.close();
+  });
+
+  it("reports a native command HTTP failure as one failed Turn", async () => {
+    const transport = new FakeOpenCodeTransport();
+    transport.commandsValue = [
+      { name: "review", source: "command", template: "Review", hints: [] },
+    ];
+    transport.executeCommand = async () => {
+      throw new Error("native command rejected");
+    };
+    const { adapter, session } = await openFixture(transport);
+    const catalog = await session.commands?.list();
+    if (!catalog?.ok) throw new Error("Missing OpenCode native catalog");
+    const native = catalog.value.commands.find(({ invocation }) => invocation === "/review");
+    if (!native) throw new Error("Missing review command");
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await expect(
+      session.commands?.execute({
+        turnId: hostTurnIdSchema.parse("review-fail"),
+        commandId: native.id,
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.started",
+      turnId: "review-fail",
+    });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "turn.completed",
+      outcome: { status: "failed", error: { message: "native command rejected" } },
+    });
     await session.close();
     await adapter.close();
   });
@@ -1984,6 +2411,82 @@ describe("OpenCode HarnessAdapter", () => {
     expect(await nextEvent(iterator)).toMatchObject({
       type: "turn.completed",
       outcome: { status: "succeeded" },
+    });
+    await session.close();
+    await adapter.close();
+  });
+
+  it("covers only verified same-file previews in live and restored partial native Diffs", async () => {
+    const { adapter, session, transport } = await openFixture();
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    await session.execute(turn("turn-partial-file-diff"));
+    await nextEvent(iterator);
+    const promptID = transport.promptCalls.at(-1)?.messageID;
+    if (!promptID) throw new Error("OpenCode prompt has no Message ID");
+    transport.emit({
+      id: "assistant-partial-file-diff",
+      type: "message.updated",
+      properties: {
+        sessionID: "session-1",
+        info: assistantMessage("assistant-live", promptID).info,
+      },
+    });
+    const tools: Part[] = ["a.txt", "b.txt"].map((file, index) => ({
+      id: `tool-${index}`,
+      sessionID: "session-1",
+      messageID: "assistant-live",
+      type: "tool",
+      callID: `call-${index}`,
+      tool: "edit",
+      state: {
+        status: "completed",
+        input: { path: file, old_string: "old\n", new_string: "preview\n" },
+        output: "",
+        title: `Edit ${file}`,
+        metadata: {},
+        time: { start: 1, end: 2 },
+      },
+    }));
+    for (const tool of tools) {
+      transport.emit({
+        id: `event-${tool.id}`,
+        type: "message.part.updated",
+        properties: { sessionID: "session-1", part: tool, time: 2 },
+      });
+      expect(await nextEvent(iterator)).toMatchObject({
+        type: "item.started",
+        item: { type: "toolExecution" },
+      });
+      expect(await nextEvent(iterator)).toMatchObject({ type: "item.completed" });
+    }
+    transport.diffs.set(promptID, [
+      {
+        file: "a.txt",
+        patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+native\n",
+        additions: 1,
+        deletions: 1,
+        status: "modified",
+      },
+    ]);
+    appendTerminal(transport, tools);
+    await completeAfterBusy(transport);
+    const started = await nextEvent(iterator);
+    expect(started).toMatchObject({
+      type: "item.started",
+      item: {
+        type: "fileChange",
+        changes: [{ path: "/synthetic/a.txt", coveredToolItemIds: ["tool-0"] }],
+      },
+    });
+    await nextEvent(iterator);
+    await nextEvent(iterator);
+    const restored = await session.readSnapshot();
+    expect(restored.ok).toBe(true);
+    if (!restored.ok) throw new Error("Missing restored snapshot");
+    expect(
+      restored.value.turns[0]?.items.find(({ item }) => item.type === "fileChange")?.item,
+    ).toMatchObject({
+      changes: [{ coveredToolItemIds: ["tool-0"] }],
     });
     await session.close();
     await adapter.close();

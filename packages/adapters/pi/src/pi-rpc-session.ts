@@ -1,9 +1,21 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  assistantMessageId,
+  assistantReasoning,
+  assistantText,
+  message,
+  nonBlankString,
+  waitForLeaderExit,
+} from "@codexhost/adapter-pi-family";
 import { randomUUID } from "node:crypto";
 import path from "node:path";
 
 import { parseHostUsage, sanitizeDiagnosticTail, type HostUsage } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import {
+  spawnOwnedProcess,
+  type OwnedProcess,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 import {
   harnessThinkingOptionIdSchema,
   jsonValueSchema,
@@ -24,22 +36,6 @@ import {
 } from "./pi-usage.js";
 import type { PiNativeModel, PiNativeModelRef } from "./pi-model-catalog.js";
 import { verifyPiSessionCwd } from "./pi-session-file.js";
-
-function waitForLeaderExit(
-  child: ChildProcessWithoutNullStreams,
-  timeoutMs: number,
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return Promise.resolve();
-  return new Promise((resolve) => {
-    const finish = (): void => {
-      clearTimeout(timer);
-      child.removeListener("exit", finish);
-      resolve();
-    };
-    const timer = setTimeout(finish, timeoutMs);
-    child.once("exit", finish);
-  });
-}
 
 export interface PiSessionState {
   sessionId: string;
@@ -115,6 +111,13 @@ export type PiTurnEvent =
 export interface PiTurnResult {
   text: string;
   cancelled: boolean;
+  handled?: boolean;
+}
+
+export interface PiNativeCommand {
+  name: string;
+  description?: string;
+  source: "extension" | "prompt" | "skill";
 }
 
 export type PiAutonomousTurnResult =
@@ -155,6 +158,7 @@ export class PiRpcUnsupportedCommandError extends Error {
 
 export interface PiRpcSessionOptions {
   cwd: string;
+  noSession?: boolean;
   command?: string;
   environment?: NodeJS.ProcessEnv;
   sessionFile?: string;
@@ -164,11 +168,14 @@ export interface PiRpcSessionOptions {
   commandTimeoutMs?: number;
   cancelTimeoutMs?: number;
   closeTimeoutMs?: number;
+  /** Overrides MAX_FRAME_BYTES; tests use a small one. */
+  maxFrameBytes?: number;
   onFault?: (error: PiRpcFaultError) => void;
 }
 
 export interface PiRpcProcessOptions {
   cwd: string;
+  noSession?: boolean;
   command?: string;
   environment: NodeJS.ProcessEnv;
   sessionFile?: string;
@@ -177,8 +184,17 @@ export interface PiRpcProcessOptions {
   emptySessionConfiguration?: PiEmptySessionConfiguration;
 }
 
+/** How the Session's native process is owned and when its cleanup failed. */
+export interface PiRpcProcessOwnership {
+  closeTimeoutMs: number;
+  onExitCleanupFailure(error: unknown): void;
+}
+
 export interface PiRpcProcessAdapter {
-  spawn(options: PiRpcProcessOptions): ChildProcessWithoutNullStreams;
+  spawn(
+    options: PiRpcProcessOptions,
+    ownership: PiRpcProcessOwnership,
+  ): OwnedProcess<ChildProcessWithoutNullStreams>;
 }
 
 interface PendingCommand {
@@ -196,6 +212,7 @@ interface ManualCompaction {
 
 interface ActiveTurn {
   origin: "requested" | "autonomous";
+  handled?: boolean;
   autonomousEvents: PiTurnEvent[] | null;
   nativeTurnKey: string | null;
   nativeCancellationObserved: boolean;
@@ -220,17 +237,20 @@ interface ActiveTurn {
 }
 
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
+/**
+ * One RPC frame (a full history can be one) is never larger than this; a
+ * stream that sends more without a newline is broken, not slow.
+ */
+const MAX_FRAME_BYTES = 128 * 1024 * 1024;
+/**
+ * Writes whose timeout leaves the native Session in an unknown state: was
+ * the Model switched, the branch taken? The connection is retired rather
+ * than reused. A read that times out is only refused.
+ */
+const RETIRING_COMMANDS = new Set(["set_model", "set_thinking_level", "clone"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function message(value: unknown): string {
-  return value instanceof Error ? value.message : String(value);
-}
-
-function nonBlankString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
 }
 
 function parseNativeModel(value: unknown, context: string): PiNativeModelRef | null {
@@ -339,40 +359,6 @@ function parseAvailableModels(response: Record<string, unknown>): PiNativeModel[
   });
 }
 
-function assistantText(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) return null;
-  return value.content
-    .filter(
-      (content): content is Record<string, unknown> =>
-        isRecord(content) && content.type === "text" && typeof content.text === "string",
-    )
-    .map((content) => content.text as string)
-    .join("");
-}
-
-function assistantMessageId(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant") return null;
-  return nonBlankString(value.responseId) ? value.responseId : null;
-}
-
-function extractReasoningText(content: unknown): string | null {
-  if (!isRecord(content)) return null;
-  const type = String(content.type ?? "");
-  if (type === "thinking" || type === "reasoning" || type === "thought") {
-    const text = content.thinking ?? content.reasoning ?? content.text ?? content.delta;
-    return typeof text === "string" ? text : null;
-  }
-  return null;
-}
-
-function assistantReasoning(value: unknown): string | null {
-  if (!isRecord(value) || value.role !== "assistant" || !Array.isArray(value.content)) return null;
-  return value.content
-    .map(extractReasoningText)
-    .filter((text): text is string => typeof text === "string")
-    .join("");
-}
-
 function assistantFailure(value: unknown): Error | null | undefined {
   if (!isRecord(value) || value.role !== "assistant") return undefined;
   if (value.stopReason !== "error" && value.stopReason !== "aborted") return null;
@@ -400,6 +386,9 @@ export function piRpcProcessCommand(
   if (options.sessionFile && options.forkSessionFile) {
     throw new Error("Pi RPC cannot combine Session resume and Fork startup");
   }
+  if (options.noSession && (options.sessionFile || options.forkSessionFile)) {
+    throw new Error("Pi RPC cannot combine ephemeral and persisted Session startup");
+  }
   if (options.model && (options.sessionFile || options.forkSessionFile)) {
     throw new Error("Pi RPC cannot combine a startup Model with Session restore or Fork");
   }
@@ -425,7 +414,9 @@ export function piRpcProcessCommand(
     ? ["--fork", options.forkSessionFile]
     : options.sessionFile
       ? ["--session", options.sessionFile]
-      : [];
+      : options.noSession
+        ? ["--no-session"]
+        : [];
   const startupModel = options.emptySessionConfiguration?.model ?? options.model;
   const modelArguments = startupModel
     ? ["--provider", startupModel.provider, "--model", startupModel.id]
@@ -454,15 +445,13 @@ export function piRpcProcessCommand(
 }
 
 const nodeProcessAdapter: PiRpcProcessAdapter = {
-  spawn(options) {
+  spawn(options, ownership) {
     const invocation = piRpcProcessCommand(options);
-    return spawn(invocation.command, invocation.arguments, {
+    return spawnOwnedProcess(invocation.command, invocation.arguments, {
       cwd: options.cwd,
       env: options.environment,
-      detached: process.platform !== "win32",
-      stdio: ["pipe", "pipe", "pipe"],
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+      ...ownership,
     });
   },
 };
@@ -501,7 +490,8 @@ export class PiRpcSession {
     }
     this.#options = {
       commandTimeoutMs: 30_000,
-      cancelTimeoutMs: 2_000,
+      // Abort acknowledgement is not settlement: native tools may still be unwinding.
+      cancelTimeoutMs: 30_000,
       closeTimeoutMs: 2_000,
       ...options,
     };
@@ -523,35 +513,40 @@ export class PiRpcSession {
 
   async start(): Promise<this> {
     if (this.#child || this.#closed) throw new Error("Pi RPC Session cannot be started twice");
-    const child = this.#processAdapter.spawn({
-      cwd: this.#options.cwd,
-      ...(this.#options.command ? { command: this.#options.command } : {}),
-      environment: withNodeRuntimeOnPath({
-        ...process.env,
-        ...this.#options.environment,
-        PI_SKIP_VERSION_CHECK: "1",
-        PI_TELEMETRY: "0",
-      }),
-      ...(this.#options.sessionFile ? { sessionFile: this.#options.sessionFile } : {}),
-      ...(this.#options.forkSessionFile ? { forkSessionFile: this.#options.forkSessionFile } : {}),
-      ...(this.#options.model ? { model: this.#options.model } : {}),
-      ...(this.#options.emptySessionConfiguration
-        ? { emptySessionConfiguration: this.#options.emptySessionConfiguration }
-        : {}),
-    });
-    this.#child = child;
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
-      closeTimeoutMs: this.#options.closeTimeoutMs,
-      onExitCleanupFailure: (error) =>
-        this.#fail(
-          new PiRpcFaultError(
-            "processExited",
-            `Pi RPC owned process cleanup failed: ${message(error)}`,
-            this.stderrTail,
+    const { child, tree } = this.#processAdapter.spawn(
+      {
+        cwd: this.#options.cwd,
+        ...(this.#options.noSession ? { noSession: true } : {}),
+        ...(this.#options.command ? { command: this.#options.command } : {}),
+        environment: withNodeRuntimeOnPath({
+          ...process.env,
+          ...this.#options.environment,
+          PI_SKIP_VERSION_CHECK: "1",
+          PI_TELEMETRY: "0",
+        }),
+        ...(this.#options.sessionFile ? { sessionFile: this.#options.sessionFile } : {}),
+        ...(this.#options.forkSessionFile
+          ? { forkSessionFile: this.#options.forkSessionFile }
+          : {}),
+        ...(this.#options.model ? { model: this.#options.model } : {}),
+        ...(this.#options.emptySessionConfiguration
+          ? { emptySessionConfiguration: this.#options.emptySessionConfiguration }
+          : {}),
+      },
+      {
+        closeTimeoutMs: this.#options.closeTimeoutMs,
+        onExitCleanupFailure: (error) =>
+          this.#fail(
+            new PiRpcFaultError(
+              "processExited",
+              `Pi RPC owned process cleanup failed: ${message(error)}`,
+              this.stderrTail,
+            ),
           ),
-        ),
-    });
+      },
+    );
+    this.#child = child;
+    this.#ownedProcessTree = tree;
     child.stdout.on("data", (chunk: Buffer) => this.#push(chunk));
     child.stdout.on("end", () => {
       if (this.#buffer.length !== 0) {
@@ -578,18 +573,24 @@ export class PiRpcSession {
         );
       }
     });
-    await Promise.race([
-      new Promise<void>((resolve, reject) => {
-        child.once("spawn", resolve);
-        child.once("error", reject);
-      }),
-      new Promise<never>((_resolve, reject) =>
-        setTimeout(
-          () => reject(new Error("Pi RPC start timed out")),
-          this.#options.commandTimeoutMs,
-        ),
-      ),
-    ]);
+    let startTimer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        new Promise<void>((resolve, reject) => {
+          child.once("spawn", resolve);
+          child.once("error", reject);
+        }),
+        new Promise<never>((_resolve, reject) => {
+          startTimer = setTimeout(
+            () => reject(new Error("Pi RPC start timed out")),
+            this.#options.commandTimeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      // A timer that outlives a started process would keep the Host alive.
+      clearTimeout(startTimer);
+    }
     try {
       this.#state = parseSessionState(await this.#send("get_state", {}));
     } catch (error) {
@@ -610,6 +611,32 @@ export class PiRpcSession {
       if (error instanceof PiRpcFaultError) this.#fail(error);
       throw error;
     }
+  }
+
+  async getCommands(): Promise<PiNativeCommand[]> {
+    const response = await this.#send("get_commands", {});
+    const data = response.data;
+    if (!isRecord(data) || !Array.isArray(data.commands)) {
+      throw new PiRpcFaultError("protocolError", "Pi RPC command catalog is malformed");
+    }
+    return data.commands.map((value: unknown) => {
+      if (
+        !isRecord(value) ||
+        typeof value.name !== "string" ||
+        value.name.length === 0 ||
+        (value.source !== "extension" && value.source !== "prompt" && value.source !== "skill")
+      ) {
+        throw new PiRpcFaultError(
+          "protocolError",
+          "Pi RPC command catalog contains an invalid command",
+        );
+      }
+      return {
+        name: value.name,
+        source: value.source,
+        ...(typeof value.description === "string" ? { description: value.description } : {}),
+      };
+    });
   }
 
   async compact(
@@ -776,7 +803,24 @@ export class PiRpcSession {
       };
     });
     try {
-      await this.#send("prompt", { message: text });
+      const response = await this.#send("prompt", { message: text });
+      const disposition = isRecord(response.data) ? response.data.disposition : undefined;
+      const active = this.#activeTurn as ActiveTurn | null;
+      if (disposition === "handled" && active?.origin === "requested") {
+        active.handled = true;
+        const stateResponse = await this.#send("get_state", {});
+        this.#state = parseSessionState(stateResponse);
+        if ((this.#activeTurn as ActiveTurn | null) === active) {
+          if (parseSessionStreaming(stateResponse)) {
+            // The extension started its own run. Use its normal settled
+            // events/history rather than treating the command as local-only.
+            active.handled = false;
+          } else {
+            active.settlement = "confirmed";
+            this.#finishSettledTurn(active);
+          }
+        }
+      }
     } catch (error) {
       this.#rejectActiveTurn(error instanceof Error ? error : new Error(message(error)));
     }
@@ -920,6 +964,13 @@ export class PiRpcSession {
         );
       }
       newline = this.#buffer.indexOf(0x0a);
+    }
+    const maxFrameBytes = this.#options.maxFrameBytes ?? MAX_FRAME_BYTES;
+    if (this.#buffer.length > maxFrameBytes) {
+      this.#buffer = Buffer.alloc(0);
+      this.#fail(
+        new PiRpcFaultError("protocolError", `Pi RPC frame exceeds ${maxFrameBytes} bytes`),
+      );
     }
   }
 
@@ -1382,9 +1433,15 @@ export class PiRpcSession {
       return;
     }
     if (active.cancellation === "accepted") {
-      active.resolve({ text: active.text, cancelled: true });
+      active.resolve({
+        text: active.text,
+        cancelled: true,
+        ...(active.handled ? { handled: true } : {}),
+      });
     } else if (active.failure) {
       active.reject(active.failure);
+    } else if (active.handled) {
+      active.resolve({ text: active.text, cancelled: false, handled: true });
     } else if (active.text.trim().length === 0 && !active.sawTool) {
       active.reject(new Error("Pi RPC settled without displayable output"));
     } else {
@@ -1501,7 +1558,7 @@ export class PiRpcSession {
       if (this.#pending.get(id) !== pending) return;
       pending.timeout = null;
       const error = new Error(`Pi RPC '${pending.command}' command timed out`);
-      if (pending.command !== "prompt") {
+      if (pending.command !== "prompt" && !RETIRING_COMMANDS.has(pending.command)) {
         this.#pending.delete(id);
         pending.reject(error);
         return;

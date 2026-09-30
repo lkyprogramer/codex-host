@@ -1264,25 +1264,29 @@ describe("Codex UI projector", () => {
       },
     });
     expect(
-      value.project({
-        type: "item.completed",
-        turnId,
-        snapshot: {
-          item: {
-            type: "toolExecution",
-            itemId: editId,
-            toolName: "Edit",
-            arguments: { path: "src/app.ts", old_string: "a", new_string: "b" },
+      value
+        .project({
+          type: "item.completed",
+          turnId,
+          snapshot: {
+            item: {
+              type: "toolExecution",
+              itemId: editId,
+              toolName: "Edit",
+              arguments: { path: "src/app.ts", old_string: "a", new_string: "b" },
+            },
+            outcome: { status: "succeeded" },
           },
-          outcome: { status: "succeeded" },
-        },
-      }).messages,
-    ).toMatchObject([
-      {
-        method: "item/completed",
-        params: { item: { type: "fileChange", status: "completed" } },
-      },
-    ]);
+        })
+        .messages.map(({ method }) => method),
+    ).toEqual(["item/fileChange/patchUpdated", "turn/diff/updated"]);
+    expect(
+      value.project({ type: "turn.completed", turnId, outcome: { status: "succeeded" } })
+        .messages[0],
+    ).toMatchObject({
+      method: "item/completed",
+      params: { item: { type: "fileChange", status: "completed" } },
+    });
   });
 
   it("projects reliable File Changes and the current Turn Diff", () => {
@@ -1326,7 +1330,7 @@ describe("Codex UI projector", () => {
       ],
     };
     const secondStarted = value.project({ type: "item.started", turnId, item: secondFile });
-    expect(secondStarted.messages[2]).toMatchObject({
+    expect(secondStarted.messages[1]).toMatchObject({
       params: {
         diff: expect.stringMatching(/sample\.txt[\s\S]*other\.txt/u),
       },
@@ -1342,11 +1346,11 @@ describe("Codex UI projector", () => {
       outcome: { status: "succeeded" },
     });
     expect(completed.completedTurn).toMatchObject({
-      items: [
-        { type: "fileChange", id: "file-1", status: "completed" },
-        { type: "fileChange", id: "file-2", status: "completed" },
-      ],
+      items: [{ type: "fileChange", id: "file-1", status: "completed" }],
     });
+    expect((completed.completedTurn?.items as { changes: unknown[] }[])[0]?.changes).toHaveLength(
+      2,
+    );
   });
 
   it("projects standalone Questions through a synthetic Generic Tool lifecycle", () => {

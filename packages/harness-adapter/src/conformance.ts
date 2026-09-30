@@ -12,6 +12,14 @@ import type {
   HarnessSessionCapabilities,
   HostThreadSnapshot,
 } from "./text-session.js";
+import {
+  closedSessionRefusesWork,
+  configurationTimeout,
+  type ConfigurationWrite,
+  suspendAborted,
+  suspendIdle,
+  suspendWhileBusy,
+} from "./conformance-lifecycle.js";
 import { OutputCollector } from "./conformance-output.js";
 import type { ConformanceTerminalReadback } from "./conformance-output.js";
 import {
@@ -80,6 +88,12 @@ export interface ConformanceProbes {
   }) => Promise<void>;
   /** Runs after every known Session and Adapter close attempt. */
   readonly readCleanup?: () => Promise<ConformanceCleanupReadback>;
+  /**
+   * Makes the native side stop answering configuration writes for `session`
+   * and returns the write to send: a selection the Session advertises. The
+   * adapter's own configuration timeout must be shorter than the plan's.
+   */
+  readonly stallConfiguration?: (session: HarnessSession) => Promise<ConfigurationWrite>;
 }
 
 export interface AdapterConformancePlan {
@@ -327,6 +341,8 @@ export async function runAdapterConformance(
   plan: AdapterConformancePlan,
 ): Promise<ConformanceReceipt> {
   const timeoutMs = plan.timeoutMs ?? 5_000;
+  const bounded = <T>(operation: string, execute: () => Promise<T>) =>
+    boundedOperation(operation, timeoutMs, execute);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 50)
     throw new Error("Conformance timeoutMs must be an integer of at least 50ms");
   if (JSON.stringify(plan.environment.primary) === JSON.stringify(plan.environment.isolated))
@@ -450,6 +466,9 @@ export async function runAdapterConformance(
     terminalTurns.push(firstTerminal.nativeTurnRef);
     scenarios.firstTurn = { status: "passed" };
 
+    activeScenario = "suspendAborted";
+    scenarios.suspendAborted = await suspendAborted(primarySession, bounded);
+
     activeScenario = "environmentIsolation";
     const assertEnvironmentIsolation = plan.probes?.assertEnvironmentIsolation;
     if (assertEnvironmentIsolation) {
@@ -492,6 +511,9 @@ export async function runAdapterConformance(
       "cancellable turn",
     );
     await primaryCollector.started(cancellableTurnId, timeoutMs);
+    activeScenario = "suspendWhileBusy";
+    scenarios.suspendWhileBusy = await suspendWhileBusy(primarySession, bounded);
+    activeScenario = "concurrentTurn";
     const concurrent = await boundedOperation("execute:concurrentTurn", timeoutMs, () =>
       primarySession.execute({
         type: "turn.start",
@@ -582,6 +604,9 @@ export async function runAdapterConformance(
       timeoutMs,
     );
 
+    activeScenario = "suspendIdle";
+    scenarios.suspendIdle = await suspendIdle(primarySession, primaryCollector, bounded, timeoutMs);
+
     activeScenario = "resume";
     await closeSession(
       primarySession,
@@ -599,6 +624,10 @@ export async function runAdapterConformance(
       cleanup.resources.primaryAdapter === "failed"
     )
       throw new Error("initial Adapter cleanup failed before resume");
+    // Only a Session that closed cleanly has a refusal to check.
+    activeScenario = "closedSessionRefusesWork";
+    scenarios.closedSessionRefusesWork = await closedSessionRefusesWork(primarySession, bounded);
+    activeScenario = "resume";
 
     const freshAdapter = await boundedOperation(
       "createAdapter:resume",
@@ -669,6 +698,16 @@ export async function runAdapterConformance(
     );
     terminalTurns.push(followup.nativeTurnRef);
     scenarios.followup = { status: "passed" };
+
+    // Last: a stalled configuration write retires the Session it runs on.
+    activeScenario = "configurationTimeout";
+    scenarios.configurationTimeout = await configurationTimeout(
+      resumedSessionValue,
+      resumedCollector,
+      plan.probes?.stallConfiguration,
+      bounded,
+      timeoutMs,
+    );
   } catch (error) {
     lifecycleFailure = true;
     scenarios[activeScenario] = {
@@ -740,11 +779,13 @@ export async function runAdapterConformance(
     nativeActivation,
     cleanup,
   });
-  if (failed)
+  if (failed) {
+    const reason = scenarios[activeScenario]?.failure?.reason;
     throw new HarnessConformanceFailure(
-      `Harness conformance failed at ${activeScenario}`,
+      `Harness conformance failed at ${activeScenario}${reason ? `: ${reason}` : ""}`,
       finalReceipt,
     );
+  }
   return finalReceipt;
 }
 

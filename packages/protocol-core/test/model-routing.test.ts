@@ -61,6 +61,25 @@ describe("external Harness transport model routing", () => {
     expect(transportModelIdForHarness("sample-agent")).toMatch(/^codexhost\/plugin-v1@/u);
   });
 
+  it("writes every Harness's selection as a route and still reads the legacy carriers", () => {
+    const model = harnessModelRefSchema.parse({ id: "opaque-model" });
+    const thinkingOptionId = harnessThinkingOptionIdSchema.parse("high");
+    for (const [harnessId, legacy] of [
+      ["pi", encodePiTransportModel(model, thinkingOptionId)],
+      ["omp", encodeOmpTransportModel(model, thinkingOptionId)],
+      ["grok", encodeGrokTransportModel(model, undefined, thinkingOptionId)],
+      ["claude-code", encodeClaudeTransportModel(model, undefined, thinkingOptionId)],
+      ["opencode", encodeOpenCodeTransportModel(model, undefined, thinkingOptionId)],
+      ["antigravity", encodeAntigravityTransportModel(model, undefined, thinkingOptionId)],
+    ] as const) {
+      const written = encodeExternalTransportSelection(harnessId, { model, thinkingOptionId });
+      expect(written).toMatch(/^codexhost\/plugin-v1@/u);
+      expect(decodeExternalTransportSelection(harnessId, written)).toEqual(
+        decodeExternalTransportSelection(harnessId, legacy),
+      );
+    }
+  });
+
   it.each(["pi", "claude-code", "deepseek-harness", "opencode", "grok", "omp", "antigravity"])(
     "also accepts the shared codec for transitional identity %s",
     (harnessId) => {
@@ -90,7 +109,12 @@ describe("external Harness transport model routing", () => {
       routeMode: "native",
       transportModelId,
     });
-    expect(transportModelIdForHarness(harnessId)).toBe(transportModelId);
+    // Read back from earlier releases; new Threads are written as a route.
+    const written = transportModelIdForHarness(harnessId);
+    expect(written).toMatch(/^codexhost\/plugin-v1@/u);
+    expect(
+      decodeCreateRoute({ id: 5, method: "thread/start", params: { model: written } }),
+    ).toMatchObject({ harnessId, transportModelId: written });
   });
 
   it("keeps official models transparent and ignores other methods", () => {

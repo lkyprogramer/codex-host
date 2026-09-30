@@ -420,4 +420,284 @@ describe("ManagedHarnessSession", () => {
     expect(onFault).toHaveBeenCalledOnce();
     await managed.close().catch(() => undefined);
   });
+
+  it("faults and frees the queue when an adapter never answers an operation", async () => {
+    const initial = session();
+    Object.defineProperty(initial, "readSnapshot", {
+      configurable: true,
+      value: () => new Promise(() => undefined),
+    });
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: initial,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault,
+      operationTimeoutMs: 20,
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+
+    await expect(managed.readSnapshot()).rejects.toThrow("did not answer within 20 ms");
+    await expect(outputs.next()).resolves.toMatchObject({
+      value: { kind: "event", event: { type: "session.faulted" } },
+    });
+    // The close queued behind the stuck read still runs.
+    await managed.close();
+    expect(initial.closed).toBe(true);
+    expect(onFault).toHaveBeenCalledOnce();
+  });
+
+  it("closes a native Session whose resume finished after the deadline", async () => {
+    const initial = session();
+    lifecycle(initial);
+    let finishResume!: (value: FakeHarnessSession) => void;
+    const late = session();
+    // Fully compatible, so only the closed-Session check can refuse it.
+    lifecycle(late);
+    const managed = new ManagedHarnessSession({
+      session: initial,
+      resume: () =>
+        new Promise<FakeHarnessSession>((resolve) => {
+          finishResume = resolve;
+        }),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+      operationTimeoutMs: 20,
+    });
+    await expect(
+      managed.resourceLifecycle?.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "suspended" });
+
+    await expect(managed.readSnapshot()).rejects.toThrow("did not answer within 20 ms");
+    await managed.close();
+    finishResume(late);
+    // Attached to nothing, the late native Session would never be closed.
+    await vi.waitFor(() => expect(late.closed).toBe(true));
+  });
+
+  it("keeps a Session whose release failed but stayed open, and faults one that closed", async () => {
+    const open = session();
+    Object.defineProperty(open, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend: async () => ({ status: "releaseFailed", reason: "group remains" }) },
+    });
+    const keptFault = vi.fn();
+    const kept = new ManagedHarnessSession({
+      session: open,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: keptFault,
+    });
+    await expect(kept.resourceLifecycle?.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "releaseFailed",
+      reason: "group remains",
+    });
+    // Still usable: the Host retries the release on its idle backoff.
+    await expect(kept.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(keptFault).not.toHaveBeenCalled();
+    await kept.close();
+
+    const closed = session();
+    Object.defineProperty(closed, "resourceLifecycle", {
+      configurable: true,
+      value: {
+        suspend: async () => {
+          // Like Cursor and Kiro: the adapter closed itself before the
+          // release failed, which ends its outputs.
+          await closed.close();
+          return { status: "releaseFailed", reason: "group remains" };
+        },
+      },
+    });
+    const lostFault = vi.fn();
+    const lost = new ManagedHarnessSession({
+      session: closed,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: lostFault,
+    });
+    await expect(
+      lost.resourceLifecycle?.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "releaseFailed" });
+    await vi.waitFor(() => expect(lostFault).toHaveBeenCalledOnce());
+  });
+
+  it("treats a suspension status from a newer contract as undecided", async () => {
+    const current = session();
+    Object.defineProperty(current, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend: async () => ({ status: "hibernated" }) },
+    });
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault,
+    });
+    await expect(
+      managed.resourceLifecycle?.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "unknown" });
+    await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    expect(onFault).not.toHaveBeenCalled();
+    await managed.close();
+  });
+
+  it("gives a native release its own, longer bound than interactive operations", async () => {
+    const current = session();
+    Object.defineProperty(current, "resourceLifecycle", {
+      configurable: true,
+      value: {
+        suspend: async () => {
+          // Longer than the interactive deadline, as an anchor's grace can be.
+          await new Promise((resolve) => setTimeout(resolve, 60));
+          await current.close();
+          return { status: "suspended", scope: "native-session" };
+        },
+      },
+    });
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault,
+      operationTimeoutMs: 20,
+      releaseTimeoutMs: 1_000,
+    });
+    await expect(
+      managed.resourceLifecycle?.suspend(new AbortController().signal),
+    ).resolves.toMatchObject({ status: "suspended" });
+    expect(onFault).not.toHaveBeenCalled();
+    await managed.close();
+  });
+
+  it("retries a failed native close in the background until it succeeds", async () => {
+    const current = session();
+    const close = current.close.bind(current);
+    const attempts = vi
+      .spyOn(current, "close")
+      .mockRejectedValueOnce(new Error("process group is still alive"))
+      .mockImplementation(close);
+    const onFault = vi.fn();
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault,
+      closeRetryDelaysMs: [10, 10],
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+
+    await expect(managed.close()).resolves.toBeUndefined();
+    expect(attempts).toHaveBeenCalledTimes(2);
+    expect(onFault).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining("retrying in 10 ms") }),
+    );
+    await expect(outputs.next()).resolves.toMatchObject({ done: true });
+  });
+
+  it("gives up after the last retry and reports the failure", async () => {
+    const current = session();
+    const attempts = vi
+      .spyOn(current, "close")
+      .mockRejectedValue(new Error("process group is still alive"));
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+      closeRetryDelaysMs: [10, 10],
+    });
+    const outputs = managed.outputs[Symbol.asyncIterator]();
+    const closing = managed.close();
+    // Outputs end after the first attempt, not after every retry.
+    await expect(outputs.next()).resolves.toMatchObject({ done: true });
+    await expect(closing).rejects.toThrow("process group is still alive");
+    expect(attempts).toHaveBeenCalledTimes(3);
+  });
+
+  it("delivers a cancellation while a slow operation holds the queue", async () => {
+    const current = session();
+    Object.defineProperty(current, "readSnapshot", {
+      configurable: true,
+      value: () => new Promise(() => undefined),
+    });
+    const cancel = vi.fn(async () => ({
+      ok: true as const,
+      value: { cancellationRequested: true },
+    }));
+    const execute = current.execute.bind(current);
+    Object.defineProperty(current, "execute", {
+      configurable: true,
+      value: (command: { type: string }) =>
+        command.type === "turn.cancel" ? cancel() : execute(command as never),
+    });
+    const managed = new ManagedHarnessSession({
+      session: current,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    void managed.readSnapshot();
+    await expect(
+      managed.execute({ type: "turn.cancel", turnId: hostTurnIdSchema.parse("turn-1") }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(cancel).toHaveBeenCalledOnce();
+  });
+
+  it("reports why a Session faulted rather than always a lost process", async () => {
+    const hung = session();
+    Object.defineProperty(hung, "readSnapshot", {
+      configurable: true,
+      value: () => new Promise(() => undefined),
+    });
+    const timedOut = new ManagedHarnessSession({
+      session: hung,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+      operationTimeoutMs: 20,
+    });
+    const timedOutOutputs = timedOut.outputs[Symbol.asyncIterator]();
+    await expect(timedOut.readSnapshot()).rejects.toThrow("did not answer");
+    await expect(timedOutOutputs.next()).resolves.toMatchObject({
+      value: { event: { type: "session.faulted", error: { code: "unavailable" } } },
+    });
+
+    const malformed = session();
+    Object.defineProperty(malformed, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend: async () => ({ status: "suspended" }) },
+    });
+    const broken = new ManagedHarnessSession({
+      session: malformed,
+      resume: async () => session(),
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    const brokenOutputs = broken.outputs[Symbol.asyncIterator]();
+    await broken.resourceLifecycle?.suspend(new AbortController().signal);
+    await expect(brokenOutputs.next()).resolves.toMatchObject({
+      value: { event: { type: "session.faulted", error: { code: "protocolError" } } },
+    });
+  });
+
+  it("accepts a resumed Session whose capabilities differ only in key order", async () => {
+    const initial = session();
+    lifecycle(initial);
+    const resumed = session();
+    lifecycle(resumed);
+    const reordered = Object.fromEntries(Object.entries(initial.capabilities).reverse());
+    Object.defineProperty(resumed, "capabilities", { configurable: true, value: reordered });
+    const managed = new ManagedHarnessSession({
+      session: initial,
+      resume: async () => resumed,
+      onActivity: () => undefined,
+      onFault: () => undefined,
+    });
+    await managed.resourceLifecycle?.suspend(new AbortController().signal);
+    await expect(managed.readSnapshot()).resolves.toMatchObject({ ok: true });
+    await managed.close();
+  });
 });

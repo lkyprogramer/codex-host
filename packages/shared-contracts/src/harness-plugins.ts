@@ -2,7 +2,14 @@ import { z } from "zod";
 
 import { harnessIdSchema } from "./ids.js";
 
-export const HARNESS_PLUGIN_API_VERSION = 1;
+/**
+ * The Adapter contract version plugins are built against. Version 2 declares
+ * native resource capabilities (`capabilities.resources`) instead of leaving
+ * the Host to probe for methods. The Host still loads version 1 plugins and
+ * derives their declarations from what they implement.
+ */
+export const HARNESS_PLUGIN_API_VERSION = 2;
+export const SUPPORTED_HARNESS_PLUGIN_API_VERSIONS: readonly number[] = [1, 2];
 export const HARNESS_PLUGIN_MANIFEST_MAX_BYTES = 32 * 1024;
 export const HARNESS_PLUGIN_ICON_MAX_BYTES = 128 * 1024;
 export const HARNESS_PLUGIN_LIMIT = 128;

@@ -93,6 +93,7 @@ export function releaseBuildCommands(
         "codexhost-shim",
         "--package",
         "codexhost-updater",
+        ...(target.hostPlatform === "win32" ? [] : ["--package", "codexhost-anchor"]),
       ],
     },
   ];
@@ -220,6 +221,7 @@ export function expectedPayloadPaths(target) {
     `libexec/codexhost-shim${target.executableSuffix}`,
     ...(target.hostPlatform === "win32" ? ["libexec/codexhost-node-repl.exe"] : []),
     `libexec/codexhost-updater${target.executableSuffix}`,
+    ...(target.hostPlatform === "win32" ? [] : ["libexec/codexhost-anchor"]),
     `runtime/node${target.executableSuffix}`,
     "app/codexhost-distribution.json",
     "app/desktop-controller.mjs",
@@ -337,6 +339,14 @@ export async function prepareReleasePayload({ target, root = repositoryRoot }) {
     "release Updater",
     true,
   );
+  if (target.hostPlatform !== "win32") {
+    await copyReleaseFile(
+      path.join(rustOutput, "codexhost-anchor"),
+      path.join(payloadRoot, "libexec", "codexhost-anchor"),
+      "release process anchor",
+      true,
+    );
+  }
 
   await runCommand(
     {

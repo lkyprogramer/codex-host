@@ -419,7 +419,8 @@ class BrokeredHarnessSession implements HarnessSession {
     return this.#metadata.sessionId;
   }
   get capabilities(): HarnessSessionCapabilities {
-    return this.#metadata.capabilities;
+    // The broker keeps the native process; this Session releases nothing itself.
+    return { ...this.#metadata.capabilities, resources: { idleRelease: false, ownedJobs: false } };
   }
   get initialState(): HarnessSessionState {
     return this.#metadata.initialState;

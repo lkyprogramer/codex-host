@@ -1,0 +1,34 @@
+{
+  "passed": true,
+  "version": "2026.09.10-fd3934a",
+  "model": {
+    "id": "cursor.ZGVmYXVsdFtd"
+  },
+  "sourceRef": {
+    "harnessId": "cursor-cli",
+    "nativeSessionId": "d3d15c66-c0b4-4eb2-8f0e-ec5ea0d02f98",
+    "formatVersion": 1
+  },
+  "forkRef": {
+    "harnessId": "cursor-cli",
+    "nativeSessionId": "2c3af5f9-1d91-4c75-be5d-290527042f16",
+    "formatVersion": 1
+  },
+  "reviseRef": {
+    "harnessId": "cursor-cli",
+    "nativeSessionId": "a5c18968-b091-4629-9413-8f0b5fd67ca1",
+    "formatVersion": 1
+  },
+  "sourceTurns": 2,
+  "forkRetainedTurns": 1,
+  "reviseRetainedTurns": 1,
+  "followupReply": "MERGE_ANCHOR_FORK_OK",
+  "providerTurns": 1,
+  "anchorPath": "/Users/luo/Documents/github/codex-host-merge-anchor/target/aarch64-apple-darwin/release/codexhost-anchor",
+  "sourceReused": true,
+  "sourceFilesBefore": {
+    "store.db": "97e8d54f8a7255106f66cf1b213c4a4d7b558d21310b1c2bfedc3d0d526dddda",
+    "meta.json": "9d134f85d4bc620e216571877fd18029a74cac058d10ff99ae93f0c1fd3794fb"
+  },
+  "sourceFilesUnchanged": true
+}

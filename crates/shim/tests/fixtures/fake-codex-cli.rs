@@ -272,10 +272,14 @@ fn main() {
             .map(PathBuf::from)
             .map(|value| value.display().to_string())
             .unwrap_or_default();
+        let process_anchor_path = env::var_os("CODEXHOST_PROCESS_ANCHOR_PATH")
+            .map(PathBuf::from)
+            .map(|value| value.display().to_string())
+            .unwrap_or_default();
         write_ready_file(
             Path::new(&ready_path),
             &format!(
-                "root={}\nhost_node_path={host_node_path}\nhost_runtime_path={host_runtime_path}\n",
+                "root={}\nhost_node_path={host_node_path}\nhost_runtime_path={host_runtime_path}\nprocess_anchor_path={process_anchor_path}\n",
                 process::id(),
             ),
         );

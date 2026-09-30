@@ -1,10 +1,17 @@
 import { randomBytes } from "node:crypto";
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 import { createOpencodeClient, type OpencodeClient } from "@opencode-ai/sdk/v2/client";
 
 import { sanitizeDiagnosticTail } from "@codexhost/harness-adapter";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import {
+  spawnOwnedProcess,
+  type OwnedProcess,
+  type OwnedProcessTree,
+} from "@codexhost/harness-discovery";
 
 import {
   OpenCodeExecutableError,
@@ -24,11 +31,11 @@ export interface OpenCodeServerOptions {
 }
 
 interface SpawnOptions {
+  cwd: string;
   env: NodeJS.ProcessEnv;
-  stdio: "pipe";
-  detached: boolean;
-  windowsHide: boolean;
   windowsVerbatimArguments?: boolean;
+  closeTimeoutMs: number;
+  onExitCleanupFailure(error: unknown): void;
 }
 
 export interface OpenCodeServerDependencies {
@@ -38,7 +45,11 @@ export interface OpenCodeServerDependencies {
     headers: Record<string, string>;
   }): OpencodeClient;
   randomPassword(): string;
-  spawn(command: string, args: string[], options: SpawnOptions): ChildProcessWithoutNullStreams;
+  spawn(
+    command: string,
+    args: string[],
+    options: SpawnOptions,
+  ): OwnedProcess<ChildProcessWithoutNullStreams>;
   sleep(milliseconds: number): Promise<void>;
 }
 
@@ -148,6 +159,7 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
   readonly #options: OpenCodeServerOptions;
   readonly #startupTimeoutMs: number;
   #child: ChildProcessWithoutNullStreams | null = null;
+  #childCwd: string | null = null;
   #ownedProcessTree: OwnedProcessTree | null = null;
   #childStopPromise: Promise<void> | null = null;
   #childStopping: ChildProcessWithoutNullStreams | null = null;
@@ -162,11 +174,7 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
     dependencies: OpenCodeServerDependencies = {
       createClient: (input) => createOpencodeClient(input),
       randomPassword: () => randomBytes(32).toString("base64url"),
-      spawn: (command, args, spawnOptions) =>
-        spawn(command, args, {
-          ...spawnOptions,
-          windowsVerbatimArguments: spawnOptions.windowsVerbatimArguments,
-        }),
+      spawn: (command, args, spawnOptions) => spawnOwnedProcess(command, args, spawnOptions),
       sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     },
   ) {
@@ -257,16 +265,31 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
       OPENCODE_SERVER_PASSWORD: password,
     };
     const invocation = openCodeServerInvocation(executable, environment);
-    let child: ChildProcessWithoutNullStreams;
+    let serverCwd: string;
     try {
-      child = this.#dependencies.spawn(invocation.command, invocation.arguments, {
+      serverCwd = mkdtempSync(path.join(tmpdir(), "codexhost-opencode-server-"));
+    } catch (error) {
+      throw new OpenCodeTransportError(
+        "unavailable",
+        "OpenCode Server requires a writable isolated startup directory",
+        { cause: error },
+      );
+    }
+    let owned: OwnedProcess<ChildProcessWithoutNullStreams>;
+    try {
+      owned = this.#dependencies.spawn(invocation.command, invocation.arguments, {
+        cwd: serverCwd,
         env: environment,
-        stdio: "pipe",
-        detached: process.platform !== "win32",
-        windowsHide: true,
         windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+        closeTimeoutMs: this.#closeTimeoutMs,
+        onExitCleanupFailure: (error) => {
+          this.#stderrTail = sanitizeDiagnosticTail(
+            `${this.#stderrTail}OpenCode Server process cleanup failed: ${errorText(error)}\n`,
+          );
+        },
       });
     } catch (error) {
+      rmSync(serverCwd, { recursive: true, force: true });
       throw new OpenCodeTransportError(
         isMissingExecutable(error) ? "notInstalled" : "unavailable",
         isMissingExecutable(error)
@@ -275,16 +298,10 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
         { cause: error },
       );
     }
+    const child = owned.child;
     this.#child = child;
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
-      closeTimeoutMs: this.#closeTimeoutMs,
-      onExitCleanupFailure: (error) => {
-        this.#stderrTail = sanitizeDiagnosticTail(
-          `${this.#stderrTail}OpenCode Server process cleanup failed: ${errorText(error)}\n`,
-        );
-      },
-    });
+    this.#childCwd = serverCwd;
+    this.#ownedProcessTree = owned.tree;
     child.once("exit", () => {
       if (this.#child !== child) return;
       this.#connection = null;
@@ -395,7 +412,10 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
         "OpenCode Server ownership handle is unavailable",
       );
     }
-    const stopping = processTree.close();
+    const serverCwd = this.#child === child ? this.#childCwd : null;
+    const stopping = processTree.close().then(() => {
+      if (serverCwd) rmSync(serverCwd, { recursive: true, force: true });
+    });
     this.#childStopping = child;
     this.#childStopPromise = stopping;
     void stopping.then(
@@ -405,6 +425,7 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
         this.#childStopPromise = null;
         if (this.#child === child) {
           this.#child = null;
+          this.#childCwd = null;
           this.#ownedProcessTree = null;
         }
       },

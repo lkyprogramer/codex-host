@@ -58,19 +58,22 @@ Node 以 `stdio[3] = "pipe"` 创建一个双向 socket，anchor 在 fd 3 上收�
 spawnOwnedProcess(command, args, {
   cwd, env, stdio, windowsHide, windowsVerbatimArguments,
   closeTimeoutMs, onExitCleanupFailure,
-}): { child: ChildProcess; tree: OwnedProcessTree; anchored: boolean }
+}): { child: ChildProcess; tree: OwnedProcessTree | null; anchored: boolean }
 ```
 
 - anchor 可用（POSIX 且 `CODEXHOST_PROCESS_ANCHOR_PATH` 指向可执行文件）时：`child` 是 anchor 进程（stdin/stdout/stderr 即 Harness 的管道），`tree.close()` 发送 terminate 并等待 anchor 以“已确认为空”退出；收到 `unconfirmed` 时 reject，**可以再次调用重试**。
 - anchor 的 `spawnError` 转成 `child` 上的 `error` 事件（带 `code`），保留 Adapter 现有的 ENOENT 等启动错误处理。
 - anchor 不可用（Windows、找不到二进制的开发 / 测试环境）时回退到现有 `detached` + `trackOwnedProcessTree`，语义与现在相同（失败不重试，fail-closed）。
-- Adapter 不再直接对任何 pid 发信号；`packages/` 中禁止负 pid 的 `process.kill` 与 `taskkill`（除 `harness-discovery` 的回退实现），由 `tools/check-boundaries.mjs` 检查。
+- 一次性的短命令（模型目录、额度、版本探测）使用 `runOwnedProcess`：超时、超出输出上限或被中止时，整棵进程树停止后才 reject。
+- Adapter 不再直接对任何 pid 发信号：`packages/*/src` 中除 `harness-discovery` 的回退 tracker 外禁止 `process.kill(-pid)`，由 `tools/check-boundaries.mjs` 按语法树检查。Windows 的 `taskkill` 目前只存在于该回退 tracker；Windows anchor 不在计划内（见 4.10）。
 
 ### 3.4 打包与定位
 
 - 新 crate `crates/anchor`，二进制 `codexhost-anchor`，纳入 workspace 默认成员与 `build:rust`。
 - 安装布局与 `codexhost-shim` 同目录（`libexec/`）；开发环境同在 `target/debug/`。
 - Shim 启动 Host 时注入 `CODEXHOST_PROCESS_ANCHOR_PATH`（Shim 所在目录下的 `codexhost-anchor`，存在才注入）。
+- 远程 SSH Host 的 wrapper 是 Shim 的拷贝，anchor 不在它旁边；受管 profile 在原 Shim 旁的 anchor 可执行时导出该变量。
+- `npm run test:typescript` 先编译 anchor，`tests/vitest.setup.js` 为整个测试套件注入它，所有 Adapter 的真实进程测试都走生产路径。
 - 发行 payload 与 npm 包加入该二进制，并参与现有签名 / 公证流程。
 
 ### 3.5 能消除的问题
@@ -88,10 +91,64 @@ spawnOwnedProcess(command, args, {
 
 ### 3.6 已知限制
 
-- macOS 上自行 `setsid` 并在父进程存活时逃出组的后代，anchor 无法跟踪；仍由 Shim 账本兜底。
-- anchor 自身被 SIGKILL：Linux 上 leader 随 pdeathsig 退出；macOS 上组 G 失去看护，只能靠 Shim 账本。anchor 只做进程机制，出现这种情况的概率远低于 Host。
-- Windows 首版不启用 anchor，保持现状，Job Object 版本见第 5 节阶段 D。
+- macOS 上的逃逸进程：anchor 会追踪逃出进程组的后代（见 3.7）。但如果一个进程在两次扫描之间完成“创建、`setsid`、父进程退出”，仍会漏掉：被 launchd 收养后，内核会把它记录的父进程 id 改写为 launchd，它与原进程树之间不再有任何可用的关联。只有 Endpoint Security 能完全覆盖这一情形。
+- anchor 自身被 SIGKILL：
+  - Linux（PID namespace 模式）：内核会结束整棵进程树。
+  - Linux（回退模式）：leader 随 pdeathsig 退出，其余进程由 3.7 的记录文件兜底回收。
+  - macOS：同样由记录文件兜底，在下一次 Shim 启动或退出时回收。
+  因此任何代码都不得直接杀死 anchor：`spawnOwnedProcess` 返回的 `child.kill()` 被改写为向 anchor 发 terminate（SIGKILL 表示立即终止，其他信号走宽限期）。Shim 的强制阶段也会跳过 anchor（3.7）。
+- Linux 的 PID namespace 模式下，Harness 运行在单独的 user namespace 里，与宿主有以下可见差异：
+  - `sudo` 等 setuid 程序会失效；
+  - `ps` / `kill` 看不到宿主进程；
+  - 无法 ptrace 附着到宿主进程；
+  - 对端在 namespace 外时，`SO_PEERCRED` 取到的 pid 为 0；
+  - 会话开始后宿主新挂载的文件系统（外置盘、sshfs）仍然可见，因为挂载传播设为 `MS_SLAVE`，已在容器中实测。
+
+  设置 `CODEXHOST_PROCESS_ISOLATION=group` 可关闭该模式；无法创建 namespace 时，anchor 会发一条诊断说明回退原因。
+- 逃逸追踪默认会随 Harness 一起结束那些 `setsid` 离组的常驻进程（tmux server、gpg-agent、ssh ControlMaster、构建守护进程）。设置 `CODEXHOST_PROCESS_ESCAPEES=keep` 可在 macOS 上保留它们：
+  - 它们不计入进程组的释放条件；
+  - 在记录中单列为 `kept`，回收时既不结束它们，也不经由它们找后代，即使它们的父进程仍在被回收之列。
+
+  以下情况下它们仍会被结束：
+  - 离组后要等下一次扫描加写入节流（最长约 2 秒），才会从 `owned` 挪到 `kept`；若 anchor 恰好在这段时间内被杀，之后的回收仍会结束它们；
+  - Host 没能按时退出、Shim 进入强制阶段时，Shim 会结束 Host 进程树里除 anchor 之外的所有进程，其中也包括它们；
+  - Linux 上，做了双 fork 的守护进程会被 subreaper 模式的 anchor 收养，或者处在 anchor 的 pid namespace 里，都会随 Harness 一起结束，所以该开关在 Linux 上基本不起作用。
+- macOS 上每个 anchor 平时每秒扫描一次进程表，被追踪的进程 fork 时立即扫描（两次扫描至少间隔 20ms）。实测：Harness 每秒 fork 约 300 次时，anchor 约占 5% 单核（release 构建）。
+- Windows 不启用 anchor，保持现状；Job Object 版本不在计划内（见 4.10）。
 - 每个存活 Harness 多一个很小的原生进程。
+
+### 3.7 兜底机制：协调关闭、逃逸追踪、记录文件与 PID namespace
+
+- **Shim 协调关闭**：Shim 的强制阶段会 KILL Host 进程树里除 anchor 之外的所有进程。anchor 已收到 TERM，正在回收自己的进程组，因此另给 5 秒期限，超时才 KILL。broker 的 LaunchAgent 通过 `CODEXHOST_PROCESS_ANCHOR_PATH` 使用 anchor，这些 anchor 的 lifeline 是 broker 进程本身（PL-11）。
+- **所有权边界**：追踪和回收只认领同时满足以下条件的进程：
+  - 创建时间晚于 Harness 首进程（macOS 比较单调递增的 `p_uniqueid`，Linux 比较启动时间）；
+  - 属于当前用户；
+  - pid > 1；
+  - 不是 anchor 自身、它的祖先进程或回收器自身。
+
+  沿父子关系遍历时，不满足条件的进程既不会被加入，也不会被当作跳板继续往下找。
+- **逃逸追踪**：只沿“父进程仍存活”的父子关系发现新进程；发现过的进程按身份（pid + 实例 id）持续追踪，直到退出。macOS 上，被追踪进程每次 fork 都会触发一次立即扫描（kqueue `NOTE_FORK`，两次扫描至少间隔 20ms），平时每 1 秒扫描一次；Linux 每 2 秒扫描一次。终止时，逃逸进程与组内进程同样经历 TERM → KILL。
+- **记录文件**（格式版本 2）：每个 anchor 把自己的实例 id，以及它拥有的全部进程的身份（pid + 实例 id，包括组内成员）写进每用户私有目录。进程变化时最多每秒写一次；只有确认进程组已清空后才删除；因超时放弃时，先写入最新状态再退出。私有目录为：macOS `confstr(_CS_DARWIN_USER_TEMP_DIR)`，Linux `/run/user/<uid>` 或 `/tmp`；目录名为 `codexhost-process-ledger-<uid>`，权限 0700，并校验属主。`codexhost-anchor --reclaim` 只处理 anchor 已不在的记录，处理方式如下：
+  - 只认领记录中仍持有原 pid 的进程，以及它们此后经存活父进程链派生的后代。**不按进程组 id 认领**：anchor 不在后，组 id 可能已被复用成别人的进程组，哪怕那个新组的组长已经退出；
+  - 逐个向满足边界的进程发 TERM，2 秒后发 KILL；
+  - 进程全部结束后才删除该记录；
+  - 属于其他开机周期的记录直接删除；版本不认识或无法解析的记录跳过、不删除，因为可能是更新版本的 anchor 正在使用的。
+  - 这样做的代价有三点：
+    - 同一开机周期内，升级前留下的 v1 记录会一直被跳过，直到重启才清除，对应进程也不会被回收；
+    - 新旧版本并存时，旧版回收器会删除新 anchor 的 v2 记录。后果只是失去兜底，不会误杀；
+    - 在 Linux 回退模式下，如果 anchor 被杀，leader 会随 pdeathsig 一起结束；leader 在最近约 2 秒内新派生、尚未写入记录的子进程随即失去父进程链，回收找不到它们。这是不再按进程组 id 认领所付出的代价。
+
+  Shim 在 Host 启动时于后台执行一次回收，Host 退出后再同步执行一次（最多 5 秒）。PID namespace 模式下不写记录（内核已保证清理）。
+- **Linux PID namespace**：外层 anchor 用 `clone(CLONE_NEWUSER|CLONE_NEWPID|CLONE_NEWNS)` 启动内层 anchor，内层作为新 namespace 的 init（1 号进程），挂载独立的 `/proc`，并设置父进程死亡信号 `PDEATHSIG=SIGKILL` 与外层绑定。外层 anchor 被 SIGKILL 时，内层随之死亡，内核结束 namespace 内的全部进程。外层只负责转发 TERM/INT/HUP 并镜像退出状态；Harness 死于信号时，由内层经管道把信号号告诉外层。不允许非特权 user namespace，或 `/proc` 被遮蔽的容器里，会自动回退到进程组模式。
+- **dry run**：
+  - 设 `CODEXHOST_PROCESS_ANCHOR_DRY_RUN=1` 时，anchor 只上报 `dryRun` 消息（会认领的逃逸进程、被边界拦下的进程），不向它们发信号，也不写记录；
+  - `codexhost-anchor --reclaim --dry-run` 只打印会结束哪些进程，不发信号，也不删记录。
+- **OOM**：原计划调高 Harness 的 `oom_score_adj`，现在取消。两者 `oom_score_adj` 相同，而内核按“内存占用 + 调整值”选择被杀进程，anchor 的内存占用远小于 Harness，本来就不会先于 Harness 被选中；调高只会让 Harness 更容易被系统杀掉。
+- **事故记录（2026-09-25）**：初版追踪依赖一个错误假设——“进程被收养后 `puniqueid` 保持不变”。实际上 macOS 会把它改写为 launchd，导致在本机运行测试时，launchd 的全部子进程被认领并收到 TERM/KILL。用户自己的进程（包括终端）被结束；root 进程因权限不足未受影响。后续修正：
+  - 删除按 `puniqueid` 认领的逻辑；
+  - 引入上面的所有权边界；
+  - 提供 dry run：在同一场景下，不加边界时原逻辑会认领 741 个进程，加边界后为 0；
+  - 会发信号的测试先在 Linux 容器里验证，本机运行时对比前后进程列表。
 
 ## 4. 问题清单
 
@@ -111,7 +168,7 @@ spawnOwnedProcess(command, args, {
 | PL-8 | 低 | 4 份 TS 组回收实现、Claude 两份相同的 `#spawn` | 见第 1 节 | 收敛到 harness-discovery | A |
 | PL-9 | 低 | owner pid 存活检查无身份校验（仅影响可用性）；mapping-store 在 Windows 上同步 powershell 无超时 | `harness-broker/src/server.ts:117-140`、`mapping-store.ts:117-134` | 记录启动时间做身份；异步 + 超时 | D |
 | PL-10 | 低（Windows） | Grok taskkill 用裸名、无超时、忽略返回码；tracker 用 `spawnSync` 阻塞事件循环；leader 自然退出即报清理失败 | `owned-group.ts:58-64`、`owned-process-tree.ts:54-61` | Windows anchor（Job Object） | D |
-| PL-11 | 低 | Aqua broker 崩溃时其 Claude 子进程组无人回收 | `harness-broker` | broker 内也使用 anchor | D |
+| PL-11 | 低 | Aqua broker 崩溃时其 Claude 子进程组无人回收 | `harness-broker` | broker 内也使用 anchor（已完成，见 3.7） | D |
 
 ### 4.2 Host 核心（HC）
 
@@ -166,6 +223,147 @@ spawnOwnedProcess(command, args, {
 - Claude 释放未确认期间旧进程写入的原生历史不会投影到 Host（见 `harness-resource-lifecycle.md`）。anchor 落地后，释放失败只剩“组内进程拒绝退出”这一种情况，概率进一步降低。
 - Antigravity 历史孤儿子任务判定依赖“每个 Turn 进程等待自己的子任务”这一前提。
 
+### 4.6 阶段 A 完成情况（分支 `feat/process-anchor`）
+
+阶段 A 首轮实现后经两路独立评审（Rust anchor、TS 集成），以下问题已在同一分支修复并补回归测试：
+
+| 问题 | 修复 |
+| --- | --- |
+| Claude SDK 关闭时对 anchor 发 SIGKILL，早于 anchor 自己的 KILL，TERM 免疫的组员逃逸（已复现 4/4） | `child.kill()` 改写为受管 terminate；abort 信号同样走 terminate |
+| 缺失可执行文件时 `spawn` / `exit 127` 多发，OMP 启动挂满超时、Grok / Kiro 报错类别变化，无监听器时可能崩溃 Host | anchor 报告 `ready` 前扣住 `spawn` / `exit` / `close`；`spawnError` 只发 `error` 与 `close`；无监听器改为 warning；OMP `#ready` 在故障时立即失败 |
+| Linux：leader 存活期间被收养的后代退出后成为僵尸不被回收 | SIGCHLD 唤醒时回收 |
+| Linux：KILL 之后才被收养的逃逸后代存活到下一轮 | Forced 阶段每个 tick 对组与收养子进程补发 KILL |
+| 进行中的长宽限期不能被更紧急的 terminate / lifeline 丢失提前 | 更早的截止或 grace 0 立即前移 |
+| macOS：其他 uid 的组员（sudo / su）被误判为已退出 | 改用不受 uid 限制的 `PROC_PIDT_SHORTBSDINFO`，读取失败按存活 |
+| Linux 终止期间每 20ms 扫描整个 `/proc` | 扫描间隔 20ms 起指数退避至 250ms |
+| 回退 tracker 失败后永不重试（Windows 上 Grok 退化） | leader 未被回收前允许重试，回收后保持失败 |
+| Windows 回退：每次短命令正常退出都报清理失败；taskkill 同步阻塞事件循环 | Windows 不在 leader 退出时自动清理；taskkill 改为异步 |
+| DeepSeek 探测清理预算与 anchor 窗口错位 | TERM / KILL 各占预算一半 |
+| abort 在 Harness 已结束后仍补发 `AbortError`，监听器不移除（复查发现） | 与 Node 一致：kill 生效才报告，释放 / 创建失败 / anchor 丢失时移除监听 |
+| `kill()` 发起的回合失败无人得知（复查发现） | 只有 `close()` 的回合由该调用承接；`kill()` 与 anchor 自发回合的失败经 `onExitCleanupFailure` 上报 |
+| 控制通道写超时可能截断一行并与下一条消息粘连（复查发现） | 非阻塞写加发送缓冲，可写时续写；退出前有界 flush 最后的 `released` / `spawnError` |
+| 其余：多线程主线程退出误判、重复计数、不可读 `/proc` 无诊断、控制写阻塞、Shim 符号链接路径与继承环境、Host 请求的回合被误报为退出清理失败、anchor 路径永久缓存、非法 `closeTimeoutMs` | 均已修复；anchor 诊断经 `diagnostic` 消息转为 Host warning |
+
+
+| ID | 状态 | 说明 |
+| --- | --- | --- |
+| PL-1 | 已修（POSIX） | lifeline：Host 被 SIGKILL 后整棵 Harness 树退出，由 `harness-discovery` 与 anchor 集成测试覆盖 |
+| PL-2 | 已修 | Grok 改用 `spawnOwnedProcess`；`owned-group.ts` 与同步 `ps` 已删除 |
+| PL-3 | 已修 | DeepSeek 版本探测与 modern Web 均经 owned tree；`killDeepSeekProcessTree` 已删除 |
+| PL-4 | 已修 | Claude CLI 退出即回收组内剩余进程；`process-fence.ts` 已删除 |
+| PL-5 | 已修（POSIX） | leader 未回收即钉住组号 |
+| PL-6 | 已修（POSIX） | anchor 下 `close()` 失败后可重试；回退 tracker 仍按设计 fail-closed |
+| PL-7 | POSIX 已修 | Kiro `list-models`、Antigravity `runBuffered` 改用 `runOwnedProcess`；Windows 部分留在阶段 D |
+| PL-8 | 已修 | TS 中只剩 `harness-discovery` 的回退 tracker 对进程组发信号，边界检查强制 |
+
+阶段 A 顺带去掉了测试中的一类隐患：Pi、OMP、OpenCode 的 fake 进程带固定 pid（42000、45001、91337），以前被真实 tracker 接管，close 时会对同号的真实进程组发信号；现在 fake 只返回不接触系统进程的 fake tree。
+
+### 4.7 阶段 B 完成情况（分支 `feat/process-anchor`）
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| HC-1 | 已修 | `process-guard.ts`：`unhandledRejection` 只报告，Host 继续运行；`uncaughtException` 让已注册的 Host（含 remote listener 与 Aqua broker）有序关闭，并以失败码退出，最长等待 30 秒；`run()` 结束后若仍有泄漏的句柄，5 秒后退出（仍有输出未写完时最多再等 6 个宽限期）。与计划的差异：`unhandledRejection` 不触发有序关闭，因为一个无人等待的失败 Promise 不会留下写了一半的状态，不值得为它关掉 Host 和官方代理；计划中“长期将插件移到独立进程”未做，留待阶段 E |
+| HC-2 | 已修 | `ManagedHarnessSession` 的排队操作都有期限：读取、命令、resume 默认 120 秒，挂起与 owned-job 停止默认 5 分钟。超时即判故障并释放队列；超时后才完成的 resume 会关闭它新开的原生 Session，而不是挂到已关闭的 Session 上。新建 Session 的 `adapter.open`（Desktop `thread/start`、委派启动）也限时 120 秒（`openWithin`），超时返回可重试的 `unavailable`，事后才打开的 Session 立即关闭。原生 close 失败时按 1 秒、5 秒、30 秒在后台重试并逐次报告，全部失败才拒绝；输出在第一次尝试后即结束，退役屏障一直等到重试有结果。Host 退出时，关闭 Session 与 Adapter 受 20 秒总预算约束，超出后由 anchor / Shim 回收剩余进程。第一版漏了新建时的 open 和 close 重试，后已补上 |
+| HC-3 | 已修 | `ExternalThreadRuntime.retire()`：故障的 Thread 在旧 Session 真正关闭前不会被恢复，同一原生会话不会同时存在两个进程 |
+| HC-4 | 已修 | 合同新增 `releaseFailed`（向后兼容的新增状态）：`unknown` 只表示“这次没有尝试释放”；Claude Code、Grok、OpenCode、Cursor、Kiro 释放失败时统一返回 `releaseFailed`，Host 每次都报告并按退避重试 |
+| HC-5 | 已修 | conformance 增加四个资源场景：中止的挂起不释放资源、活动 Turn 期间的挂起不释放资源、空闲挂起要么拒绝要么结束输出、关闭后的 Session 再次 close 正常且拒绝新 Turn、不挂起；计划中的“8 个资源场景”落地为这四项加上既有的 cleanup 与残留回读 |
+| AD-16 | 已修（门禁） | conformance 检查 Turn 事件语法：每个 Turn 只开始一次，条目与交互只出现在开始与结束之间，只结束一次（Turn 结束后才到的 `interaction.closed` 视为合法）。cancel 场景原本就有。新增 `configurationTimeout` 场景：Adapter 夹具通过探针 `stallConfiguration` 让原生端不再响应配置写入，要求这次写入不挂住、不被报告为已生效，随后 Session 被判故障或结束输出。声明了实时配置写入却没有提供探针的 Adapter 记为 `notCovered`。Grok 已在阶段 C 接入探针，其余 Adapter 仍记为 `notCovered`；第一版漏了这个场景，后已补上 |
+| 关闭预算 | 说明 | 超出关闭预算后，Host 仍继续关闭 repository；尚未关完的 Session 如果之后才写入状态，这些最后的更新会丢失（只记诊断）。这是预算的代价：进程由 anchor / Shim 保证结束，状态以原生历史为准，下次恢复时会重新对齐 |
+| RS-1 | 已修 | Shim 每轮只读取所有进程的 pid / ppid / pgid / 启动时间，可执行文件路径只对 root 与自己拥有的进程读取；实测单轮从约 1.8ms 降到约 0.6ms（debug 构建） |
+
+### 4.8 兜底机制与阶段 B 的评审修复
+
+| 评审项 | 修复 |
+| --- | --- |
+| H1 回收时可能误杀陌生进程组 | 记录格式升到 v2，保存全部已拥有进程的身份；回收只认领记录中的身份及其存活后代，不再按进程组 id 认领；补了组 id 被复用场景的单元测试 |
+| M1 dry run 下进程组无法释放 | dry run 与 `keep` 模式都不把逃逸进程计入释放条件 |
+| M2 namespace 挂载设为完全私有 | 改为 `MS_SLAVE`，已在容器中验证后挂载的文件系统可见；文档补充 namespace 模式的其他可见差异 |
+| M3 旧 Host 不认识 `releaseFailed` | 本版 Host 把不认识的挂起状态按 `unknown` 处理，今后合同再新增状态也不会让 Session 故障；插件 API 版本号不变。已发布的旧 Host 加载基于新合同构建的插件时，遇到 `releaseFailed` 仍会判故障；预装插件随 Host 一起发布，不受影响，单独安装的第三方插件则有此风险。合法状态列表只维护一份 |
+| M4 常驻守护进程被一并结束 | 新增 `CODEXHOST_PROCESS_ESCAPEES=keep`。复查发现保留进程的父进程仍存活时，回收仍会结束它们；已改为在记录中单列 `kept`，回收时排除它们及其子树。文档写明各项限制（3.6） |
+| L1 回退时丢失原因 | namespace 回退时发一条诊断；TS 侧对相同的诊断只警告一次（去重集合上限 64 条），dry run 报告每条都显示 |
+| L2 回收器删除不认识版本的记录 | 不认识或无法解析的记录一律跳过，只删除属于其他开机周期的记录 |
+| L3 更新后 `(deleted)` 后缀 | Shim 把 `<path> (deleted)` 也识别为 anchor |
+| L4 dry run 报告不可见 | TS 侧把 `dryRun` 消息转为 warning |
+| L5 扫描开销 | 已实测（见 3.6），扫描参数不变 |
+| L6 强制退出截断输出 | 标准输出 / 标准错误仍有未写完的内容时，最多再多等 6 个宽限期 |
+| L7 Shim 豁免分支 | 逐个进程发信号，遇到 pid 复用视为目标已消失；anchor 收尾期间每轮都对非 anchor 进程补发 KILL。这一轮失败时只记录，不结束等待，因此退出后的回收不会被跳过。pid 复用这一分支难以稳定构造，没有自动化测试 |
+| L8 超预算后状态可能不落盘 | 文档说明（4.7） |
+| L9 outcome fd 设置 CLOEXEC 失败 | 检查返回值，失败按参数错误退出 |
+| 操作期限与释放时长冲突 | 挂起与 `withCurrentSession` 改用独立的释放期限，默认 5 分钟。已交付的 Adapter 宽限期都是 2～3 秒，5 分钟远大于 anchor 的释放上限；同时释放一旦挂住，排在后面的操作（包括用户唤醒）最多只多等 5 分钟。读取、命令、恢复仍为 120 秒 |
+| 退役屏障 | 恢复被旧 Session 阻塞时，返回“previous native Session is still closing”；其余先移除后关闭的路径，要么对应记录已删除（无法恢复），要么先关后删，不需要屏障 |
+| 进程身份读取失败时静默 | anchor 读不到自身身份时发诊断 |
+| Turn 语法与 AD-1 冲突 | Turn 完成后才到的 `interaction.closed` 视为合法，开始前出现仍判违规 |
+| Linux 同一 tick 边界 | 补单元测试 |
+| 测试隔离 | Shim 测试的回收只作用于测试自己的临时记录目录 |
+
+### 4.9 阶段 C 完成情况（分支 `feat/process-anchor`）
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| AD-1 | 已修 | Grok 取消 Turn 时，待处理的审批被删除、以 cancelled 应答原生端，并发出 `interaction.closed{cancelled}`；之后到达的回复被拒绝 |
+| AD-2 | 已修 | Kiro transport 的 `cancel` 在取消通知送不出去时报错，Adapter 原有的失败分支得以生效；用内存 ACP 对端测试 |
+| AD-3 | 已修 | Grok 的 `session/set_model`、`session/set_mode` 限时（`commandTimeoutMs`，默认 30 秒），原生 Compact 限时 10 分钟，超时即让连接退役（Session 判故障并关闭）；interject 超时只拒绝本次调用，所在的 Turn 仍可取消；用真实 transport 加不响应的假 ACP 进程测试 |
+| AD-4 | 已修 | Antigravity 取消后清理失败时，先把 Turn 以失败结束，再发出 `session.faulted` 并结束输出，与 Turn 结束后清理失败的处理一致 |
+| AD-5 | 已修（已真机核对） | 用 `agy` 1.2.10 在同一 conversation 里跑了两轮：第一轮含一次工具调用和两段模型回复，`num_turns` 为 1；第二轮用 `--conversation` 续接，`num_turns` 为 2。可见它是整个对话累计的用户轮数，不是单次运行内的迭代次数。但失败的运行报告 `num_turns: 0`（实测账号资格检查失败时就是如此），fork 与 rollback 之后原生计数也不再和本地历史一一对应，仍会覆盖历史。原生 Turn key 与 checkpoint id 只由本 Adapter 的历史文件读回（fork、rollback 按它查找），`agy` 不读取，因此改为每个 Turn 生成一个 UUID；已有历史里的 `turn:N` 照原值读写，旧数据仍可用。新增回归测试：两轮都报告同一个 `num_turns` 时两个 Turn 都保留，且能在第一轮处 fork |
+| AD-6 | 已修 | Kiro 只接收当前 Session 的更新；load 回放期间只接收正在加载的那个 Session 的更新；新 Session 的 id 确定之前全部放行 |
+| AD-7 | 已修 | 统一为“只读命令超时只拒绝、配置写入超时则退役连接”：Pi / OMP 的 `set_model`、`set_thinking_level`，以及 Pi `clone`、OMP `branch` 超时时终止连接（原先只拒绝）；Grok 见 AD-3 |
+| AD-8 | 已修 | Cursor 只在 `session/load` 期间收集回放；两个 Turn 之间到达的更新不再保存；回放超过 10 万条时 load 失败，不再在 ACP 处理函数里抛异常 |
+| AD-11 | 已修 | Pi 启动超时的计时器随启动结束而清理；帧缓冲设上限：Pi 128 MiB，OMP 4 MiB（OMP 协议会把更大的内容分块发送），超限时判为协议错误 |
+| AD-12 | 已修 | Kiro 在 Turn 结束后读取原生历史：用上报的用户消息 id，或“已知 Turn 列表完整时唯一新增的那个 Turn”，补上 `nativeTurnRef` 和 checkpoint，无法确定时不做猜测；进程故障导致的失败报告 `processExited` 及故障原因，不再笼统报 `nativeFailure` |
+| HC-6 | 已修 | Snapshot 对齐写回完整映射列表时带上 revision 前提（Store 报告 `STALE_RECORD` 时重新读取并对齐，最多 3 次）；待处理 Turn 改为在 Store 内按 id 移除，不再整体覆盖 |
+| HC-7 | 已修 | 带 `requestId` 的发送由它派生 Host Turn id，重试时如果持久化记录里已有该 Turn，就直接返回、不唤醒 Thread（Thread 卸载或 Host 重启后同样有效；Thread 已加载时，内容不一致仍会报错）；对未加载 Thread 的 release 不再恢复它，直接返回“未持有资源、作业是否停止未知” |
+| HC-10 | 已修 | `ManagedHarnessSession` 显式 `implements HarnessSession`，合同里的可选能力允许读出 `undefined`；故障按原因报告（超时 `unavailable`，非法或未结束的挂起 `protocolError`，挂起期间的活动或恢复不兼容 `invalidState`，其余 `nativeFailure`）；恢复时的能力比较改为结构化比较 |
+| HC-11 | 已修 | `turn.cancel` 不再进入 `ManagedHarnessSession` 的操作队列，直接交给当前的原生 Session |
+
+阶段 C 评审（Opus 子代理）发现的问题已同批修复：
+- Grok：
+  - 关闭时的 `session/close` 原本没有期限，原生端失联会导致进程泄漏；现已加期限，已退役的连接直接跳过这一步；
+  - 超时退役时，transport 自己立即开始关闭；
+  - 配置写入改用独立期限；
+  - 结果未知的 interject 不可重试；
+  - 取消失败后可以再次发出；
+  - 配置写入导致 Session 故障时，返回不可重试的 `processExited`。
+- Kiro：
+  - 新建和 fork 的过程中也按 sessionId 过滤更新；
+  - 其他 Session 的审批和用户输入请求不再交给当前 Turn。
+
+- Grok 接入 AD-16 `configurationTimeout` 探针：恢复后 Session 的 transport 夹具不再应答 `session/set_model`，超时后按 `GrokAcpTransport` 的契约拒绝写入并通知连接已退役（真实进程上的这一契约由 `acp-configuration-timeout.test.ts` 证明）；场景验证写入不被报告为已生效、Session 随后退役。夹具的残留判断改为每个 transport 至少关闭或释放过一次：故障已发起关闭后，`session.close()` 再次调用只是等待同一次关闭完成（transport 的关闭是共享且幂等的），不算残留。
+
+阶段 C 已全部完成。
+
+### 4.10 阶段 D 完成情况（仅 macOS）
+
+阶段 D 只做 macOS 相关的部分；Windows 条目按决定不做。
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| PL-9 | 已修（broker 部分） | broker 启动时，旧 descriptor 的 owner 只有在 pid 存活、并且其 socket 仍接受连接时才算存活。owner 在监听之后才发布 descriptor；pid 被无关进程复用、或 socket 文件还在却无人监听的陈旧 descriptor，不再挡住启动。descriptor 格式不变。关闭时，owner 先断开所有连接再停止监听；停止监听时 libuv 同步删除 socket 文件，此后另一个 broker 可能已经接管，所以 owner 只删除仍是自己 generation 的 descriptor（socket 也只在仍是自己绑定的 inode 时才删）。Windows 仍只看 pid。mapping-store 在 Windows 上同步调用 PowerShell 的那一半属于 Windows，未做 |
+| PL-11 | 已修 | 见 3.7 |
+| RS-2 | 已修 | 用一次 `renamex_np(RENAME_SWAP)` 原子交换新旧 app，任何时刻 app 路径都有一个完整版本。不支持交换的卷（exFAT、SMB，实测 exFAT 返回 ENOTSUP）退回两次 rename，只有这种卷上仍存在两次 rename 之间的窗口。交换后校验失败，就再换回去；换回也失败时，把唯一完好的旧版本改名为不会被清理的 `codexhost-previous-*.app`，并在错误里写明位置。旧版本保留到新版本 relaunch 就绪后才删除；relaunch 失败时保留旧版本，并在失败状态里写明位置。下次更新开始前，尽力清理 app 旁边上次留下的 `.codexhost-update-*` / `.codexhost-backup-*` / `.codexhost-rejected-*` 目录（不跟随符号链接；删不掉的只记录，不阻止更新）。更新器的诊断写入本次更新操作目录下的 `updater.log`（此前 stderr 被丢弃）。新版未就绪时不自动回滚：无法确认新进程已经退出，这时换回 bundle 风险更大 |
+| RS-5 | 接受（撤回了保留僵尸 root 的做法） | 曾尝试让 Shim 在 macOS 上用 `waitid(WNOWAIT)` 把已退出的 root 保留为僵尸，直到整棵进程树结束才回收，以防进程组 id 在发信号期间被复用。实际引出两个回归，已整体撤回：其一，组里只剩僵尸 root 时 killpg 返回 EPERM，Shim 报错退出；其二，Mapping Store 在 POSIX 上用 `kill(pid, 0)` 判断锁的持有者是否存活，而它对僵尸也返回成功，于是 Desktop 启动时最先拉起、随后退出的那个 Host 仍被当作锁的持有者，主 app-server 的 Host 报 “Another codexhost process owns Mapping Store”，无法启动（本地 0.7.0-local.13 实测）。现在的处理：killpg 与按 pid 发信号前都基于刚取得的快照，并核对 pid 加启动时间，剩下的窗口只有几微秒；macOS 按顺序分配 pid，要在窗口内复用得走完一整圈 pid 空间，因此作为已知残留接受。保留的改进：进程组只剩僵尸（EPERM）时与空组（ESRCH）同样不算失败，与 anchor 一致 |
+| CLI 发现 | 已修 | 当前 Desktop 把 CLI 放在 `Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`（旁边的 `codex-package.json` 为 `layoutVersion: 1`），不再有 `Resources/codex`。发现逻辑优先用新布局，并要求 `layoutVersion` 为 1，其他版本直接拒绝，不去猜路径；旧布局仍可用。Shim 判断调用是否来自 Desktop helper 时，按新旧两种布局向上定位外层 Desktop bundle（旧布局上 3 级、新布局上 7 级）。第一版只按旧布局向上 3 级，在新布局下所有 helper 都识别失败，评审发现后已修 |
+| RS-6 | 已修 | 更新器在第一次看到 launcher 时记录它的启动时间，之后只在同一 pid、同一启动时间的进程仍在运行时继续等待；pid 被复用时立即判定原 launcher 已退出，不再等满 180 秒超时 |
+| PL-7（Windows）、PL-10、RS-3、RS-4 | 不做 | 仅涉及 Windows |
+
+实测：macOS 上 `kill(pid, 0)` 对僵尸返回成功；只剩僵尸组长的进程组，killpg 返回 EPERM，回收后返回 ESRCH。Shim 测试（lib 24 个、proxy 44 个）在本机通过，测试前后做了进程快照对比，真实的进程账本没有被改动。
+
+阶段 D 评审（Opus 子代理）的发现已同批修复，见上表 PL-9、RS-2、RS-5 与 CLI 发现各行。评审中唯一未做的一项只涉及 Windows：更新器在 Windows 上等待 launcher 时，把一次读取进程快照失败当作 launcher 已退出。
+
+### 4.11 阶段 E 完成情况
+
+| ID | 状态 | 实现 |
+| --- | --- | --- |
+| AD-10 | 已修 | Claude 后台任务完成时，SDK 注入一条 `<task-notification>` 用户记录，实时侧的自主 Turn 以它的 uuid 为 key；而历史读取原先把这段输出并进上一个人类 Turn，重启后两边永远对不上。现在历史在顶层 task-notification 记录处开启自主 Turn（key 为该记录 uuid，输入为空，与实时一致）；实时侧没有这条记录时，改用这段输出里第一条带 uuid 的用户或助手记录，不再用 `Date.now()`。rollback 以同一 Turn 列表为准，最后一个自主 Turn 也算一个 Turn |
+| AD-9 | Grok 已修 / Antigravity 保持 | 用真实 CLI 采样：`grok` 1.0.41 等待子代理时 `rawOutput` 为结构化的 `Result` 或 `MultiResult.results`（含 `task_id`、`status`），`content` 为空，因此删掉按文本正则判定状态的两条退路，只读结构化字段；单任务等待的 `Result` 缺少 id 时直接对应那一个任务。`agy` 1.2.10 的真实权限拒绝是 `tool_info.error = {type: "TOOL_ERROR", message: "permission check failed … user denied permission …"}`，`type` 与普通工具失败相同，没有可用的结构化字段，只能继续按消息识别 |
+| HC-9 | 已修 | 7 个 Harness 原先把选择写成各自的旧格式 token，而 Renderer 早已对所有 Harness 发送结构化的插件 route。现在 Host 对所有 Harness 都写 route（旧 token 照常读取）。没有给 Mapping Store 记录加字段：记录 schema 是 strict，旧版本遇到不认识的字段会把整条记录移进隔离区，回退后 Thread 会“丢失”；route 优先解码自 v0.6.0 起就有，回退到 v0.6.0 及以后仍可读取。三个近乎相同的 Model / Thinking / Permission Mode 选择处理合并为一个，由按类型的描述表驱动（`thread-configuration-selection.ts`） |
+| HC-8 | 已修（插件 API v2） | Session 在 `capabilities.resources` 中声明 `idleRelease` 与 `ownedJobs`，`stopOwnedJobs` 与可选的只读 `workLevel` 移到 `resourceLifecycle`；打开 Session 时校验声明与实现一致。恢复语义改为声明：Adapter 的 `permissionModeScope: "atCreate"`（Grok），Session 的 `restoresNativePermissionMode`（OpenCode）与 `resumeMayChangeConfiguration`（OpenCode、OMP）；Host 不再按 Harness 名称分支。`thread release` 先读 `workLevel`，busy 时不尝试挂起。插件 API 升到 2，Host 同时加载 1 与 2：v1 插件由加载器按实现补出声明，并把 Adapter 上的 `stopOwnedJobs(session)` 挪到它打开的 Session 上。经 broker 转发的 Session 声明自己持有的资源（无），并且不再把 `resources` 发给可能是旧版的客户端 |
+| HC-4（长期） | 部分完成 | `HarnessSessionKernel`（harness-adapter）统一 Session 阶段、输出通道与空闲释放：共享一次尝试、同步准入与阶段切换、异步确认空闲后重新准入、释放失败返回 `releaseFailed`，并让 Adapter 显式选择关闭失败的去向（`retry` / `final`）。内核另以 `releaseFailure`（`retry` / `fault`）声明释放失败的去向。Grok、Claude Code（释放失败 retry）、OpenCode（释放失败 fault：传输与服务连接无法部分回退）与 Cursor（final，释放即关闭）已迁移，拒绝与失败原因改用内核的统一措辞；OpenCode 改为确认空闲期间照常接受操作、closing 期间不再发布故障。Kiro 未迁移 |
+| AD-13 | 部分完成 | 新增 `adapter-pi-family`（不是插件，打进 Pi 与 OMP 各自的 Bundle）：模型身份与目录、会话历史映射、工具输出与文件变更推导、RPC 辅助。只抽了两边逐字相同或只差参数（Harness id、名称、持久化的 Model Ref 与条目 id 前缀、工具条目投影）的部分，Pi / OMP 共删去约 1.6k 行、新增约 0.1k 行，共享包约 0.9k 行。RPC Session 与 Adapter 中仍有约 1.2k + 1.5k 行逐函数存在真实协议差异，没有为抽取而硬套参数 |
+| AD-14 | 部分完成 | 新增 `adapter-acp-core`：`startAcpAgent`（受管进程启动、spawn 等待、ndjson 连接、故障上报、协议协商）与 `withDeadline`，Grok 与 Kiro 已迁移（两者原实现逐行一致）；错误类型、客户端回调与 Session 语义留在各 Adapter。CodeBuddy 与 Cursor 的协议版本处理与错误路径不同，暂未迁移。见 `acp-layer-follow-up.md` |
+| AD-15 | 部分完成 | `app-server-host.ts` 的 Codex Account 请求移到 `codex-account-requests.ts`（依赖显式传入，三份账户投影合一），JSON-RPC 响应辅助移到 `json-rpc-response.ts`；HC-9 的配置选择也已移出。`app-server-host.ts` 仍约 4.6k 行，其余候选（官方委派约 450 行、Harness 输出投影约 350 行）以及 `deepseek modern/session.ts`、`claude-code-adapter.ts` 未拆 |
+
+阶段 E 中改变插件合同的部分（HC-8、SessionKernel）保持对 v1 插件的兼容；持久化格式没有变化。
+
 ## 5. 修复顺序
 
 | 阶段 | 内容 | 覆盖条目 |
@@ -173,8 +371,8 @@ spawnOwnedProcess(command, args, {
 | **A（当前分支）** | Rust anchor crate 与集成测试；`spawnOwnedProcess`；Shim 注入路径；打包；全部 POSIX Adapter 迁移；删除手写回收实现；边界检查禁止直接发信号 | PL-1 … PL-8 |
 | **B** | Host 稳健性与门禁：进程级异常处理、调用期限与关闭预算、退役屏障、挂起失败语义、conformance 资源与 Turn 语法；Shim CPU | HC-1 … HC-5、AD-16、RS-1 |
 | **C** | Adapter 与 Host 局部缺陷 | AD-1 … AD-8、AD-11、AD-12、HC-6、HC-7、HC-10、HC-11 |
-| **D** | Windows anchor（Job Object）、broker anchor、更新器与 Shim 原生问题 | PL-7（Windows）、PL-9 … PL-11、RS-2 … RS-6 |
-| **E** | 结构升级：SessionKernel 与 `workLevel` / `release` 合同（需升级插件合同版本）、`acp-core`、Pi-family 核心、大模块拆分、能力声明 | HC-4（长期）、HC-8、HC-9、AD-9、AD-10、AD-13 … AD-15 |
+| **D** | broker anchor、更新器与 Shim 原生问题（仅 macOS，见 4.10）；Windows anchor（Job Object）不做 | PL-9、PL-11、RS-2、RS-5、RS-6 |
+| **E** | 结构升级（见 4.11）：插件 API v2 能力声明与 `workLevel`、SessionKernel、`acp-core`、Pi-family 核心、大模块拆分 | HC-4（长期）、HC-8、HC-9、AD-9、AD-10、AD-13 … AD-15 |
 
 ## 6. 阶段 A 验收
 

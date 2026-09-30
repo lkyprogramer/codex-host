@@ -186,6 +186,66 @@ pub fn process_snapshots() -> Result<Vec<ProcessSnapshot>, PlatformError> {
         .collect())
 }
 
+/// Pid, parent, group and start time of every process, with an empty
+/// executable. Reading an executable path costs several times more than the
+/// rest, and a supervision round needs only the root's and the owned
+/// processes' paths, not those of every process on the system.
+#[cfg(target_os = "macos")]
+fn process_identities() -> Result<Vec<ProcessSnapshot>, PlatformError> {
+    use libproc::libproc::bsd_info::BSDInfo;
+    use libproc::libproc::proc_pid::pidinfo;
+    use libproc::processes::{ProcFilter, pids_by_type};
+
+    Ok(pids_by_type(ProcFilter::All)?
+        .into_iter()
+        .filter_map(|process_id| {
+            let info = pidinfo::<BSDInfo>(i32::try_from(process_id).ok()?, 0).ok()?;
+            Some(ProcessSnapshot {
+                id: info.pbi_pid,
+                parent_id: info.pbi_ppid,
+                process_group_id: info.pbi_pgid,
+                executable: PathBuf::new(),
+                started_at_micros: info
+                    .pbi_start_tvsec
+                    .saturating_mul(1_000_000)
+                    .saturating_add(info.pbi_start_tvusec),
+            })
+        })
+        .collect())
+}
+
+#[cfg(target_os = "linux")]
+fn process_identities() -> Result<Vec<ProcessSnapshot>, PlatformError> {
+    let entries = std::fs::read_dir("/proc")?;
+    Ok(entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| entry.file_name().to_str()?.parse::<u32>().ok())
+        .filter_map(|process_id| {
+            let (parent_id, process_group_id, started_at_micros) =
+                linux_stat_fields(process_id).ok()?;
+            Some(ProcessSnapshot {
+                id: process_id,
+                parent_id,
+                process_group_id,
+                executable: PathBuf::new(),
+                started_at_micros,
+            })
+        })
+        .collect())
+}
+
+/// Fills in `process`'s executable when the same instance still runs.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn resolve_executable(process: &mut ProcessSnapshot) -> bool {
+    match unix_process_snapshot(process.id) {
+        Ok(current) if same_process_instance(process, &current) => {
+            process.executable = current.executable;
+            true
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn same_process_instance(expected: &ProcessSnapshot, current: &ProcessSnapshot) -> bool {
     expected.id == current.id && expected.started_at_micros == current.started_at_micros
 }
@@ -327,8 +387,32 @@ impl ObservedProcessTree {
         self.process_group_id.unwrap_or(self.root.process_group_id)
     }
 
+    /// The owned live processes, with their executables.
     pub(crate) fn observe(&mut self) -> Result<Vec<ProcessSnapshot>, PlatformError> {
-        let snapshots = process_snapshots()?;
+        let mut owned = self.observe_identities()?;
+        for process in &mut owned {
+            if process.executable.as_os_str().is_empty() {
+                resolve_executable(process);
+            }
+        }
+        Ok(owned)
+    }
+
+    /// The owned live processes; only the root's executable is resolved.
+    /// Enough to tell whether anything owned still runs, at a fraction of
+    /// the cost of reading every process's path.
+    pub(crate) fn observe_identities(&mut self) -> Result<Vec<ProcessSnapshot>, PlatformError> {
+        let mut snapshots = process_identities()?;
+        // The root's executable is part of its identity check. A root whose
+        // path cannot be read has exited this instant: leave it out, as a
+        // full snapshot would.
+        if let Some(index) = snapshots
+            .iter()
+            .position(|process| process.id == self.root.id)
+            && !resolve_executable(&mut snapshots[index])
+        {
+            snapshots.remove(index);
+        }
         self.observe_snapshots(&snapshots)
     }
 

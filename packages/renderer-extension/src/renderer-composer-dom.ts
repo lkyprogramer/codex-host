@@ -7,7 +7,6 @@ import type {
 import type {
   AccountCreditsSnapshot,
   CodexAccountSummary,
-  HarnessCommandDescriptor,
   ThreadUsageSnapshot,
 } from "@codexhost/shared-contracts";
 import {
@@ -483,14 +482,54 @@ export function creditsPlacementAnchor(control: ComposerAgentControl): HTMLEleme
   return root?.parentElement ? root : null;
 }
 
+function lastNativeButtonWithin(composer: Element): HTMLButtonElement | null {
+  const buttons = [...composer.querySelectorAll<HTMLButtonElement>("button")];
+  for (let index = buttons.length - 1; index >= 0; index -= 1) {
+    const button = buttons[index];
+    if (!button) continue;
+    let owned = false;
+    for (let node: Element | null = button; node && node !== composer; node = node.parentElement) {
+      if (isOwnedRendererControl(node)) {
+        owned = true;
+        break;
+      }
+    }
+    if (!owned) return button;
+  }
+  return null;
+}
+
+export function refreshSendButton(control: ComposerAgentControl): HTMLButtonElement | null {
+  const current = control.sendButton;
+  if (
+    current?.isConnected !== false &&
+    (typeof control.composer.contains !== "function" || control.composer.contains(current))
+  ) {
+    return current;
+  }
+  // An unlabelled action button can only inherit the mount-time fallback.
+  // A recognised Send must never be replaced by Stop or Attach.
+  const replacement =
+    sendButtonWithin(control.composer) ??
+    (!isComposerSubmitButton(current) ? lastNativeButtonWithin(control.composer) : null);
+  if (!replacement) return null;
+  if (control.sendDisabledBeforeSwitch !== null) {
+    control.sendDisabledBeforeSwitch = replacement.disabled;
+    replacement.disabled = true;
+  }
+  control.sendButton = replacement;
+  return replacement;
+}
+
 function refreshTrailingClusterPlacement(control: ComposerAgentControl): void {
-  const sendButton = control.sendButton;
+  const sendButton = refreshSendButton(control);
   const modelRoot = control.modelPicker?.root;
   const agentRoot = control.root ?? control.picker?.root;
   if (!sendButton || !modelRoot || !agentRoot) return;
   const anchor = trailingActionAnchor(sendButton);
   const parent = anchor.parentElement;
-  if (!parent || typeof parent.insertBefore !== "function") return;
+  if (!parent || !control.composer.contains(parent) || typeof parent.insertBefore !== "function")
+    return;
   if (
     modelRoot.parentElement === parent &&
     agentRoot.parentElement === parent &&
@@ -610,7 +649,7 @@ export function mountComposerAgentControl(
   onSelectModel: (modelId: string) => void,
   onSelectThinking: (thinkingOptionId: string) => void,
   onSelectPermissionMode: (permissionModeId: string) => void,
-  onSelectCommand: (command: HarnessCommandDescriptor) => void,
+  onOpenCommandMenu: () => void,
   presentations: ReadonlyMap<RendererAgent, RendererAgentPresentation> = new Map(),
 ): ComposerAgentControl {
   const nativeModelControl = captureNativeControl(nativeModelControlForComposer(composer));
@@ -644,7 +683,7 @@ export function mountComposerAgentControl(
   const harnessCommands = mountRendererHarnessCommandControl(
     toolbar ?? composer,
     trailingActionAnchor(sendButton),
-    onSelectCommand,
+    onOpenCommandMenu,
   );
 
   const permissionParent = nativePermissionModeControl?.element.parentElement;
@@ -767,7 +806,11 @@ export function renderComposerAgentControl(
     pickerView.nativeModelHidden,
     switching || state.agent !== "codex",
   );
-  renderRendererModelPicker(control.modelPicker, modelView, state.agent !== "codex");
+  renderRendererModelPicker(control.modelPicker, modelView, state.agent !== "codex", state.agent);
+  // The model name yields width to the fixed Composer actions in a narrow footer.
+  control.modelPicker.root.style.minWidth = "0";
+  control.modelPicker.root.style.flex = "0 1 auto";
+  control.modelPicker.trigger.style.minWidth = "0";
   const permissionModeVisible =
     state.agent !== "codex" &&
     permissionModeView.status !== "idle" &&
@@ -791,11 +834,13 @@ export function renderComposerAgentControl(
       locale,
       selectedCodexAccount?.email ?? selectedCodexAccount?.label ?? null,
     );
+    control.usage.root.style.minWidth = "0";
+    control.usage.root.style.flex = "0 1 auto";
+    control.usage.trigger.style.minWidth = "0";
   }
   control.harnessCommands.setLocale(locale);
   control.harnessCommands.root.hidden = state.agent === "codex";
   control.harnessCommands.root.style.display = state.agent === "codex" ? "none" : "inline-flex";
-  if (state.agent === "codex") control.harnessCommands.close();
   renderRendererCreditsControl(control.credits, accountCredits, locale);
 }
 

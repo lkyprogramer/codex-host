@@ -5,19 +5,37 @@ import { jsonValueSchema, type JsonValue } from "@codexhost/shared-contracts";
 const decoder = new TextDecoder("utf-8", { fatal: true });
 const newline = Buffer.from("\n");
 
-export async function* readLfFrames(stream: Readable): AsyncGenerator<Buffer<ArrayBufferLike>> {
-  let pending: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+export async function* readLfFrames(
+  stream: Readable,
+  options: { maxFrameBytes?: number } = {},
+): AsyncGenerator<Buffer<ArrayBufferLike>> {
+  const limit = options.maxFrameBytes ?? Infinity;
+  if (limit !== Infinity && (!Number.isSafeInteger(limit) || limit <= 0)) {
+    throw new Error("Invalid protocol frame limit");
+  }
+  let fragments: Buffer<ArrayBufferLike>[] = [];
+  let length = 0;
   for await (const chunk of stream) {
     const bytes = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-    pending = pending.length === 0 ? bytes : Buffer.concat([pending, bytes]);
-    let newlineIndex = pending.indexOf(0x0a);
-    while (newlineIndex >= 0) {
-      yield pending.subarray(0, newlineIndex);
-      pending = pending.subarray(newlineIndex + 1);
-      newlineIndex = pending.indexOf(0x0a);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const end = bytes.indexOf(0x0a, offset);
+      const part = bytes.subarray(offset, end < 0 ? bytes.length : end);
+      length += part.length;
+      if (length > limit) throw new Error("Protocol frame exceeds its limit");
+      if (end < 0) {
+        fragments.push(part);
+        break;
+      }
+      // Scan each incoming byte once and join a fragmented frame only when complete.
+      const frame = fragments.length === 0 ? part : Buffer.concat([...fragments, part], length);
+      fragments = [];
+      length = 0;
+      yield frame;
+      offset = end + 1;
     }
   }
-  if (pending.length !== 0) {
+  if (length !== 0) {
     throw new Error("Protocol stream ended with an unterminated JSONL frame");
   }
 }

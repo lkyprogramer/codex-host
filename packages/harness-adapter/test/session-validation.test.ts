@@ -49,6 +49,29 @@ describe("plugin Session boundary", () => {
     expect(validateHarnessSession(id, value)).toMatchObject({ ok: false });
   });
 
+  it("holds declared native resources to what the Session implements", () => {
+    const declared = (resources: object, lifecycle?: object) => {
+      const value = session();
+      Object.assign(value.capabilities, { resources });
+      if (lifecycle) Object.defineProperty(value, "resourceLifecycle", { value: lifecycle });
+      return validateHarnessSession(id, value);
+    };
+    const suspend = async () => ({ status: "unsupported" as const });
+    const stopOwnedJobs = async () => ({ quiescence: "confirmed" as const });
+    expect(declared({ idleRelease: false, ownedJobs: false })).toMatchObject({ ok: true });
+    expect(
+      declared({ idleRelease: true, ownedJobs: true }, { suspend, stopOwnedJobs }),
+    ).toMatchObject({ ok: true });
+    // A promise the Session does not keep, and work it does not declare.
+    expect(declared({ idleRelease: true, ownedJobs: false })).toMatchObject({ ok: false });
+    expect(
+      declared({ idleRelease: true, ownedJobs: false }, { suspend, stopOwnedJobs }),
+    ).toMatchObject({ ok: false });
+    expect(
+      declared({ idleRelease: true, ownedJobs: false }, { suspend, workLevel: true }),
+    ).toMatchObject({ ok: false });
+  });
+
   it("contains throwing plugin getters without exposing their payload", () => {
     const value = Object.defineProperty({}, "harnessId", {
       get() {

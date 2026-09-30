@@ -1,10 +1,15 @@
 import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { createTwoFilesPatch } from "diff";
 
 import type { HarnessOutput, HostUsage } from "@codexhost/harness-adapter";
 import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import {
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
+  hostTurnIdSchema,
   nativeCheckpointRefSchema,
   nativeSessionRefSchema,
   type HarnessThinkingOptionId,
@@ -28,6 +33,7 @@ import type {
 } from "../src/omp-rpc-session.js";
 import { OmpRpcFaultError } from "../src/omp-rpc-session.js";
 import type { OmpNativeModel } from "../src/omp-model-catalog.js";
+import { CodexTurnProjector, projectHistoricalTurn } from "@codexhost/protocol-core";
 
 class FakeOmpTransport implements OmpTurnTransport {
   readonly subagentSubscription: "events" | "unsupported";
@@ -942,6 +948,172 @@ describe("OMP Adapter Subagents", () => {
     await adapter.close();
   });
 
+  it("cold reads the child when a later parent record crosses the UTF-8 header bound", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-omp-child-"));
+    try {
+      const parentFile = path.join(root, "parent.jsonl");
+      const childDirectory = path.join(root, "parent");
+      const header = `${JSON.stringify({ type: "session", id: "parent", cwd: root })}\n`;
+      await writeFile(
+        parentFile,
+        `${header}${"x".repeat(64 * 1024 - Buffer.byteLength(header) - 1)}😀\n`,
+      );
+      await mkdir(childDirectory);
+      await writeFile(
+        path.join(childDirectory, "scout.jsonl"),
+        [
+          { type: "session", id: "native-child", cwd: root },
+          {
+            type: "message",
+            id: "user",
+            parentId: null,
+            message: { role: "user", content: [{ type: "text", text: "Inspect" }] },
+          },
+          {
+            type: "message",
+            id: "answer",
+            parentId: "user",
+            message: {
+              role: "assistant",
+              content: [{ type: "text", text: "Done" }],
+              stopReason: "stop",
+            },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n") + "\n",
+      );
+      const createTransport = vi.fn();
+      const adapter = new OmpAdapter({}, { createTransport: createTransport as never });
+      const parent = nativeSessionRefSchema.parse({
+        harnessId: "omp",
+        nativeSessionId: "parent",
+        locator: { sessionFile: parentFile },
+        formatVersion: 1,
+      });
+      const result = await adapter.subagents.readSnapshot({
+        parent,
+        nativeSubagentId: "scout",
+        cwd: root,
+      });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.value.turns).toHaveLength(1);
+        expect(result.value.turns[0]?.input).toEqual([{ type: "text", text: "Inspect" }]);
+      }
+      expect(createTransport).not.toHaveBeenCalled();
+      await adapter.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a child transcript symlink escape and an oversized transcript", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-omp-child-"));
+    try {
+      const parentFile = path.join(root, "parent.jsonl");
+      const childDirectory = path.join(root, "parent");
+      await writeFile(
+        parentFile,
+        `${JSON.stringify({ type: "session", id: "parent", cwd: root })}\n`,
+      );
+      await mkdir(childDirectory);
+      const outside = path.join(root, "outside.jsonl");
+      await writeFile(outside, "{}\n");
+      await symlink(outside, path.join(childDirectory, "escape.jsonl"));
+      await writeFile(path.join(childDirectory, "huge.jsonl"), Buffer.alloc(8 * 1024 * 1024 + 1));
+      const createTransport = vi.fn();
+      const adapter = new OmpAdapter({}, { createTransport: createTransport as never });
+      const parent = nativeSessionRefSchema.parse({
+        harnessId: "omp",
+        nativeSessionId: "parent",
+        locator: { sessionFile: parentFile },
+        formatVersion: 1,
+      });
+      for (const [id, expected] of [
+        ["escape", /symlink|symbolic|outside|ELOOP/i],
+        ["huge", /exceeds the supported size/],
+      ] as const) {
+        const result = await adapter.subagents.readSnapshot({
+          parent,
+          nativeSubagentId: id,
+          cwd: root,
+        });
+        expect(result.ok).toBe(false);
+        if (!result.ok) expect(result.error.message).toMatch(expected);
+      }
+      expect(createTransport).not.toHaveBeenCalled();
+      await adapter.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("uses cold RPC only when the managed child file is absent, without inventing a child", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-omp-child-"));
+    try {
+      const parentFile = path.join(root, "parent.jsonl");
+      await writeFile(
+        parentFile,
+        `${JSON.stringify({ type: "session", id: "parent", cwd: root })}\n`,
+      );
+      const transport = new FakeOmpTransport();
+      const getSubagentMessages = vi
+        .spyOn(transport, "getSubagentMessages")
+        .mockRejectedValue(new Error("Unknown subagent"));
+      const createTransport = vi.fn(() => transport);
+      const adapter = new OmpAdapter({}, { createTransport });
+      const parent = nativeSessionRefSchema.parse({
+        harnessId: "omp",
+        nativeSessionId: "parent",
+        locator: { sessionFile: parentFile },
+        formatVersion: 1,
+      });
+      const result = await adapter.subagents.readSnapshot({
+        parent,
+        nativeSubagentId: "missing",
+        cwd: root,
+      });
+      expect(result.ok).toBe(false);
+      expect(createTransport).toHaveBeenCalledOnce();
+      expect(getSubagentMessages).toHaveBeenCalledWith({ subagentId: "missing" });
+      await adapter.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a mismatched parent identity and path traversal before RPC", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "codexhost-omp-child-"));
+    try {
+      const parentFile = path.join(root, "parent.jsonl");
+      await writeFile(
+        parentFile,
+        `${JSON.stringify({ type: "session", id: "other-parent", cwd: root })}\n`,
+      );
+      const createTransport = vi.fn();
+      const adapter = new OmpAdapter({}, { createTransport: createTransport as never });
+      const parent = nativeSessionRefSchema.parse({
+        harnessId: "omp",
+        nativeSessionId: "parent",
+        locator: { sessionFile: parentFile },
+        formatVersion: 1,
+      });
+      for (const id of ["scout", "../escape", "..\\escape"]) {
+        const result = await adapter.subagents.readSnapshot({
+          parent,
+          nativeSubagentId: id,
+          cwd: root,
+        });
+        expect(result.ok).toBe(false);
+      }
+      expect(createTransport).not.toHaveBeenCalled();
+      await adapter.close();
+    } finally {
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
   it("materializes a background Subagent that starts after the parent Turn is idle", async () => {
     const transport = new FakeOmpTransport();
     const dependencies: OmpAdapterDependencies = {
@@ -1162,6 +1334,97 @@ describe("OMP Adapter Subagents", () => {
     await adapter.close();
   });
 
+  it("keeps a persisted OMP tool result paired with its native file change through replay", async () => {
+    const transport = new FakeOmpTransport();
+    const nativePath = "a\\b.txt";
+    transport.history = {
+      entries: [
+        {
+          id: "user-1",
+          parentId: null,
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "edit file" }] },
+        },
+        {
+          id: "assistant-1",
+          parentId: "user-1",
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "edit-1",
+                name: "edit",
+                arguments: { input: `[${nativePath}#abc]\\nPUT >1:\\n+after\\n` },
+              },
+            ],
+          },
+        },
+        {
+          id: "result-1",
+          parentId: "assistant-1",
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "edit-1",
+            toolName: "edit",
+            isError: false,
+            content: [{ type: "text", text: "edited" }],
+            details: {
+              diff: createTwoFilesPatch(
+                `a/${nativePath}`,
+                `b/${nativePath}`,
+                "before\n",
+                "after\n",
+              ),
+            },
+          },
+        },
+        {
+          id: "assistant-2",
+          parentId: "result-1",
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "Done" }],
+            stopReason: "stop",
+          },
+        },
+      ],
+      leafId: "assistant-2",
+    };
+    const adapter = new OmpAdapter({}, { createTransport: () => transport });
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok) throw new Error(opened.error.message);
+    const read = await opened.value.readSnapshot();
+    if (!read.ok) throw new Error(read.error.message);
+    const turn = read.value.turns[0];
+    expect(turn).toBeDefined();
+    if (!turn) return;
+    const tool = turn.items.find(({ item }) => item.type === "commandExecution")?.item;
+    const file = turn.items.find(({ item }) => item.type === "fileChange")?.item;
+    expect(file).toMatchObject({
+      type: "fileChange",
+      sourceItemIds: [tool?.itemId],
+      changes: [{ path: path.sep === "/" ? nativePath : "a/b.txt", kind: "update" }],
+    });
+    const projected = projectHistoricalTurn({
+      turnId: hostTurnIdSchema.parse("replayed-omp-edit"),
+      cwd: "/synthetic",
+      snapshot: turn,
+    });
+    const fileCards = (projected.items as { type: string }[]).filter(
+      (item) => item.type === "fileChange",
+    );
+    expect(fileCards).toHaveLength(1);
+    expect(fileCards[0]).toMatchObject({
+      changes: [{ path: path.sep === "/" ? nativePath : "a/b.txt" }],
+    });
+    await opened.value.close();
+    await adapter.close();
+  });
+
   it("projects a native Edit File Change from numbered details.diff without faulting the Session", async () => {
     const transport = new FakeOmpTransport();
     transport.autoCompleteTurn = false;
@@ -1196,10 +1459,12 @@ describe("OMP Adapter Subagents", () => {
         input: "[docs/archive/README.md#6F1B]\nPUT >3:\n+\n+test-marker\n",
       },
     });
-    expect(await nextEvent(iterator)).toMatchObject({
+    const startedTool = await nextEvent(iterator);
+    expect(startedTool).toMatchObject({
       type: "item.started",
       item: { type: "commandExecution", command: expect.stringContaining("edit") },
     });
+    if (startedTool.type !== "item.started") throw new Error("Expected OMP tool Item");
 
     transport.event({
       type: "tool.completed",
@@ -1216,17 +1481,20 @@ describe("OMP Adapter Subagents", () => {
       },
       isError: false,
     });
-    expect(await nextEvent(iterator)).toMatchObject({
+    const completedTool = await nextEvent(iterator);
+    expect(completedTool).toMatchObject({
       type: "item.completed",
       snapshot: {
         item: { type: "commandExecution", command: expect.stringContaining("edit") },
         outcome: { status: "succeeded" },
       },
     });
-    expect(await nextEvent(iterator)).toMatchObject({
+    const startedFile = await nextEvent(iterator);
+    expect(startedFile).toMatchObject({
       type: "item.started",
       item: {
         type: "fileChange",
+        sourceItemIds: [startedTool.item.itemId],
         changes: [
           {
             path: "docs/archive/README.md",
@@ -1236,10 +1504,91 @@ describe("OMP Adapter Subagents", () => {
         ],
       },
     });
-    expect(await nextEvent(iterator)).toMatchObject({
+    const completedFile = await nextEvent(iterator);
+    expect(completedFile).toMatchObject({
       type: "item.completed",
       snapshot: { item: { type: "fileChange" }, outcome: { status: "succeeded" } },
     });
+    if (
+      completedTool.type !== "item.completed" ||
+      startedFile.type !== "item.started" ||
+      completedFile.type !== "item.completed"
+    ) {
+      throw new Error("Expected OMP tool and File Change events");
+    }
+    const turnId = hostTurnIdSchema.parse("turn-edit");
+    const projector = new CodexTurnProjector({
+      threadId: "omp-thread",
+      turnId,
+      cwd: "/synthetic",
+      startedAtMs: 1,
+    });
+    projector.project({ type: "turn.started", turnId });
+    for (const event of [startedTool, completedTool, startedFile, completedFile]) {
+      projector.project(event);
+    }
+    const fileCards = (projector.pendingTurn()?.items as { type: string }[]).filter(
+      (item) => item.type === "fileChange",
+    );
+    expect(fileCards).toHaveLength(1);
+    expect(fileCards[0]).toMatchObject({ changes: [{ path: "docs/archive/README.md" }] });
+
+    if (path.sep === "/") {
+      const nativePath = "a\\b.txt";
+      transport.event({
+        type: "tool.started",
+        callId: "edit-literal-backslash",
+        toolName: "edit",
+        arguments: { input: `[${nativePath}#abc]\\nPUT >1:\\n+after\\n` },
+      });
+      const literalTool = await nextEvent(iterator);
+      expect(literalTool).toMatchObject({
+        type: "item.started",
+        item: { type: "commandExecution" },
+      });
+      if (literalTool.type !== "item.started")
+        throw new Error("Expected OMP literal-backslash Edit");
+      transport.event({
+        type: "tool.completed",
+        callId: "edit-literal-backslash",
+        toolName: "edit",
+        result: {
+          content: [{ type: "text", text: "edited" }],
+          details: {
+            diff: createTwoFilesPatch(`a/${nativePath}`, `b/${nativePath}`, "before\n", "after\n"),
+          },
+        },
+        isError: false,
+      });
+      const literalToolCompleted = await nextEvent(iterator);
+      const literalFile = await nextEvent(iterator);
+      const literalFileCompleted = await nextEvent(iterator);
+      expect(literalFile).toMatchObject({
+        type: "item.started",
+        item: {
+          type: "fileChange",
+          sourceItemIds: [literalTool.item.itemId],
+          changes: [{ path: nativePath, kind: "update" }],
+        },
+      });
+      if (
+        literalToolCompleted.type !== "item.completed" ||
+        literalFile.type !== "item.started" ||
+        literalFileCompleted.type !== "item.completed"
+      ) {
+        throw new Error("Expected OMP literal-backslash Edit events");
+      }
+      for (const event of [literalTool, literalToolCompleted, literalFile, literalFileCompleted]) {
+        projector.project(event);
+      }
+      const projectedFiles = (projector.pendingTurn()?.items as { type: string }[]).filter(
+        (item) => item.type === "fileChange",
+      );
+      expect(projectedFiles).toHaveLength(1);
+      expect(projectedFiles[0]).toMatchObject({
+        changes: [{ path: "docs/archive/README.md" }, { path: nativePath }],
+      });
+    }
 
     transport.succeed("changed");
     expect(await nextEvent(iterator)).toMatchObject({ type: "item.completed" });

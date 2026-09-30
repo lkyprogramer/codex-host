@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { lstat, rm } from "node:fs/promises";
+import { lstat, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Writable } from "node:stream";
 
@@ -79,16 +79,52 @@ async function settlesWithin<T>(promise: Promise<T>, timeoutMs: number): Promise
   });
 }
 
-async function socketIdentity(socketPath: string): Promise<UnixFileIdentity | null> {
+async function socketEntry(socketPath: string) {
   const metadata = await lstat(socketPath).catch((error: NodeJS.ErrnoException) => {
     if (error.code === "ENOENT") return null;
     throw error;
   });
+  return metadata;
+}
+
+function fileIdentity(metadata: { dev: number; ino: number }): UnixFileIdentity {
+  return { dev: metadata.dev, ino: metadata.ino };
+}
+
+async function inspectSocket(
+  socketPath: string,
+): Promise<{ identity: UnixFileIdentity; ready: boolean } | null> {
+  const metadata = await socketEntry(socketPath);
   if (metadata === null) return null;
-  if (!metadata.isSocket()) {
+  const identity = fileIdentity(metadata);
+  if (metadata.isSymbolicLink()) {
+    const uid = process.getuid?.();
+    if (uid === undefined || metadata.uid !== uid) {
+      throw new Error(
+        `Shared official app-server link must belong to the current user: ${socketPath}`,
+      );
+    }
+    const target = await stat(socketPath).catch((error: NodeJS.ErrnoException) => {
+      if (error.code === "ENOENT") return null;
+      throw error;
+    });
+    if (target === null) return { identity, ready: false };
+    if (target.uid !== uid || !target.isSocket() || (target.mode & 0o077) !== 0) {
+      throw new Error(
+        `Shared official app-server link must target a current-user private socket: ${socketPath}`,
+      );
+    }
+    const currentLink = await socketEntry(socketPath);
+    if (
+      !currentLink?.isSymbolicLink() ||
+      !sameUnixFileIdentity(identity, fileIdentity(currentLink))
+    ) {
+      throw new Error(`Shared official app-server link changed while validating: ${socketPath}`);
+    }
+  } else if (!metadata.isSocket()) {
     throw new Error(`Shared official app-server path is not a socket: ${socketPath}`);
   }
-  return { dev: metadata.dev, ino: metadata.ino };
+  return { identity, ready: true };
 }
 
 function sameUnixFileIdentity(left: UnixFileIdentity, right: UnixFileIdentity): boolean {
@@ -113,7 +149,7 @@ async function waitForOfficialSocket(
           : `Shared official app-server exited before its socket was ready (code=${String(exit.code)}, signal=${String(exit.signal)})`,
       );
     }
-    if ((await socketIdentity(socketPath)) !== null) return;
+    if ((await inspectSocket(socketPath))?.ready) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
   }
   throw new Error(`Shared official app-server socket was not ready after 10000ms: ${socketPath}`);
@@ -139,6 +175,7 @@ export function createRemoteOfficialAppServerListener(input: {
   let closeRequested = false;
   let exitResult: RemoteOfficialAppServerExit | null = null;
   let ownedSocketIdentity: UnixFileIdentity | null = null;
+  let socketPathWasAbsent = false;
 
   const settleExit = (result: RemoteOfficialAppServerExit): void => {
     if (exitResult !== null) return;
@@ -160,8 +197,8 @@ export function createRemoteOfficialAppServerListener(input: {
 
   const removeOwnedSocket = async (): Promise<void> => {
     if (ownedSocketIdentity === null) return;
-    const current = await socketIdentity(input.socketPath).catch(() => null);
-    if (current && sameUnixFileIdentity(current, ownedSocketIdentity)) {
+    const current = await socketEntry(input.socketPath).catch(() => null);
+    if (current && sameUnixFileIdentity(fileIdentity(current), ownedSocketIdentity)) {
       await rm(input.socketPath, { force: true });
     }
     ownedSocketIdentity = null;
@@ -173,6 +210,9 @@ export function createRemoteOfficialAppServerListener(input: {
       if (listening) return listening;
       listening = (async () => {
         if (closeRequested) throw new Error("Shared official app-server is already closed");
+        const initialEntry = await socketEntry(input.socketPath);
+        if (closeRequested) throw new Error("Shared official app-server is already closed");
+        socketPathWasAbsent = initialEntry === null;
         const spawned = spawnOfficial(input.stockCodexPath, input.arguments, {
           env: input.environment,
           stdio: ["ignore", "ignore", "pipe"],
@@ -188,11 +228,28 @@ export function createRemoteOfficialAppServerListener(input: {
         });
         try {
           await waitUntilReady(input.socketPath, closed.promise);
-          ownedSocketIdentity = await socketIdentity(input.socketPath).catch(() => null);
+          if (socketPathWasAbsent) {
+            const socket = await inspectSocket(input.socketPath);
+            if (socket && !socket.ready) {
+              throw new Error(
+                `Shared official app-server socket is not ready: ${input.socketPath}`,
+              );
+            }
+            ownedSocketIdentity = socket?.identity ?? null;
+          }
+          if (closeRequested) throw new Error("Shared official app-server is already closed");
         } catch (error) {
+          if (ownedSocketIdentity === null && socketPathWasAbsent) {
+            const current = await socketEntry(input.socketPath).catch(() => null);
+            if (
+              current?.isSocket() ||
+              (current?.isSymbolicLink() && current.uid === process.getuid?.())
+            ) {
+              ownedSocketIdentity = fileIdentity(current);
+            }
+          }
           const exited = await terminate(spawned);
           if (exited) {
-            ownedSocketIdentity ??= await socketIdentity(input.socketPath).catch(() => null);
             await removeOwnedSocket();
           }
           throw new Error(`Shared official app-server startup failed: ${errorMessage(error)}`);

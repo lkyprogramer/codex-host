@@ -19,6 +19,7 @@ export const CODEBUDDY_CAPABILITIES: HarnessSessionCapabilities = {
     selectPermissionMode: true,
     permissionModeScope: "live",
   },
+  resources: { idleRelease: false, ownedJobs: false },
   history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
   subagents: { observe: true, readTranscript: true },
 };

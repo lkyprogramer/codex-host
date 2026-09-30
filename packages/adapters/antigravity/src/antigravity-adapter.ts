@@ -51,7 +51,9 @@ import {
 } from "@codexhost/harness-adapter";
 import {
   commandInvocation,
-  trackOwnedProcessTree,
+  runOwnedProcess,
+  spawnOwnedProcess,
+  type OwnedProcessResult,
   type OwnedProcessTree,
 } from "@codexhost/harness-discovery";
 import {
@@ -232,6 +234,7 @@ const CAPABILITIES: HarnessSessionCapabilities = {
     selectPermissionMode: true,
     permissionModeScope: "live",
   },
+  resources: { idleRelease: false, ownedJobs: false },
   history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
   turnControl: { steering: "restart", workModes: ["default"] },
   subagents: { observe: true, readTranscript: true },
@@ -472,6 +475,9 @@ function normalizedProcessError(
   };
 }
 
+/** Short CLI calls (model catalog, quota) print little; this only bounds a runaway. */
+const BUFFERED_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
+
 async function runBuffered(
   executable: string,
   arguments_: string[],
@@ -481,33 +487,28 @@ async function runBuffered(
   signal?: AbortSignal,
 ): Promise<{ stdout: string; stderr: string }> {
   const invocation = commandInvocation(executable, arguments_, environment);
-  return await new Promise((resolve, reject) => {
-    const child = spawn(invocation.command, invocation.arguments, {
+  let result: OwnedProcessResult;
+  try {
+    // A call that times out or is aborted is stopped as a whole tree.
+    result = await runOwnedProcess(invocation.command, invocation.arguments, {
       cwd,
       env: environment,
-      ...(signal ? { signal, killSignal: "SIGKILL" as const } : {}),
-      windowsHide: true,
       windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      stdio: ["ignore", "pipe", "pipe"],
+      timeoutMs,
+      maxOutputBytes: BUFFERED_OUTPUT_LIMIT_BYTES,
+      ...(signal ? { signal } : {}),
     });
-    let stdout = "";
-    let stderr = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      reject(new Error(`Antigravity CLI timed out after ${timeoutMs} ms`));
-    }, timeoutMs);
-    child.stdout.setEncoding("utf8").on("data", (chunk: string) => (stdout += chunk));
-    child.stderr.setEncoding("utf8").on("data", (chunk: string) => (stderr += chunk));
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-    child.once("close", (code) => {
-      clearTimeout(timer);
-      if (code === 0) resolve({ stdout, stderr });
-      else reject(new Error(stderr.trim() || `Antigravity CLI exited with code ${String(code)}`));
-    });
-  });
+  } catch (error) {
+    if (typeof error === "object" && error !== null && Reflect.get(error, "code") === "ETIMEDOUT") {
+      throw new Error(`Antigravity CLI timed out after ${timeoutMs} ms`, { cause: error });
+    }
+    throw error;
+  }
+  if (result.code === 0) return { stdout: result.stdout, stderr: result.stderr };
+  throw new Error(
+    result.stderr.trim() ||
+      `Antigravity CLI exited with ${result.signal ?? `code ${String(result.code)}`}`,
+  );
 }
 
 class AntigravitySession implements HarnessSession {
@@ -728,15 +729,28 @@ class AntigravitySession implements HarnessSession {
     arguments_.push("--log-file", logPath);
     const invocation = commandInvocation(this.#executable, arguments_, environment);
     let child: ChildProcessByStdio<Writable, Readable, Readable>;
+    let processTree: OwnedProcessTree | null = null;
     try {
-      child = spawn(invocation.command, invocation.arguments, {
-        cwd: this.#cwd,
-        env: environment,
-        detached: process.platform !== "win32",
-        windowsHide: true,
-        windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
+      if (process.platform === "win32") {
+        // A self-exiting Windows Turn needs a Job Object to retain descendant
+        // ownership after exit; tracking it here would turn its normal exit
+        // into a false fault.
+        child = spawn(invocation.command, invocation.arguments, {
+          cwd: this.#cwd,
+          env: environment,
+          windowsHide: true,
+          windowsVerbatimArguments: invocation.windowsVerbatimArguments,
+          stdio: ["pipe", "pipe", "pipe"],
+        });
+      } else {
+        const owned = spawnOwnedProcess(invocation.command, invocation.arguments, {
+          cwd: this.#cwd,
+          env: environment,
+          closeTimeoutMs: 2_000,
+        });
+        child = owned.child;
+        processTree = owned.tree;
+      }
     } catch (error) {
       await questions.dispose();
       return {
@@ -747,15 +761,7 @@ class AntigravitySession implements HarnessSession {
     const active: ActiveTurn = {
       command,
       process: child,
-      // A self-exiting Windows Turn needs a Job Object to retain descendant
-      // ownership after exit. Do not turn its normal exit into a false fault.
-      processTree:
-        process.platform === "win32"
-          ? null
-          : trackOwnedProcessTree(child, {
-              detached: true,
-              closeTimeoutMs: 2_000,
-            }),
+      processTree,
       exited: new Promise<void>((resolve) => child.once("close", () => resolve())),
       questions,
       subagents: new AntigravitySubagents({
@@ -982,10 +988,12 @@ class AntigravitySession implements HarnessSession {
     if (event.result.response) {
       this.#appendOrSyncAgentText(active, event.result.response, false);
     }
-    const safeTurnId =
-      event.result.num_turns !== undefined && event.result.num_turns !== null
-        ? `turn:${event.result.num_turns}`
-        : `turn:${this.#history.snapshot().length + 1}`;
+    // The CLI names no Turn. `num_turns` counts the conversation's user
+    // Turns (agy 1.2.10), but a failed run reports 0 and a fork or rollback
+    // leaves it out of step with this history, so keying by it can overwrite
+    // an earlier Turn. Each Turn gets its own identity; only this adapter's
+    // history reads it back.
+    const safeTurnId = `turn:${randomUUID()}`;
     const safeSessionId = convId || this.#nativeRef?.nativeSessionId || "unknown-session";
 
     const nativeTurnRef = nativeTurnRefSchema.parse({
@@ -1370,15 +1378,20 @@ class AntigravitySession implements HarnessSession {
     try {
       await this.#stopProcess(active);
     } catch (error) {
-      this.#closed = true;
-      return {
-        ok: false,
-        error: {
-          code: "nativeFailure",
-          message: `Antigravity cancellation cleanup failed: ${errorMessage(error)}`,
-          retryable: false,
-        },
+      // The native process may still run, so this Session cannot continue:
+      // end its Turn, fault it and end its outputs, as a failed cleanup after
+      // a Turn does, instead of leaving the Host waiting on a closed Session.
+      const failure = {
+        code: "nativeFailure" as const,
+        message: `Antigravity cancellation cleanup failed: ${errorMessage(error)}`,
+        retryable: false,
       };
+      this.#closed = true;
+      this.#completeTurn(active, { status: "failed", error: failure });
+      this.#event({ type: "session.faulted", error: failure });
+      this.#channel.end();
+      this.#onClosed();
+      return { ok: false, error: failure };
     }
     return { ok: true, value: { cancellationRequested: true } };
   }

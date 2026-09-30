@@ -82,6 +82,19 @@ lines.on("line", (line) => {
         : { id: message.id, error: { code: -32601, message: "Method not found" } },
     );
   } else if (message.method === "session/new" || message.method === "session/load") {
+    const chunk = (text) =>
+      send({
+        method: "session/update",
+        params: {
+          sessionId,
+          update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text } },
+        },
+      });
+    if (scenario === "idle-updates" && message.method === "session/load") {
+      chunk("replayed");
+      // Arrives after the load, between Turns: not history.
+      setTimeout(() => chunk("idle"), 20);
+    }
     send({
       id: message.id,
       result: {

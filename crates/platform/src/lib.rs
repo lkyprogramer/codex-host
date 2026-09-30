@@ -14,6 +14,9 @@ mod desktop_launch;
 mod installation;
 #[cfg(target_os = "linux")]
 mod linux_installation;
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)]
+mod macos_exchange;
 mod macos_native_harness_broker;
 mod process;
 mod process_supervision;
@@ -232,6 +235,19 @@ pub fn atomic_replace_file(source: &Path, target: &Path) -> Result<(), PlatformE
         std::fs::rename(source, target)?;
     }
     Ok(())
+}
+
+/// Atomically exchanges two existing entries on one volume. A volume without
+/// exchange support (exFAT, SMB) reports [`PlatformError::Unsupported`].
+#[cfg(target_os = "macos")]
+pub fn exchange_paths(left: &Path, right: &Path) -> Result<(), PlatformError> {
+    macos_exchange::exchange_paths(left, right).map_err(|error| {
+        if error.raw_os_error() == Some(libc::ENOTSUP) {
+            PlatformError::Unsupported("this volume cannot exchange entries atomically")
+        } else {
+            PlatformError::Io(error)
+        }
+    })
 }
 
 pub fn canonical_existing_file(path: &Path) -> Result<PathBuf, PlatformError> {

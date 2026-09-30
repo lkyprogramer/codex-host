@@ -19,7 +19,12 @@ import {
 import { releaseTarget } from "./targets.mjs";
 
 const root = path.resolve(import.meta.dirname, "../..");
-const executablePaths = ["bin/codexhost", "libexec/codexhost-shim", "libexec/codexhost-updater"];
+const executablePaths = [
+  "bin/codexhost",
+  "libexec/codexhost-shim",
+  "libexec/codexhost-updater",
+  "libexec/codexhost-anchor",
+];
 
 function requireArgument(arguments_, name) {
   const index = arguments_.indexOf(name);

@@ -1,6 +1,6 @@
 # ACP 接入与复用边界
 
-当前生产路径中使用 ACP 的 Harness 有 Grok、Kiro CLI、CodeBuddy 和 Cursor CLI。早期“只有 Grok，等第二个 Adapter 再比较”的前提已经失效；目前仍未实现独立通用 ACP package 或 `GenericAcpAdapter`。本文说明当前差异和后续抽取条件，不声明共享 Transport 已经交付。
+当前生产路径中使用 ACP 的 Harness 有 Grok、Kiro CLI、CodeBuddy 和 Cursor CLI。[`adapter-acp-core`](../packages/adapters/acp-core) 只共享经确认一致的连接机制（见下文“已抽取的机制”）；没有 `GenericAcpAdapter`，也不共享 Session、权限、扩展或错误语义。
 
 ## 当前实现
 
@@ -22,6 +22,15 @@ Host 只依赖 `HarnessAdapter / HarnessSession`。ACP SDK、扩展方法、原�
 
 这些共享部分不等于已经共享了 ACP Transport。`harness-broker` 的 Aqua 进程执行设施可被部分 Adapter 使用，但其中保留的 Claude Session 协议不是 ACP 基类。
 
+## 已抽取的机制
+
+`adapter-acp-core` 提供两项在 Grok 与 Kiro 中逐行一致的机制：
+
+- `startAcpAgent`：以受管进程启动 stdio ACP 代理，等待 spawn，接上 ndjson 连接，按约定时机把进程、进程树和连接交给调用方（启动中途关闭也能回收进程），在调用方未关闭时把退出、进程错误和残留进程清理失败报告为故障，并以 SDK 的协议版本协商、拒绝不一致的版本。
+- `withDeadline`：带截止时间的等待；超时错误由调用方以自己的错误类型构造，需要时可在超时时退役连接（Grok 的配置写入）。
+
+调用方保留：客户端回调、`initialize` 的能力声明与扩展、错误类型与分类、Session / 权限 / 历史语义，以及关闭流程。CodeBuddy 与 Cursor 的启动在协议版本处理（写死 `1`、额外校验 loadSession 能力）和错误路径上与此不同，暂未迁移；迁移前需要先确认这些差异是否是有意为之。
+
 ## 持久身份与恢复
 
 同为 ACP，不代表具有相同的历史能力。每个实现必须证明：
@@ -42,4 +51,4 @@ Host 只依赖 `HarnessAdapter / HarnessSession`。ACP SDK、扩展方法、原�
 
 验证应分别覆盖共享机制与具体 Adapter：配置 reject/timeout、迟到响应、取消与终态交错、进程退出、close 后拒绝操作、fork/load 后失败清理，以及真实 native identity 的恢复。已有能力不得因抽取而被降为看似等价的 Host 行为。
 
-是否新增共享 package 是后续实现决策，不是这次文档同步隐含的开发任务。当前结构与代码入口见[插件架构](harness-plugin-architecture.md)。
+继续扩大共享范围时，仍按上述条件逐项确认，不以协议名称相同作为合并理由。当前结构与代码入口见[插件架构](harness-plugin-architecture.md)。

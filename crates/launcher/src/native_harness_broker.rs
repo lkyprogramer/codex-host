@@ -119,11 +119,23 @@ pub fn run_native_harness_broker_cli(arguments: &[String]) -> Result<(), Box<dyn
                 .map(|resources| resources.host_runtime.as_path())
         })
         .ok_or("native Harness broker Host Runtime is unavailable")?;
+    // The anchor ships beside the Shim; the broker spawns its Harness
+    // processes through it exactly as the Desktop-attached Host does.
+    let shim = match &bundled_resources {
+        Some(resources) => Some(resources.shim.clone()),
+        None => InstalledResources::from_current_executable()
+            .ok()
+            .map(|resources| resources.shim),
+    };
+    let process_anchor = shim
+        .map(|shim| shim.with_file_name("codexhost-anchor"))
+        .filter(|anchor| anchor.is_file());
     let paths = NativeHarnessBrokerPaths {
         harness_id: &cli.harness_id,
         home: &home,
         node,
         host_runtime,
+        process_anchor: process_anchor.as_deref(),
     };
     let proxy_environment = launcher_proxy_environment()
         .into_iter()

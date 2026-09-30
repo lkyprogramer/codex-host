@@ -15,6 +15,7 @@ import {
   hostTurnIdSchema,
   nativeCheckpointRefSchema,
   nativeSessionRefSchema,
+  nativeTurnRefSchema,
 } from "@codexhost/shared-contracts";
 import { CodexTurnProjector, projectCodexApprovalRequest } from "@codexhost/protocol-core";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -349,9 +350,10 @@ describe("Kiro regression lifecycle", () => {
     await session.refreshUsage?.();
     fake.closeError = new Error("ACP process group is still alive");
 
-    await expect(lifecycle.suspend(new AbortController().signal)).rejects.toThrow(
-      "ACP process group is still alive",
-    );
+    await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+      status: "releaseFailed",
+      reason: "Kiro native process release failed: ACP process group is still alive",
+    });
     delete fake.closeError;
     await expect(adapter.close()).rejects.toThrow("ACP process group is still alive");
   });
@@ -1341,6 +1343,78 @@ describe("Kiro regression lifecycle", () => {
     },
   );
 
+  it.each([
+    ["a new Session identifies its only new Turn and its checkpoint", "create", true],
+    ["a resumed Session with unread history does not guess", "resume", false],
+  ] as const)("%s", async (_name, kind, identified) => {
+    const fake = new FakeKiroTransport();
+    const turn = (key: string, fork: string) => ({
+      nativeTurnRef: nativeTurnRefSchema.parse({
+        harnessId: "kiro-cli",
+        nativeSessionId: fake.sessionId,
+        nativeTurnKey: key,
+        formatVersion: 1,
+      }),
+      checkpoint: nativeCheckpointRefSchema.parse({
+        harnessId: "kiro-cli",
+        nativeSessionId: fake.sessionId,
+        checkpointId: fork,
+        formatVersion: 1,
+      }),
+      input: [{ type: "text" as const, text: key }],
+      items: [],
+      outcome: { status: "succeeded" as const },
+    });
+    let persisted = kind === "create" ? [] : [turn("older", "older-fork")];
+    const adapter = new KiroAdapter(
+      {},
+      {
+        createTransport: () => fake,
+        locateSession: async () => ({
+          sessionDirectory: "/kiro-history",
+          cwd: "/workspace",
+          sessionMeta: { id: fake.sessionId, workspacePaths: ["/workspace"] },
+        }),
+        readSnapshot: async () => ({ turns: persisted }),
+      },
+    );
+    try {
+      const opened = await adapter.open(
+        kind === "create"
+          ? { kind, cwd: "/workspace" }
+          : {
+              kind,
+              cwd: "/workspace",
+              nativeRef: nativeSessionRefSchema.parse({
+                harnessId: "kiro-cli",
+                nativeSessionId: fake.sessionId,
+                formatVersion: 1,
+              }),
+              knownTurnRefs: [],
+            },
+      );
+      if (!opened.ok) throw new Error(opened.error.message);
+      // Kiro persists the Turn but reports no user-message id for it.
+      persisted = [...persisted, turn("new-turn", "new-fork")];
+      const outputs = await collectTurn(opened.value);
+      const completed = outputs.find(
+        (output) => output.kind === "event" && output.event.type === "turn.completed",
+      );
+      if (identified) {
+        expect(completed).toMatchObject({
+          event: {
+            nativeTurnRef: { nativeTurnKey: "new-turn" },
+            outcome: { status: "succeeded", checkpoint: { checkpointId: "new-fork" } },
+          },
+        });
+      } else {
+        expect(completed).not.toMatchObject({ event: { nativeTurnRef: expect.anything() } });
+      }
+    } finally {
+      await adapter.close();
+    }
+  });
+
   it("faults and closes a blocked transport without losing the accepted Turn", async () => {
     const fake = new FakeKiroTransport();
     fake.blockRunTurn = true;
@@ -1372,8 +1446,12 @@ describe("Kiro regression lifecycle", () => {
     await consume;
     expect(() => projectOutputs(outputs)).not.toThrow();
     expect(outputs.at(-1)).toMatchObject({ event: { type: "session.faulted" } });
+    // The Turn reports why the process was lost, not the rejection it saw.
     expect(outputs.at(-2)).toMatchObject({
-      event: { type: "turn.completed", outcome: { status: "failed" } },
+      event: {
+        type: "turn.completed",
+        outcome: { status: "failed", error: { code: "processExited", message: "test exit" } },
+      },
     });
     expect(
       (

@@ -9,6 +9,7 @@ import {
   hostItemIdSchema,
   hostThreadIdSchema,
   hostTurnIdSchema,
+  nativeCheckpointRefSchema,
   nativeSessionRefSchema,
   nativeTurnRefSchema,
 } from "@codexhost/shared-contracts";
@@ -68,6 +69,42 @@ afterEach(async () => {
 });
 
 describe("ExternalThreadRepository", () => {
+  it("revokes a persisted checkpoint when the native Snapshot no longer advertises it", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = new MappingStore({ directory });
+    const repository = new ExternalThreadRepository(store);
+    await repository.initialize();
+    await store.createProvisional({
+      hostThreadId,
+      createRequestId: "checkpoint-clear",
+      harnessId,
+      cwd: "/synthetic",
+      transportModelId: "codexhost/claude-code-native",
+      ephemeral: false,
+      historyMode: "legacy",
+    });
+    const turn = snapshotTurn("native-a");
+    const checkpoint = nativeCheckpointRefSchema.parse({
+      harnessId,
+      nativeSessionId: nativeSessionRef.nativeSessionId,
+      checkpointId: "native-a",
+      formatVersion: 1,
+    });
+    const ready = await store.commitReady({
+      hostThreadId,
+      nativeSessionRef,
+      turnMappings: [
+        {
+          hostTurnId: hostTurnIdSchema.parse("host-a"),
+          nativeTurnRef: turn.nativeTurnRef,
+          nativeCheckpointRef: checkpoint,
+        },
+      ],
+    });
+    const aligned = await repository.alignSnapshot(ready, { turns: [turn] });
+    expect(aligned.record.turnMappings[0]).not.toHaveProperty("nativeCheckpointRef");
+    await repository.close();
+  });
   it("reuses legacy child identities and deduplicates overlapping native child materialization", async () => {
     const directory = await temporaryStoreDirectory();
     const store = new MappingStore({ directory });
@@ -429,5 +466,116 @@ describe("ExternalThreadRepository", () => {
     expect(aligned.record.turnMappings[1]?.hostTurnId).not.toBe(pendingId);
     expect(aligned.record.pendingHostTurnIds).toBeUndefined();
     await repository.close();
+  });
+
+  describe("writers that race a Snapshot alignment", () => {
+    async function readyThread(requestId: string) {
+      const directory = await temporaryStoreDirectory();
+      const store = new MappingStore({ directory });
+      const repository = new ExternalThreadRepository(store);
+      await repository.initialize();
+      await store.createProvisional({
+        hostThreadId,
+        createRequestId: requestId,
+        harnessId,
+        cwd: "/synthetic",
+        title: "Claude Thread",
+        transportModelId: "codexhost/claude-code-native",
+        ephemeral: false,
+        historyMode: "legacy",
+      });
+      const record = await store.commitReady({ hostThreadId, nativeSessionRef, turnMappings: [] });
+      return { repository, record };
+    }
+
+    it("keeps a pending Host Turn a delegation added after the record was read", async () => {
+      const { repository, record } = await readyThread("create-race-pending");
+      const first = hostTurnIdSchema.parse("host-first");
+      const second = hostTurnIdSchema.parse("host-second");
+      const read = await repository.addPendingHostTurn(record.hostThreadId, first);
+      await repository.addPendingHostTurn(record.hostThreadId, second);
+
+      await expect(
+        repository.alignSnapshot(read, { turns: [snapshotTurn("native-a")] }),
+      ).rejects.toMatchObject({ code: "STALE_RECORD" });
+      const fresh = await repository.find(hostThreadId);
+      if (!fresh) throw new Error("Thread disappeared");
+      const aligned = await repository.alignSnapshot(fresh, { turns: [snapshotTurn("native-a")] });
+      expect(aligned.record.turnMappings.map((m) => m.hostTurnId)).toEqual([first]);
+      expect(aligned.record.pendingHostTurnIds).toEqual([second]);
+      await repository.close();
+    });
+
+    it("keeps a mapping a live Turn wrote after the record was read", async () => {
+      const { repository, record } = await readyThread("create-race-mapping");
+      const live = hostTurnIdSchema.parse("host-live");
+      await repository.persistTurn(record, live, snapshotTurn("native-b").nativeTurnRef);
+
+      await expect(
+        repository.alignSnapshot(record, { turns: [snapshotTurn("native-a")] }),
+      ).rejects.toMatchObject({ code: "STALE_RECORD" });
+      const fresh = await repository.find(hostThreadId);
+      if (!fresh) throw new Error("Thread disappeared");
+      const aligned = await repository.alignSnapshot(fresh, {
+        turns: [snapshotTurn("native-a"), snapshotTurn("native-b")],
+      });
+      expect(aligned.record.turnMappings[1]).toMatchObject({
+        hostTurnId: live,
+        nativeTurnRef: { nativeTurnKey: "native-b" },
+      });
+      await repository.close();
+    });
+
+    it("rejects a stale unchanged Snapshot after the same native Turn gained a checkpoint", async () => {
+      const { repository, record } = await readyThread("create-race-same-turn");
+      const hostA = hostTurnIdSchema.parse("host-a");
+      const turn = snapshotTurn("native-a");
+      const read = await repository.persistTurn(record, hostA, turn.nativeTurnRef);
+      const current = await repository.persistTurn(
+        read,
+        hostA,
+        turn.nativeTurnRef,
+        nativeCheckpointRefSchema.parse({
+          harnessId,
+          nativeSessionId: nativeSessionRef.nativeSessionId,
+          checkpointId: "new-checkpoint",
+          formatVersion: 1,
+        }),
+      );
+      await expect(repository.alignSnapshot(read, { turns: [turn] })).rejects.toMatchObject({
+        code: "STALE_RECORD",
+      });
+      expect((await repository.find(hostThreadId))?.turnMappings).toEqual(current.turnMappings);
+      await repository.close();
+    });
+
+    it("revokes a stale checkpoint without losing a concurrently added pending Turn", async () => {
+      const { repository, record } = await readyThread("create-race-checkpoint");
+      const hostA = hostTurnIdSchema.parse("host-a");
+      const future = hostTurnIdSchema.parse("host-future");
+      const turn = snapshotTurn("native-a");
+      const read = await repository.persistTurn(
+        record,
+        hostA,
+        turn.nativeTurnRef,
+        nativeCheckpointRefSchema.parse({
+          harnessId,
+          nativeSessionId: nativeSessionRef.nativeSessionId,
+          checkpointId: "native-a",
+          formatVersion: 1,
+        }),
+      );
+      await repository.addPendingHostTurn(record.hostThreadId, future);
+      await expect(repository.alignSnapshot(read, { turns: [turn] })).rejects.toMatchObject({
+        code: "STALE_RECORD",
+      });
+      const fresh = await repository.find(hostThreadId);
+      if (!fresh) throw new Error("Thread disappeared");
+      const aligned = await repository.alignSnapshot(fresh, { turns: [turn] });
+      expect(aligned.record.turnMappings[0]?.hostTurnId).toBe(hostA);
+      expect(aligned.record.turnMappings[0]).not.toHaveProperty("nativeCheckpointRef");
+      expect(aligned.record.pendingHostTurnIds).toEqual([future]);
+      await repository.close();
+    });
   });
 });

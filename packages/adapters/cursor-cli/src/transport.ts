@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { Readable, Writable } from "node:stream";
 import {
   ClientSideConnection,
@@ -9,7 +9,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
 } from "@agentclientprotocol/sdk";
-import { trackOwnedProcessTree, type OwnedProcessTree } from "@codexhost/harness-discovery";
+import { spawnOwnedProcess, type OwnedProcessTree } from "@codexhost/harness-discovery";
 import { cursorDiagnostic } from "./diagnostics.js";
 import { cursorInvocation } from "./command.js";
 import {
@@ -33,6 +33,8 @@ export interface CursorCallbacks {
   extension(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>>;
   notification?(method: string, params: Record<string, unknown>): void;
 }
+/** A history longer than this many replayed updates is refused on load. */
+const MAX_REPLAY_UPDATES = 100_000;
 const CLOSE_TIMEOUT_MS = 2_000;
 
 function waitForLeaderExit(
@@ -54,6 +56,12 @@ function waitForLeaderExit(
 export class CursorTransport {
   sessionId = "";
   replay: SessionNotification[] = [];
+  /**
+   * Only session/load replays history. Updates that arrive between Turns,
+   * with no Turn to take them, are not history and are not kept.
+   */
+  #collectingReplay = false;
+  #replayOverflow = false;
   #child: ChildProcessWithoutNullStreams | undefined;
   #ownedProcessTree: OwnedProcessTree | null = null;
   #closePromise: Promise<void> | undefined;
@@ -111,25 +119,20 @@ export class CursorTransport {
       this.options.command,
       this.options.force,
     );
-    const child = spawn(invocation.command, invocation.arguments, {
-      cwd: this.options.cwd,
-      env: this.options.environment,
-      windowsHide: true,
-      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
-      stdio: "pipe",
-      ...(process.platform === "win32" ? {} : { detached: true }),
-    });
-    this.#child = child;
     const fault = (message: string) => {
       this.#fault = new Error(message);
       this.#rejectFault(this.#fault);
     };
-    this.#ownedProcessTree = trackOwnedProcessTree(child, {
-      detached: process.platform !== "win32",
+    const { child, tree } = spawnOwnedProcess(invocation.command, invocation.arguments, {
+      cwd: this.options.cwd,
+      env: this.options.environment,
+      windowsVerbatimArguments: invocation.windowsVerbatimArguments,
       closeTimeoutMs: CLOSE_TIMEOUT_MS,
       onExitCleanupFailure: (error) =>
         fault(`Cursor ACP owned process cleanup failed: ${String(error)}`),
     });
+    this.#child = child;
+    this.#ownedProcessTree = tree;
     child.on("error", () => fault("Cursor ACP process could not start"));
     child.on("exit", (code) => fault(`Cursor ACP process exited (${code ?? "signal"})`));
     child.stderr.resume(); // Native diagnostics may contain secrets; never copy them to Host events.
@@ -138,8 +141,9 @@ export class CursorTransport {
         sessionUpdate: (value) => {
           if (this.sessionId && value.sessionId !== this.sessionId) return;
           if (this.#callbacks) this.#callbacks.update(value);
-          else if (this.replay.length < 100_000) this.replay.push(value);
-          else throw new Error("Cursor replay exceeds the supported history limit");
+          else if (!this.#collectingReplay) return;
+          else if (this.replay.length < MAX_REPLAY_UPDATES) this.replay.push(value);
+          else this.#replayOverflow = true;
         },
         requestPermission: (value) =>
           this.#callbacks && value.sessionId === this.sessionId
@@ -174,13 +178,25 @@ export class CursorTransport {
       await this.#bounded(this.#connection.authenticate({ methodId: "cursor_login" }));
       stage = sessionId ? "session/load" : "session/new";
       this.sessionId = sessionId ?? "";
-      const info = sessionId
-        ? await this.#bounded(
+      let info:
+        | Awaited<ReturnType<ClientSideConnection["newSession"]>>
+        | Awaited<ReturnType<ClientSideConnection["loadSession"]>>;
+      if (sessionId) {
+        this.#collectingReplay = true;
+        try {
+          info = await this.#bounded(
             this.#connection.loadSession({ sessionId, cwd: this.options.cwd, mcpServers: [] }),
-          )
-        : await this.#bounded(
-            this.#connection.newSession({ cwd: this.options.cwd, mcpServers: [] }),
           );
+        } finally {
+          this.#collectingReplay = false;
+        }
+        if (this.#replayOverflow)
+          throw new Error("Cursor replay exceeds the supported history limit");
+      } else {
+        info = await this.#bounded(
+          this.#connection.newSession({ cwd: this.options.cwd, mcpServers: [] }),
+        );
+      }
       if ("sessionId" in info && typeof info.sessionId === "string")
         this.sessionId = info.sessionId;
       if (!this.sessionId) throw new Error("Cursor returned no native session ID");

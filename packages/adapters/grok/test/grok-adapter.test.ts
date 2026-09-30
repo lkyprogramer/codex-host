@@ -426,8 +426,47 @@ describe("Grok Adapter ACP projection", () => {
           expect(received).toEqual(expect.arrayContaining(["primary", "isolated"]));
           expect(received).not.toContain("primary:isolated");
         },
+        // The resumed Session's native side stops answering session/set_model.
+        // The fixture then keeps GrokAcpTransport's contract for an unanswered
+        // configuration write (acp-configuration-timeout.test.ts proves it on
+        // a real process): the write rejects as timed out and the retired
+        // connection faults.
+        stallConfiguration: async (session) => {
+          const transport = transports.at(-1);
+          const options = transportOptions.at(-1);
+          if (!transport || !options) throw new Error("no transport to stall");
+          transport.setModel.mockImplementationOnce(
+            () =>
+              new Promise<undefined>((_resolve, reject) => {
+                setTimeout(() => {
+                  const timedOut = new GrokTransportError(
+                    "unavailable",
+                    "session/set_model timed out",
+                  );
+                  options.onFault?.(
+                    new GrokTransportError(
+                      "processExited",
+                      "session/set_model did not answer; the connection is retired",
+                      { cause: timedOut },
+                    ),
+                  );
+                  reject(timedOut);
+                }, 50);
+              }),
+          );
+          const model = session.initialState.effectiveModel;
+          if (!model) throw new Error("resumed Grok Session has no Model");
+          return { type: "model.select", model };
+        },
+        // An idle release shuts a transport down exactly as close does. A
+        // faulted Session's close awaits the shutdown its fault already began
+        // (transport close is shared), so a second close is not residue.
         readCleanup: async () => ({
-          residue: transports.every((transport) => transport.close.mock.calls.length === 1)
+          residue: transports.every(
+            (transport) =>
+              transport.close.mock.calls.length + transport.releaseOwnedProcess.mock.calls.length >=
+              1,
+          )
             ? "none"
             : "present",
         }),
@@ -450,6 +489,11 @@ describe("Grok Adapter ACP projection", () => {
       cancel: { status: "passed" },
       resume: { status: "passed" },
       followup: { status: "passed" },
+      suspendAborted: { status: "passed" },
+      suspendWhileBusy: { status: "passed" },
+      suspendIdle: { status: "passed", detail: "suspended (grok-acp-session)" },
+      closedSessionRefusesWork: { status: "passed" },
+      configurationTimeout: { status: "passed" },
       fork: { status: "notCovered" },
       rollback: { status: "notCovered" },
       permissionAtCreate: { status: "notCovered" },
@@ -794,6 +838,96 @@ describe("Grok Adapter ACP projection", () => {
     await adapter.close();
   });
 
+  it("lets a cancellation that failed be sent again", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const turnId = hostTurnIdSchema.parse("turn-cancel-retry");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "run" }] });
+    transport.cancel.mockRejectedValueOnce(new Error("stdin closed"));
+
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toMatchObject({
+      ok: false,
+    });
+    // Not reported done without reaching Grok: the second one is sent.
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toMatchObject({
+      ok: true,
+    });
+    expect(transport.cancel).toHaveBeenCalledTimes(2);
+    transport.finish({ stopReason: "cancelled" });
+    await adapter.close();
+  });
+
+  it("refuses to resend an interjection whose outcome is unknown", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const turnId = hostTurnIdSchema.parse("turn-interject-unknown");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "run" }] });
+    transport.interject.mockRejectedValueOnce(
+      new GrokTransportError(
+        "unavailable",
+        "Grok did not confirm the interjection in time; it may already be queued",
+        { outcomeUnknown: true },
+      ),
+    );
+    await expect(
+      session.steering?.interject({ expectedTurnId: turnId, text: "steer", interjectionId: "i-1" }),
+    ).resolves.toMatchObject({ ok: false, error: { retryable: false } });
+    transport.finish();
+    await adapter.close();
+  });
+
+  it("reports a configuration write that retired the connection as final", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    transport.setModel.mockImplementationOnce(async () => {
+      (
+        session as unknown as { handleTransportFault(error: GrokTransportError): void }
+      ).handleTransportFault(
+        new GrokTransportError("processExited", "Grok Model configuration did not answer"),
+      );
+      throw new GrokTransportError("unavailable", "Grok Model configuration timed out");
+    });
+    await expect(
+      session.execute({ type: "model.select", model: { id: "grok-4.6" } } as never),
+    ).resolves.toMatchObject({
+      ok: false,
+      error: { code: "processExited", retryable: false },
+    });
+    await adapter.close();
+  });
+
+  it("closes a cancelled Turn's pending Approval and refuses a later response", async () => {
+    const transport = new FakeGrokTransport();
+    const { adapter, session } = await openedSession(transport);
+    const iterator = session.outputs[Symbol.asyncIterator]();
+    const turnId = hostTurnIdSchema.parse("turn-cancelled-approval");
+    await session.execute({ type: "turn.start", turnId, input: [{ type: "text", text: "test" }] });
+    expect((await nextEvent(iterator)).type).toBe("turn.started");
+
+    const permission = transport.permission();
+    const output = await nextOutput(iterator);
+    if (output.kind !== "interaction") throw new Error("Expected Grok Approval");
+    const { interactionId } = output.interaction;
+
+    await expect(session.execute({ type: "turn.cancel", turnId })).resolves.toMatchObject({
+      ok: true,
+    });
+    await expect(permission).resolves.toEqual({ outcome: { outcome: "cancelled" } });
+    expect(await nextEvent(iterator)).toMatchObject({
+      type: "interaction.closed",
+      interactionId,
+      reason: "cancelled",
+    });
+    await expect(
+      session.execute({
+        type: "interaction.respond",
+        interactionId,
+        response: { type: "approval", actionId: "allow-once" },
+      }),
+    ).resolves.toMatchObject({ ok: false, error: { code: "invalidState" } });
+    await adapter.close();
+  });
+
   it("projects Thinking, Tool, Approval, Text, Usage, and terminal in order", async () => {
     const transport = new FakeGrokTransport();
     const { adapter, session } = await openedSession(transport);
@@ -1084,7 +1218,9 @@ describe("Grok Adapter ACP projection", () => {
       status: "in_progress",
       rawInput: { file_path: "/synthetic/sample.txt" },
     });
-    expect((await nextEvent(iterator)).type).toBe("item.started");
+    const startedEdit = await nextEvent(iterator);
+    expect(startedEdit.type).toBe("item.started");
+    if (startedEdit.type !== "item.started") throw new Error("Missing Edit item");
 
     transport.event({
       type: "tool.update",
@@ -1120,6 +1256,7 @@ describe("Grok Adapter ACP projection", () => {
       type: "item.started",
       item: {
         type: "fileChange",
+        sourceItemIds: [startedEdit.item.itemId],
         changes: [
           {
             path: "sample.txt",
@@ -3030,13 +3167,13 @@ describe("Grok idle suspension", () => {
     aborted.abort();
     await expect(lifecycle.suspend(aborted.signal)).resolves.toEqual({
       status: "unknown",
-      reason: "Grok idle suspension was aborted",
+      reason: "Grok Session idle release was aborted",
     });
     expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
     await session.close();
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "unknown",
-      reason: "Grok Session is closed or faulted",
+      reason: "Grok Session is closed",
     });
     expect(transport.releaseOwnedProcess).not.toHaveBeenCalled();
     await adapter.close();
@@ -3352,8 +3489,8 @@ describe("Grok idle suspension", () => {
     if (!lifecycle) throw new Error("Missing idle lifecycle");
     transport.releaseError = new Error("Owned process group did not exit within cleanup bounds");
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
-      status: "unknown",
-      reason: "Owned process group did not exit within cleanup bounds",
+      status: "releaseFailed",
+      reason: "Grok Session release failed: Owned process group did not exit within cleanup bounds",
     });
     expect(transport.close).not.toHaveBeenCalled();
     expect(transport.deleteSession).not.toHaveBeenCalled();
@@ -3373,8 +3510,8 @@ describe("Grok idle suspension", () => {
       throw new Error("Grok ACP ownership handle is unavailable");
     });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
-      status: "unknown",
-      reason: "Grok ACP ownership handle is unavailable",
+      status: "releaseFailed",
+      reason: "Grok Session release failed: Grok ACP ownership handle is unavailable",
     });
     await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
       status: "suspended",

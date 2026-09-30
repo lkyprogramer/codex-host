@@ -1,3 +1,4 @@
+import { openWithin } from "./bounded-open.js";
 import { awaitWithSignal, isAbortError } from "./abortable-read.js";
 import { setTimeout as cancellableDelay } from "node:timers/promises";
 import { createHash, randomUUID } from "node:crypto";
@@ -67,7 +68,6 @@ import {
 } from "./delegation-snapshot.js";
 import { decodeThreadRevision } from "./thread-change-hub.js";
 import { validateOpenedHarnessSession } from "./harness-session-validation.js";
-import { ManagedHarnessSession } from "./managed-harness-session.js";
 import {
   createExternalThreadRecordInput,
   externalThreadValue,
@@ -78,13 +78,6 @@ import type { ExternalThread, ExternalThreadRuntime } from "./external-thread-ru
 const IMPLICIT_DEDUPLICATION_MS = 30_000;
 const NATIVE_REF_TIMEOUT_MS = 10_000;
 const DEFAULT_DELEGATION_EXECUTION_POLICY = "unattended-full-access";
-
-type OwnedJobAdapter = HarnessAdapter & {
-  stopOwnedJobs(session: HarnessSession): Promise<{
-    quiescence: JobQuiescence;
-    proof?: ThreadReleaseResult["proof"];
-  }>;
-};
 
 function normalizedExecutionPolicy(
   input: Pick<DelegationStartInput, "executionPolicy">,
@@ -181,9 +174,29 @@ function validateStart(input: DelegationStartInput): void {
   }
 }
 
+/**
+ * The Host Turn id of a send. With a request id it is derived from it, so a
+ * retry finds the Turn its first attempt recorded even after the in-memory
+ * duplicate check is gone. The digest is shaped as a UUID, like the ids of
+ * sends without a request id.
+ */
+function recordsTurn(record: StoredThreadRecordV1, turnId: string): boolean {
+  return (
+    record.turnMappings.some((mapping) => mapping.hostTurnId === turnId) ||
+    (record.pendingHostTurnIds ?? []).some((pending) => pending === turnId)
+  );
+}
+
+function sendTurnId(threadId: string, requestId: string | undefined): string {
+  if (!requestId) return randomUUID();
+  const hex = createHash("sha256").update(`${threadId}\u0000${requestId}`).digest("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${((Number.parseInt(hex.slice(16, 17), 16) & 0x3) | 0x8).toString(16)}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
 export class HarnessDelegationCoordinator {
   readonly #adapters: Map<ExternalHarnessId, HarnessAdapter>;
   readonly #environment: NodeJS.ProcessEnv;
+  readonly #openTimeoutMs: number | undefined;
   readonly #externalRuntime: ExternalThreadRuntime;
   readonly #repository: ExternalThreadRepository;
   readonly #registerExternalThread: (input: {
@@ -250,9 +263,12 @@ export class HarnessDelegationCoordinator {
     listOfficial(input: ThreadListInput): Promise<DelegationThreadListResult>;
     officialThreadCwd(threadId: string): Promise<string | undefined>;
     activeOfficialParents(): string[];
+    /** Bounds opening a child Session; defaults to the Harness operation deadline. */
+    openTimeoutMs?: number;
   }) {
     this.#adapters = input.adapters;
     this.#environment = input.environment;
+    this.#openTimeoutMs = input.openTimeoutMs;
     this.#externalRuntime = input.externalRuntime;
     this.#repository = input.repository;
     this.#registerExternalThread = input.registerExternalThread;
@@ -409,14 +425,18 @@ export class HarnessDelegationCoordinator {
       createdHere = !created.reused;
       if (created.reused) return this.#existingResult(delegation);
       record = await this.#repository.addPendingHostTurn(record.hostThreadId, turnId);
-      const opened = await adapter.open({
-        kind: "create",
-        cwd: record.cwd,
-        environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
-        ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
-        ...(input.model ? { model: input.model } : {}),
-        ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
-      });
+      const opened = await openWithin(
+        adapter,
+        {
+          kind: "create",
+          cwd: record.cwd,
+          environment: { ...this.#environment, [DELEGATION_THREAD_ID_ENV]: record.hostThreadId },
+          ...(record.executionPolicy ? { executionPolicy: record.executionPolicy } : {}),
+          ...(input.model ? { model: input.model } : {}),
+          ...(input.thinkingOptionId ? { thinkingOptionId: input.thinkingOptionId } : {}),
+        },
+        this.#openTimeoutMs,
+      );
       if (!opened.ok) throw new DelegationControlError("DELEGATION_FAILED", opened.error.message);
       const validated = await validateOpenedHarnessSession(record.harnessId, opened.value);
       if (!validated.ok) {
@@ -563,6 +583,19 @@ export class HarnessDelegationCoordinator {
     if (location.kind === "error") {
       throw new DelegationControlError("THREAD_NOT_FOUND", location.error.message);
     }
+    // A retried send whose Turn was already recorded (the Thread was
+    // unloaded, or the Host restarted, since) answers with that Turn and
+    // wakes nothing.
+    if (input.requestId) {
+      const turnId = sendTurnId(input.threadId, input.requestId);
+      if (recordsTurn(location.record, turnId)) {
+        return this.#turnResult(
+          input.threadId,
+          turnId,
+          location.record.harnessId as RoutedHarnessId,
+        );
+      }
+    }
     const resolution = await this.#externalRuntime.resolve(input.threadId);
     if (resolution.kind !== "external") {
       throw new DelegationControlError("THREAD_NOT_FOUND", "Thread was not found");
@@ -596,7 +629,10 @@ export class HarnessDelegationCoordinator {
     if (thread.running || thread.activeTurnId) {
       throw new DelegationControlError("THREAD_BUSY", "Thread already has an active Turn");
     }
-    const turnId = hostTurnIdSchema.parse(randomUUID());
+    const turnId = hostTurnIdSchema.parse(sendTurnId(thread.id, input.requestId));
+    if (input.requestId && recordsTurn(thread.record, turnId)) {
+      return this.#turnResult(thread.id, turnId, thread.harnessId);
+    }
     thread.record = await this.#repository.addPendingHostTurn(thread.record.hostThreadId, turnId);
     try {
       await this.#startExternalTurn(thread, input.message, turnId);
@@ -1116,6 +1152,29 @@ export class HarnessDelegationCoordinator {
   }
 
   async release(input: ThreadReleaseInput): Promise<ThreadReleaseResult> {
+    // A Thread this Host has not loaded holds no native process here:
+    // resolving it would start one only to suspend it again.
+    const location = await this.#externalRuntime.locate(input.threadId);
+    if (location.kind === "external" && !location.thread && location.record.state === "ready") {
+      const latest = location.record.turnMappings.at(-1)?.hostTurnId;
+      if (input.expectedTurnId && latest && latest !== input.expectedTurnId) {
+        throw new DelegationControlError(
+          "STALE_TURN",
+          "expected-turn does not match the latest Turn",
+          { expectedTurnId: input.expectedTurnId, latestTurnId: latest },
+        );
+      }
+      // As after an idle suspension: nothing is held, but owned jobs a
+      // previous Host session left cannot be proven gone.
+      return {
+        threadId: input.threadId,
+        released: false,
+        resourcesReleased: true,
+        busy: false,
+        quiescence: "unknown",
+        proof: { scope: "thread-not-loaded" },
+      };
+    }
     const resolution = await this.#externalRuntime.resolve(input.threadId);
     if (resolution.kind !== "external") {
       throw new DelegationControlError("THREAD_NOT_FOUND", "Thread was not found");
@@ -1152,6 +1211,16 @@ export class HarnessDelegationCoordinator {
       };
     }
     const lifecycle = thread.session.resourceLifecycle;
+    const work = lifecycle?.workLevel?.();
+    if (work?.level === "busy") {
+      return {
+        threadId: thread.id,
+        released: false,
+        busy: true,
+        quiescence: "unknown",
+        reason: work.reason,
+      };
+    }
     let lifecycleQuiescence: JobQuiescence | undefined;
     let reason: string | undefined;
     if (lifecycle) {
@@ -1183,16 +1252,19 @@ export class HarnessDelegationCoordinator {
       lifecycleQuiescence = suspended.status === "unsupported" ? "unsupported" : "unknown";
       reason = suspended.reason;
     }
-    const adapter = this.#adapters.get(thread.harnessId);
-    const releasable = adapter ? ownedJobAdapter(adapter) : undefined;
-    let quiescence: JobQuiescence = releasable ? "unknown" : (lifecycleQuiescence ?? "unsupported");
+    const stopOwnedJobs = thread.session.capabilities.resources?.ownedJobs
+      ? lifecycle?.stopOwnedJobs
+      : undefined;
+    let quiescence: JobQuiescence = stopOwnedJobs
+      ? "unknown"
+      : (lifecycleQuiescence ?? "unsupported");
     let proof: ThreadReleaseResult["proof"];
-    if (releasable) {
+    if (stopOwnedJobs) {
       // The owned-job path now decides this release; its own outcome, not the
       // idle suspension's, is what a reason must describe.
       reason = undefined;
       try {
-        const stopped = await this.#stopLegacyOwnedJobs(releasable, thread.session);
+        const stopped = await stopOwnedJobs.call(lifecycle);
         quiescence = stopped.quiescence;
         proof = stopped.proof;
       } catch (error) {
@@ -1492,23 +1564,4 @@ export class HarnessDelegationCoordinator {
       if (key.startsWith(prefix)) this.#inflightSends.delete(key);
     }
   }
-
-  #stopLegacyOwnedJobs(
-    adapter: OwnedJobAdapter,
-    session: HarnessSession,
-  ): Promise<{
-    quiescence: JobQuiescence;
-    proof?: ThreadReleaseResult["proof"];
-  }> {
-    if (session instanceof ManagedHarnessSession) {
-      return session.withCurrentSession((current) => adapter.stopOwnedJobs(current));
-    }
-    return adapter.stopOwnedJobs(session);
-  }
-}
-
-function ownedJobAdapter(adapter: HarnessAdapter): OwnedJobAdapter | undefined {
-  return typeof (adapter as { stopOwnedJobs?: unknown }).stopOwnedJobs === "function"
-    ? (adapter as OwnedJobAdapter)
-    : undefined;
 }

@@ -1,21 +1,14 @@
-import { spawnSync, type ChildProcess } from "node:child_process";
 import { accessSync, constants, statSync, type Stats } from "node:fs";
 import type * as filesystem from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import {
-  deepSeekProcessInvocation,
-  killDeepSeekProcessTree,
-  resolveDeepSeekCommand,
-  resolveWindowsTaskkillPath,
-} from "../src/executable.js";
+import { deepSeekProcessInvocation, resolveDeepSeekCommand } from "../src/executable.js";
 
 vi.mock("node:fs", async (importOriginal) => ({
   ...(await importOriginal<typeof filesystem>()),
   accessSync: vi.fn(),
   statSync: vi.fn(),
 }));
-vi.mock("node:child_process", () => ({ spawnSync: vi.fn() }));
 
 const originalPlatform = Object.getOwnPropertyDescriptor(process, "platform") as PropertyDescriptor;
 const entries = new Map<string, "file" | "directory">();
@@ -45,34 +38,6 @@ afterEach(() => {
 });
 
 describe("DeepSeek executable helpers", () => {
-  it("resolves taskkill from SystemRoot without consulting PATH", () => {
-    expect(
-      resolveWindowsTaskkillPath({
-        PATH: String.raw`C:\attacker`,
-        SystemRoot: String.raw`C:\Windows`,
-      }),
-    ).toBe(String.raw`C:\Windows\System32\taskkill.exe`);
-    expect(() => resolveWindowsTaskkillPath({ SystemRoot: "relative" })).toThrow("SystemRoot");
-  });
-
-  it("accepts Windows system directory aliases but rejects PATH-only and relative values", () => {
-    expect(resolveWindowsTaskkillPath({ systemroot: "D:/Windows" })).toBe(
-      String.raw`D:\Windows\System32\taskkill.exe`,
-    );
-    expect(resolveWindowsTaskkillPath({ WINDIR: String.raw`C:\Windows` })).toBe(
-      String.raw`C:\Windows\System32\taskkill.exe`,
-    );
-    for (const env of [
-      {},
-      { PATH: "C:\\Windows" },
-      { SystemRoot: "C:Windows" },
-      { SystemRoot: "\\Windows" },
-      { SystemRoot: "" },
-    ]) {
-      expect(() => resolveWindowsTaskkillPath(env)).toThrow("SystemRoot");
-    }
-  });
-
   it("honors explicit executable identity and skips directories on POSIX PATH", () => {
     platform("linux");
     entries.set("/bin/dsh", "file");
@@ -151,59 +116,5 @@ describe("DeepSeek executable helpers", () => {
       windowsVerbatimArguments: false,
     });
     expect(deepSeekProcessInvocation("dsh", [], {}).windowsVerbatimArguments).toBe(false);
-  });
-
-  it("never starts taskkill for a child that has no process id", () => {
-    const kill = vi.fn();
-    for (const state of [
-      { exitCode: 0, signalCode: null },
-      { exitCode: null, signalCode: "SIGTERM" },
-    ]) {
-      killDeepSeekProcessTree({ ...state, kill } as unknown as ChildProcess, "win32", 5);
-    }
-    expect(kill).not.toHaveBeenCalled();
-    killDeepSeekProcessTree(
-      { exitCode: null, signalCode: null, kill } as unknown as ChildProcess,
-      "win32",
-      5,
-    );
-    expect(kill).toHaveBeenCalledExactlyOnceWith("SIGKILL");
-    expect(spawnSync).not.toHaveBeenCalled();
-  });
-
-  it("targets only the owned POSIX process group and propagates permission failures", () => {
-    const kill = vi.spyOn(process, "kill").mockReturnValue(true);
-    const child = { pid: 1234 } as ChildProcess;
-    killDeepSeekProcessTree(child, "linux", 5);
-    expect(kill).toHaveBeenCalledWith(-1234, "SIGKILL");
-    kill.mockImplementationOnce(() => {
-      throw Object.assign(new Error("gone"), { code: "ESRCH" });
-    });
-    expect(() => killDeepSeekProcessTree(child, "darwin", 5)).not.toThrow();
-    for (const error of [
-      Object.assign(new Error("permission"), { code: "EPERM" }),
-      null,
-      "failure",
-    ]) {
-      kill.mockImplementationOnce(() => {
-        throw error;
-      });
-      expect(() => killDeepSeekProcessTree(child, "linux", 5)).toThrow();
-    }
-  });
-
-  it("uses bounded hidden taskkill for the owned Windows tree and reports launch failure", () => {
-    vi.stubEnv("SystemRoot", String.raw`C:\Windows`);
-    vi.mocked(spawnSync).mockReturnValue({ status: 0 } as ReturnType<typeof spawnSync>);
-    const child = { pid: 1234 } as ChildProcess;
-    killDeepSeekProcessTree(child, "win32", 50);
-    expect(spawnSync).toHaveBeenCalledWith(
-      String.raw`C:\Windows\System32\taskkill.exe`,
-      ["/pid", "1234", "/t", "/f"],
-      { stdio: "ignore", windowsHide: true, timeout: 50 },
-    );
-    const error = new Error("taskkill could not start");
-    vi.mocked(spawnSync).mockReturnValue({ error } as ReturnType<typeof spawnSync>);
-    expect(() => killDeepSeekProcessTree(child, "win32", 50)).toThrow(error);
   });
 });

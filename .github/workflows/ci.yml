@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   check:
     name: Check ${{ matrix.os }}
@@ -39,11 +43,27 @@ jobs:
         with:
           toolchain: 1.97.1
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          cache-workspace-crates: false
+          cache-on-failure: false
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Check
+      - name: Check Linux x64
+        if: matrix.os == 'ubuntu-22.04'
         run: npm run check
+
+      - name: Test TypeScript on macOS and Windows
+        if: matrix.os != 'ubuntu-22.04'
+        run: npm run test:typescript
+
+      - name: Test Rust on macOS and Windows
+        if: matrix.os != 'ubuntu-22.04'
+        run: npm run test:rust
 
       - name: Smoke-test Linux npm package
         if: runner.os == 'Linux'
@@ -73,11 +93,21 @@ jobs:
         with:
           toolchain: 1.97.1
 
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          cache-bin: false
+          cache-workspace-crates: false
+          cache-on-failure: false
+
       - name: Install dependencies
         run: npm ci
 
-      - name: Check
-        run: npm run check
+      - name: Test TypeScript on Linux ARM64
+        run: npm run test:typescript
+
+      - name: Test Rust on Linux ARM64
+        run: npm run test:rust
 
       - name: Smoke-test Linux ARM64 npm package
         run: >

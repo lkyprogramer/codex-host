@@ -109,4 +109,18 @@ describe("Claude native File Changes", () => {
       unifiedDiff: expect.stringContaining(`--- ${oldHeader}\n+++ ${newHeader}`),
     });
   });
+
+  it.skipIf(path.sep === "\\")("preserves a POSIX filename containing a literal backslash", () => {
+    const native = parseClaudeNativeFileChange("Edit", {
+      filePath: "/workspace/a\\b",
+      structuredPatch: [
+        { oldStart: 1, oldLines: 1, newStart: 1, newLines: 1, lines: ["-old", "+new"] },
+      ],
+    });
+    expect(projectClaudeFileChange(requireChange(native), "/workspace")).toEqual({
+      path: "a\\b",
+      kind: "update",
+      unifiedDiff: "--- a/a\\b\n+++ b/a\\b\n@@ -1,1 +1,1 @@\n-old\n+new\n",
+    });
+  });
 });

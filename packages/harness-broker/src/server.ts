@@ -123,6 +123,17 @@ function processIsAlive(processId: number): boolean {
   }
 }
 
+/**
+ * A live pid alone does not prove the owner survived: after a crash the pid
+ * can belong to an unrelated process. An owner listens before it publishes,
+ * so a live owner is one still accepting connections on its endpoint.
+ */
+async function ownerIsLive(descriptor: HarnessBrokerDescriptorV1): Promise<boolean> {
+  if (!processIsAlive(descriptor.ownerPid)) return false;
+  if (process.platform === "win32") return true;
+  return socketAcceptsConnections(descriptor.socketPath);
+}
+
 async function assertNoLiveDescriptor(descriptorPath: string): Promise<void> {
   try {
     const metadata = await lstat(descriptorPath);
@@ -137,12 +148,41 @@ async function assertNoLiveDescriptor(descriptorPath: string): Promise<void> {
     const descriptor = harnessBrokerDescriptorSchema.parse(
       JSON.parse(await readFile(descriptorPath, "utf8")),
     );
-    if (processIsAlive(descriptor.ownerPid)) {
+    if (await ownerIsLive(descriptor)) {
       throw new Error("Harness broker descriptor already has a live owner");
     }
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
+}
+
+/** Removes the socket only while it is still the one this broker bound. */
+async function removeOwnedEndpoint(
+  socketPath: string,
+  endpoint: { dev: number; ino: number },
+): Promise<void> {
+  try {
+    const metadata = await lstat(socketPath);
+    if (metadata.dev !== endpoint.dev || metadata.ino !== endpoint.ino) return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await rm(socketPath, { force: true });
+}
+
+/** Removes the descriptor only while it still names this broker's generation. */
+async function removeOwnedDescriptor(descriptorPath: string, generation: string): Promise<void> {
+  try {
+    const current = harnessBrokerDescriptorSchema.safeParse(
+      JSON.parse(await readFile(descriptorPath, "utf8")),
+    );
+    if (current.success && current.data.generation !== generation) return;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    // An unreadable descriptor is no successor's; remove it as before.
+  }
+  await rm(descriptorPath, { force: true });
 }
 
 async function publishDescriptor(
@@ -172,10 +212,14 @@ function sessionMetadata(record: ServerSession): object {
   ) {
     delete initialState.availableThinkingOptions;
   }
+  // Native resources stay with the broker process; the brokered Session
+  // declares its own (none), and an older client would reject the field.
+  const capabilities = { ...record.session.capabilities };
+  delete capabilities.resources;
   return {
     sessionId: record.id,
     sessionGeneration: record.generation,
-    capabilities: record.session.capabilities,
+    capabilities,
     initialState: {
       ...initialState,
       ...(record.nativeRef ? { nativeRef: record.nativeRef } : {}),
@@ -834,8 +878,13 @@ export async function startHarnessBrokerServer(input: {
       resolve();
     });
   });
+  let endpoint: { dev: number; ino: number } | null = null;
   try {
-    if (process.platform !== "win32") await chmod(input.socketPath, 0o600);
+    if (process.platform !== "win32") {
+      await chmod(input.socketPath, 0o600);
+      const metadata = await lstat(input.socketPath);
+      endpoint = { dev: metadata.dev, ino: metadata.ino };
+    }
     await publishDescriptor(input.descriptorPath, descriptor);
   } catch (error) {
     await new Promise<void>((resolve) => server.close(() => resolve()));
@@ -857,9 +906,14 @@ export async function startHarnessBrokerServer(input: {
         [...sessions.values()].map((record) => record.outputTask.catch(() => undefined)),
       );
       await input.adapter.close().catch(() => undefined);
+      // Connections accepted while the Sessions closed would hold
+      // `server.close` open. Stopping to listen also unlinks the socket (a
+      // libuv pipe server does), after which another broker sees this owner
+      // as gone and may publish its own descriptor.
+      for (const connection of connections) connection.socket.destroy();
       await new Promise<void>((resolve) => server.close(() => resolve()));
-      if (process.platform !== "win32") await rm(input.socketPath, { force: true });
-      await rm(input.descriptorPath, { force: true });
+      if (endpoint) await removeOwnedEndpoint(input.socketPath, endpoint);
+      await removeOwnedDescriptor(input.descriptorPath, generation);
     },
   };
 }

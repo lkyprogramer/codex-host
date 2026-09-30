@@ -5,6 +5,7 @@ import { runAdapterConformance } from "@codexhost/harness-adapter/conformance";
 import type { CursorSessionInfo } from "../src/transport.js";
 import { CursorAdapter } from "../src/adapter.js";
 import { CursorTransport } from "../src/transport.js";
+import { cursorForkAvailable } from "../src/fork-support.js";
 
 const native = vi.hoisted(() => ({
   created: [] as Array<{ sessionId: string; environment: NodeJS.ProcessEnv }>,
@@ -152,8 +153,8 @@ describe("Cursor Adapter conformance", () => {
         identityReadback: { status: "passed" },
         resume: { status: "passed" },
         followup: { status: "passed" },
-        fork: { status: "skipped" },
-        rollback: { status: "skipped" },
+        fork: { status: cursorForkAvailable() ? "notCovered" : "skipped" },
+        rollback: { status: cursorForkAvailable() ? "notCovered" : "skipped" },
         permissionAtCreate: { status: "skipped" },
         subagents: { status: "notCovered" },
         cleanup: { status: "passed" },

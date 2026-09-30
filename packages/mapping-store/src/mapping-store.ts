@@ -42,6 +42,8 @@ export type MappingStoreErrorCode =
   | "DUPLICATE_CREATE_REQUEST"
   | "DUPLICATE_NATIVE_SESSION"
   | "MAPPING_CONFLICT"
+  /** A write made from a record that changed since it was read. */
+  | "STALE_RECORD"
   | "INVALID_RECORD"
   | "IO_ERROR";
 
@@ -118,14 +120,28 @@ function processIdentity(pid: number): ProcessIdentity | null {
   try {
     process.kill(pid, 0);
   } catch (error) {
-    if (systemErrorCode(error) !== "EPERM") return null;
+    if (systemErrorCode(error) === "ESRCH") return null;
+    if (systemErrorCode(error) !== "EPERM") {
+      return { executablePath: null, startedAt: null };
+    }
   }
 
-  if (process.platform !== "win32") {
+  if (process.platform !== "win32" && process.platform !== "darwin") {
     return { executablePath: null, startedAt: null };
   }
 
   try {
+    if (process.platform === "darwin") {
+      // Query only on contention. ps reports whole seconds, within the existing tolerance.
+      const result = execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        env: { ...process.env, LC_ALL: "C" },
+        timeout: 1_000,
+      }).trim();
+      const startedAt = Date.parse(result);
+      return { executablePath: null, startedAt: Number.isFinite(startedAt) ? startedAt : null };
+    }
     const query = [
       "$ErrorActionPreference = 'Stop'",
       `$process = Get-Process -Id ${pid}`,
@@ -174,7 +190,7 @@ function lockOwnerIsLive(lock: Partial<LockRecord>): boolean {
   }
   const identity = processIdentity(lock.pid);
   if (!identity) return false;
-  if (process.platform !== "win32") return true;
+  if (process.platform !== "win32" && process.platform !== "darwin") return true;
 
   if (identity.executablePath && lock.executablePath) {
     if (
@@ -491,6 +507,24 @@ export class MappingStore {
     });
   }
 
+  /**
+   * Removes exactly these pending Host Turns, inside the store's serialized
+   * update: an id another writer added since the caller read the record
+   * survives, where replacing the whole list would drop it.
+   */
+  async removePendingHostTurnIds(
+    hostThreadId: HostThreadId,
+    removed: readonly HostTurnId[],
+  ): Promise<StoredThreadRecordV1> {
+    return this.#update(hostThreadId, (current) => {
+      const drop = new Set<string>(removed);
+      const pending = current.pendingHostTurnIds ?? [];
+      const next = pending.filter((id) => !drop.has(id));
+      if (next.length === pending.length) return null;
+      return { ...current, pendingHostTurnIds: next.length > 0 ? next : undefined };
+    });
+  }
+
   async setPendingHostTurnIds(
     hostThreadId: HostThreadId,
     pendingHostTurnIds: readonly HostTurnId[],
@@ -702,11 +736,24 @@ export class MappingStore {
     }));
   }
 
+  /**
+   * Replaces the whole mapping list with a Snapshot's order. With
+   * `expectedRevision` it refuses a record that changed since the caller
+   * computed that list (a mapping added by a live Turn meanwhile would be
+   * lost), so the caller re-reads and reconciles again.
+   */
   async reconcileTurnMappings(
     hostThreadId: HostThreadId,
     mappings: StoredTurnMappingV1[],
+    expectedRevision?: number,
   ): Promise<StoredThreadRecordV1> {
     return this.#update(hostThreadId, (current) => {
+      if (expectedRevision !== undefined && current.revision !== expectedRevision) {
+        throw new MappingStoreError(
+          "STALE_RECORD",
+          "Snapshot reconciliation was computed from a record that has since changed",
+        );
+      }
       if (current.state !== "ready" || !current.nativeSessionRef) {
         throw new MappingStoreError(
           "MAPPING_CONFLICT",

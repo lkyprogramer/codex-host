@@ -239,28 +239,25 @@ export function grokSubagentWaitSettlements(input: {
   }
   if (ids.length === 0) return [];
 
+  // The wait tool reports each task's state in `rawOutput` (`Result`, or
+  // `MultiResult.results` when waiting on several; grok 1.0.41). Its text is
+  // for the model to read, not a status source.
   const resultEntries = taskOutputResults(input.rawOutput);
-  if (resultEntries.length > 0) {
-    const settled: GrokSubagentWaitSettlement[] = [];
-    for (const result of resultEntries) {
-      const id = idField(result, "task_id") ?? idField(result, "subagent_id");
-      const status = mapTaskStatus(typeof result.status === "string" ? result.status : undefined);
-      if (!id || !status || status === "running" || status === "pending") continue;
-      const resultSummary = bounded(
-        typeof result.output === "string" ? result.output.trim() : undefined,
-        SUMMARY_LIMIT,
-      );
-      settled.push({ id, status, ...(resultSummary ? { resultSummary } : {}) });
-    }
-    return settled;
+  const settled: GrokSubagentWaitSettlement[] = [];
+  for (const result of resultEntries) {
+    const id =
+      idField(result, "task_id") ??
+      idField(result, "subagent_id") ??
+      (resultEntries.length === 1 && ids.length === 1 ? ids[0] : undefined);
+    const status = mapTaskStatus(typeof result.status === "string" ? result.status : undefined);
+    if (!id || !status || status === "running" || status === "pending") continue;
+    const resultSummary = bounded(
+      typeof result.output === "string" ? result.output.trim() : undefined,
+      SUMMARY_LIMIT,
+    );
+    settled.push({ id, status, ...(resultSummary ? { resultSummary } : {}) });
   }
-
-  const fromText = taskOutputTextSettlements(input.rawOutput, input.content, ids);
-  if (fromText.length > 0) return fromText;
-
-  const overall = mapTaskStatus(taskOutputStatus(input.rawOutput, input.content));
-  if (!overall || overall === "running" || overall === "pending") return [];
-  return ids.map((id) => ({ id, status: overall }));
+  return settled;
 }
 
 function taskOutputResults(rawOutput: unknown): Array<Record<string, unknown>> {
@@ -281,42 +278,6 @@ function taskOutputResults(rawOutput: unknown): Array<Record<string, unknown>> {
 function firstRecord(...values: unknown[]): Record<string, unknown> | undefined {
   for (const value of values) {
     if (isRecord(value)) return value;
-  }
-  return undefined;
-}
-
-function taskOutputTextSettlements(
-  rawOutput: unknown,
-  content: unknown,
-  ids: string[],
-): GrokSubagentWaitSettlement[] {
-  const text = extractText(content) ?? extractText(rawOutput);
-  if (!text) return [];
-  const settled: GrokSubagentWaitSettlement[] = [];
-  const pattern =
-    /---\s*Task\s+(\S+)\s+\[(completed|failed|interrupted|cancelled|canceled)\]\s*---/gi;
-  for (const match of text.matchAll(pattern)) {
-    const id = match[1]?.trim();
-    const status = mapTaskStatus(match[2]);
-    if (!id || !status || status === "running" || status === "pending") continue;
-    if (!ids.includes(id)) continue;
-    settled.push({ id, status });
-  }
-  return settled;
-}
-
-function taskOutputStatus(rawOutput: unknown, content: unknown): string | undefined {
-  if (isRecord(rawOutput) && typeof rawOutput.status === "string") return rawOutput.status;
-  const text = extractText(content) ?? extractText(rawOutput);
-  if (!text) return undefined;
-  if (/<subagent_meta>|<subagent_result>/i.test(text)) return "completed";
-  if (/\bstatus["']?\s*[:=]\s*["']?completed/i.test(text)) return "completed";
-  if (/\bstatus["']?\s*[:=]\s*["']?failed/i.test(text)) return "failed";
-  if (/\bstatus["']?\s*[:=]\s*["']?(cancelled|canceled|interrupted)/i.test(text)) {
-    return "interrupted";
-  }
-  if (/\bstill running\b|\bstatus["']?\s*[:=]\s*["']?(running|pending|in_progress)/i.test(text)) {
-    return "running";
   }
   return undefined;
 }
