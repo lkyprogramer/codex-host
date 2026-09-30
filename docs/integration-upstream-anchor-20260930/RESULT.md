@@ -1,6 +1,6 @@
 # Integration result
 
-Code and candidate package: **PASS**. Desktop installation/cutover: **not executed** pending a maintenance window that permits ending the current running Desktop chat.
+Code and candidate package: **PASS**. Desktop installation/cutover: **not executed**. On 2026-09-30 the user selected delivery of this candidate in the current round and deferred switching to a separate idle maintenance window.
 
 ## Candidate and preserved sources
 
@@ -89,7 +89,7 @@ Both independent reviewers were verified as `gpt-6-astra / high` from their actu
 
 The installed runtime still uses the Node `v22.16.0` global package. Its package and meta package, plus a live Mapping Store snapshot, were copied under the private `/tmp/codexhost-merge-anchor-20260930/rollback` directory. Content manifests are recorded there, and executable modes are preserved. The Mapping Store copy was made while Desktop was live; it must be recaptured after drain before it is treated as a cutover snapshot. Credentials and runtime tokens are not included in repository evidence.
 
-Read-only preflight observed the current chat as `running`. The installed Host does not expose `codexhost/resources/list`, so no complete old-runtime resource-quiescence claim is made. No idle Thread was cancelled and no Desktop process was stopped. The maintenance-window question is the remaining execution input. See [CUTOVER.md](CUTOVER.md) for the prepared sequence.
+Read-only preflight observed the current chat as `running`. The installed Host does not expose `codexhost/resources/list`, so no complete old-runtime resource-quiescence claim is made. No idle Thread was cancelled and no Desktop process was stopped. The user explicitly selected candidate delivery in this round and a separate idle maintenance window for switching. This round is complete; installation and post-cutover acceptance remain deferred. See [CUTOVER.md](CUTOVER.md) for the prepared sequence.
 
 ## Unrun boundaries
 

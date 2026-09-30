@@ -1,6 +1,6 @@
 # Prepared Desktop cutover
 
-Status: package and rollback copies ready; Desktop restart is not executed. The current running chat must finish or be explicitly permitted to end. Existing unrelated work must not be cancelled to manufacture quiescence.
+Status: package and rollback copies ready; Desktop restart is not executed. On 2026-09-30 the user chose candidate delivery in this round and a separate idle maintenance window for switching. The current running chat must finish before that window. Existing unrelated work must not be cancelled to manufacture quiescence.
 
 ## Preflight
 
