@@ -9270,6 +9270,52 @@ describe("Host shutdown budget", () => {
 });
 
 describe("R5 Host command and Composer admission", () => {
+  it("keeps a native command's Host Turn identity after history refresh", async () => {
+    const fixture = createFixture();
+    await fixture.ready;
+    const native = harnessCommandDescriptorSchema.parse({
+      id: "pi.native.persisted",
+      invocation: "/persisted",
+      label: "Persisted",
+      argumentMode: "none",
+    });
+    Object.assign(fixture.adapter, { commandCatalog: { commands: [native] } });
+    const threadId = await startPiThread(fixture);
+    const session = fixture.adapter.sessions[0];
+    if (!session) throw new Error("Fake Pi Session was not opened");
+    session.commands = {
+      list: async () => ({ ok: true, value: { source: "static", commands: [native] } }),
+      execute: async ({ turnId }) => {
+        const result = await session.execute({
+          type: "turn.start",
+          turnId,
+          input: [{ type: "text", text: "/persisted" }],
+        });
+        if (!result.ok) return result;
+        session.appendText("native command answer");
+        session.succeedTurn();
+        return { ok: true, value: { turnId } };
+      },
+    };
+    const turnId = hostTurnIdSchema.parse("persisted-command-turn");
+    writeRequest(fixture.desktopInput, {
+      id: 971,
+      method: "codexhost/thread/command/execute",
+      params: { threadId, commandId: native.id, turnId },
+    });
+    await fixture.collector.waitFor((message) => requestId(message, 971));
+    await fixture.collector.waitFor((message) => turnEvent(message, "turn/completed", turnId));
+    writeRequest(fixture.desktopInput, {
+      id: 972,
+      method: "thread/read",
+      params: { threadId, includeTurns: true },
+    });
+    const refreshed = await fixture.collector.waitFor((message) => requestId(message, 972));
+    expect(refreshed).toMatchObject({ result: { thread: { turns: [{ id: turnId }] } } });
+    fixture.desktopInput.end();
+    await fixture.running;
+  });
+
   it("does not enqueue a workspace metadata read on an active Session", async () => {
     const fixture = createFixture();
     const threadId = await startPiThread(fixture);

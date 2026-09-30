@@ -1156,7 +1156,7 @@ export function installCurrentRendererAdapter(): {
     ) => currentModelClient().subscribeCodexAccountLogin(listener),
   });
   const forkControl = installRendererForkControl({
-    getClient: () => modelControl,
+    getClient: () => modelControl.clientForHost?.("local") ?? null,
     reportError: (error) => {
       console.error(
         "codexhost external Thread Fork failed",

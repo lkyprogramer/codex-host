@@ -24,7 +24,7 @@ const { outputFiles } = await build({
         releaseNotes: null, releaseNotesUrl: null, status: null, error: null,
       };
 
-      globalThis.setupHostRouting = ({ withComposers = true, withProbe = false, conversation = false } = {}) => {
+      globalThis.setupHostRouting = ({ withComposers = true, withProbe = false, conversation = false, configuration = false } = {}) => {
         document.body.replaceChildren();
         const app = document.createElement("div");
         app.id = "root";
@@ -34,10 +34,24 @@ const { outputFiles } = await build({
         const usageByHost = new Map([["local", 11], ["remote-ssh-discovered:mac", 77]]);
         const plugin = id => ({ id, name: id, version: "1" });
         const capabilities = {
-          configuration: { selectModel: false, selectThinkingOption: false,
-            selectPermissionMode: false, permissionModeScope: "live" },
+          configuration: { selectModel: configuration, selectThinkingOption: configuration,
+            selectPermissionMode: configuration, permissionModeScope: "live" },
           history: { fork: true, forkAcrossCwd: true, rollbackLastTurn: true },
         };
+        const catalog = {
+          models: [{ ref: { id: "model-a" }, label: "Model A", supportedThinkingOptionIds: ["low", "high"] },
+            { ref: { id: "model-b" }, label: "Model B", supportedThinkingOptionIds: ["low", "high"] }],
+          defaultModel: { id: "model-a" },
+          thinkingOptions: [{ id: "low", label: "Low" }, { id: "high", label: "High" }],
+          defaultThinkingOptionId: "low",
+        };
+        const permissionModes = { modes: [{ id: "ask", label: "Ask" }, { id: "auto", label: "Auto" }], defaultModeId: "ask" };
+        const selections = new Map(["local", "remote-ssh-discovered:mac"].map(hostId => [hostId, {
+          effectiveModel: { id: "model-a" }, effectiveThinkingOptionId: "low",
+          availableThinkingOptions: catalog.thinkingOptions, effectivePermissionModeId: "ask",
+        }]));
+        const heldSelections = new Set();
+        const pendingSelections = [];
         const registry = {
           getForHostId: hostId => entries.get(hostId),
           addManager() {},
@@ -63,13 +77,15 @@ const { outputFiles } = await build({
                   ? { status: "notInstalled", error: {
                       code: "notInstalled", message: "Pi unavailable on local", retryable: false,
                     } }
-                  : { status: "ready", catalog: { models: [], thinkingOptions: [] }, capabilities }),
+                  : { status: "ready", catalog: configuration ? catalog : { models: [], thinkingOptions: [] },
+                    ...(configuration ? { permissionModes } : {}), capabilities }),
               };
               if (method === "codexhost/thread/inspect") {
                 const harnessId = hostId === "local" ? "grok" : "pi";
                 return { owner: "external", harnessId,
                   transportModelId: hostId === "local" ? "codexhost/grok-native" : "codexhost/pi-native",
                   history: capabilities.history, locked: true,
+                  ...(configuration ? selections.get(hostId) : {}),
                   usage: { cacheHitRatePercent: usageByHost.get(hostId) },
                 };
               }
@@ -77,7 +93,20 @@ const { outputFiles } = await build({
                 threadId: params.threadId,
                 usage: { cacheHitRatePercent: usageByHost.get(hostId) },
               };
-              if (method === "codexhost/harness/commands/inspect") return { commands: [] };
+              if (method === "codexhost/harness/commands/inspect" || method === "codexhost/thread/commands/inspect")
+                return { commands: configuration ? [{ id: "native.compact", invocation: "/compact", label: "Compact", argumentMode: "none" }] : [] };
+              if (method === "codexhost/thread/command/execute") return { accepted: true, turnId: "command-turn" };
+              if (method.startsWith("codexhost/thread/") && method.endsWith("/select")) {
+                if (heldSelections.has(hostId)) return new Promise(resolve => {
+                  pendingSelections.push({ hostId, resolve: () => resolve({ ...selections.get(hostId),
+                    ...(params.model ? { effectiveModel: params.model } : {}) }) });
+                });
+                const selected = selections.get(hostId);
+                if (params.model) selected.effectiveModel = params.model;
+                if (params.thinkingOptionId) selected.effectiveThinkingOptionId = params.thinkingOptionId;
+                if (params.permissionModeId) selected.effectivePermissionModeId = params.permissionModeId;
+                return { ...selected };
+              }
               if (method === "codexhost/account/list" || method === "codexhost/account/refresh")
                 return { accounts: [] };
               if (method === "codexhost/update/check") return updateCheck;
@@ -131,6 +160,19 @@ const { outputFiles } = await build({
           const send = document.createElement("button");
           send.type = "submit";
           send.textContent = "Send";
+          if (configuration) {
+            const permissions = document.createElement("button");
+            permissions.type = "button";
+            permissions.setAttribute("aria-haspopup", "menu");
+            permissions.setAttribute("data-composer-navigation-target", "permissions");
+            permissions.textContent = "Native permissions";
+            Object.defineProperty(permissions, "__reactFiber$r3", { value: {
+              memoizedProps: { "aria-haspopup": "menu", "data-composer-navigation-target": "permissions" },
+              return: { memoizedProps: { showPermissionsModeDropdown: true,
+                permissionsHostId: hostId, permissionsCwdOverride: null }, return: hostFiber },
+            } });
+            toolbar.append(permissions);
+          }
           toolbar.append(send);
           composer.append(editor, toolbar);
           if (conversation && name !== "local-b") {
@@ -147,7 +189,7 @@ const { outputFiles } = await build({
         if (withComposers) {
           addComposer("local", "local-a");
           addComposer("remote-ssh-discovered:mac", "remote");
-          addComposer("local", "local-b");
+          if (!configuration) addComposer("local", "local-b");
         }
         const routing = installRendererHostRouting(
           document, window, discoverRendererHosts, resolveRendererHostManager,
@@ -159,7 +201,7 @@ const { outputFiles } = await build({
           : null;
         probe?.setAdapter(adapter.status, () => adapter.dispose(), adapter.applyAgent, adapter.modelControl);
         const state = { app, calls, entries, routing, adapter, local, remote, createManager,
-          probe, usageByHost, decodeCarrier: decodeHarnessPluginRoute,
+          probe, usageByHost, selections, heldSelections, pendingSelections, decodeCarrier: decodeHarnessPluginRoute,
           composer: name => app.querySelector('[data-name="' + name + '"]'),
           unmountComposers: () => app.replaceChildren(),
           installSettings: () => installRendererSettingsLifecycle(window, {
@@ -438,6 +480,108 @@ test("keeps remote Pi selectable when local Pi is unavailable and catalogs diffe
     "aria-label",
     /Pi/iu,
   );
+});
+
+test("routes command and configuration mutations to each Composer Host", async ({ page }) => {
+  await page.setContent(
+    "<style>#root { position:fixed; bottom:24px; display:flex; gap:24px; } [data-codex-composer] { min-height:40px; }</style><body></body>",
+  );
+  await page.addScriptTag({ content: browserBundle });
+  await page.evaluate(() =>
+    Reflect.get(
+      globalThis,
+      "setupHostRouting",
+    )({ withProbe: true, conversation: true, configuration: true }),
+  );
+  for (const [name, hostId] of [
+    ["local-a", "local"],
+    ["remote", "remote-ssh-discovered:mac"],
+  ]) {
+    const composer = page.locator('[data-name="' + name + '"]');
+    const modelTrigger = composer.locator("[data-codexhost-model-control] > button");
+    await expect(modelTrigger).toContainText("Model A");
+    await composer.locator("[data-codexhost-harness-command-control] > button").click();
+    await page.locator('[data-command-id="native.compact"]').click();
+    await expect
+      .poll(() =>
+        page.evaluate(
+          (hostId) =>
+            Reflect.get(globalThis, "r3Routing").calls.filter(
+              (call: { hostId: string; method: string; params: { threadId: string } }) =>
+                call.hostId === hostId && call.method === "codexhost/thread/command/execute",
+            ).length,
+          hostId,
+        ),
+      )
+      .toBe(1);
+    await modelTrigger.click();
+    await page.locator("button[data-open-model-menu]:visible").click();
+    await page.locator('button[data-model-id="model-b"]:visible').click();
+    await expect(modelTrigger).toContainText("Model B");
+    await page.keyboard.press("Escape");
+    await modelTrigger.click();
+    await page.locator('button[data-thinking-option-id="high"]:visible').click();
+    await expect(modelTrigger).toContainText("High");
+    await composer.locator("[data-codexhost-permission-mode-control] > button").click();
+    await page.locator('button[data-permission-mode-id="auto"]:visible').click();
+    await expect(
+      composer.locator("[data-codexhost-permission-mode-control] > button"),
+    ).toContainText("Auto");
+    const mutations = await page.evaluate(
+      (hostId) =>
+        Reflect.get(globalThis, "r3Routing").calls.filter(
+          (call: { hostId: string; method: string; params: { threadId: string } }) =>
+            call.hostId === hostId &&
+            (call.method.endsWith("/select") || call.method.endsWith("/command/execute")),
+        ),
+      hostId,
+    );
+    expect(mutations.map((call: { method: string }) => call.method)).toEqual([
+      "codexhost/thread/command/execute",
+      "codexhost/thread/model/select",
+      "codexhost/thread/thinking/select",
+      "codexhost/thread/permission-mode/select",
+    ]);
+    expect(
+      mutations.every(
+        (call: { params: { threadId: string } }) => call.params.threadId === "shared-thread",
+      ),
+    ).toBe(true);
+  }
+});
+
+test("drops a Composer mutation result from a replaced Host client", async ({ page }) => {
+  await page.setContent(
+    "<style>#root { position:fixed; bottom:24px; display:flex; gap:24px; } [data-codex-composer] { min-height:40px; }</style><body></body>",
+  );
+  await page.addScriptTag({ content: browserBundle });
+  await page.evaluate(() => {
+    const state = Reflect.get(
+      globalThis,
+      "setupHostRouting",
+    )({ withProbe: true, conversation: true, configuration: true });
+    state.heldSelections.add("remote-ssh-discovered:mac");
+  });
+  const trigger = page.locator('[data-name="remote"] [data-codexhost-model-control] > button');
+  await expect(trigger).toContainText("Model A");
+  await trigger.click();
+  await page.locator("button[data-open-model-menu]:visible").click();
+  await page.locator('button[data-model-id="model-b"]:visible').click();
+  await expect
+    .poll(() => page.evaluate(() => Reflect.get(globalThis, "r3Routing").pendingSelections.length))
+    .toBe(1);
+  await page.evaluate(() => {
+    const state = Reflect.get(globalThis, "r3Routing");
+    state.remote = state.createManager("remote-ssh-discovered:mac");
+    window.dispatchEvent(new Event("focus"));
+  });
+  await page.evaluate(async () => {
+    Reflect.get(globalThis, "r3Routing").pendingSelections[0].resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  await expect(trigger).toBeEnabled();
+  await expect(trigger).toContainText("Model A");
+  await expect(trigger).not.toContainText("Model B");
 });
 
 test("keeps same Thread Usage isolated by Host and drops retired notifications", async ({

@@ -495,7 +495,12 @@ describe("ExternalThreadRepository", () => {
       const read = await repository.addPendingHostTurn(record.hostThreadId, first);
       await repository.addPendingHostTurn(record.hostThreadId, second);
 
-      const aligned = await repository.alignSnapshot(read, { turns: [snapshotTurn("native-a")] });
+      await expect(
+        repository.alignSnapshot(read, { turns: [snapshotTurn("native-a")] }),
+      ).rejects.toMatchObject({ code: "STALE_RECORD" });
+      const fresh = await repository.find(hostThreadId);
+      if (!fresh) throw new Error("Thread disappeared");
+      const aligned = await repository.alignSnapshot(fresh, { turns: [snapshotTurn("native-a")] });
       expect(aligned.record.turnMappings.map((m) => m.hostTurnId)).toEqual([first]);
       expect(aligned.record.pendingHostTurnIds).toEqual([second]);
       await repository.close();
@@ -506,13 +511,41 @@ describe("ExternalThreadRepository", () => {
       const live = hostTurnIdSchema.parse("host-live");
       await repository.persistTurn(record, live, snapshotTurn("native-b").nativeTurnRef);
 
-      const aligned = await repository.alignSnapshot(record, {
+      await expect(
+        repository.alignSnapshot(record, { turns: [snapshotTurn("native-a")] }),
+      ).rejects.toMatchObject({ code: "STALE_RECORD" });
+      const fresh = await repository.find(hostThreadId);
+      if (!fresh) throw new Error("Thread disappeared");
+      const aligned = await repository.alignSnapshot(fresh, {
         turns: [snapshotTurn("native-a"), snapshotTurn("native-b")],
       });
       expect(aligned.record.turnMappings[1]).toMatchObject({
         hostTurnId: live,
         nativeTurnRef: { nativeTurnKey: "native-b" },
       });
+      await repository.close();
+    });
+
+    it("rejects a stale unchanged Snapshot after the same native Turn gained a checkpoint", async () => {
+      const { repository, record } = await readyThread("create-race-same-turn");
+      const hostA = hostTurnIdSchema.parse("host-a");
+      const turn = snapshotTurn("native-a");
+      const read = await repository.persistTurn(record, hostA, turn.nativeTurnRef);
+      const current = await repository.persistTurn(
+        read,
+        hostA,
+        turn.nativeTurnRef,
+        nativeCheckpointRefSchema.parse({
+          harnessId,
+          nativeSessionId: nativeSessionRef.nativeSessionId,
+          checkpointId: "new-checkpoint",
+          formatVersion: 1,
+        }),
+      );
+      await expect(repository.alignSnapshot(read, { turns: [turn] })).rejects.toMatchObject({
+        code: "STALE_RECORD",
+      });
+      expect((await repository.find(hostThreadId))?.turnMappings).toEqual(current.turnMappings);
       await repository.close();
     });
 
@@ -533,7 +566,12 @@ describe("ExternalThreadRepository", () => {
         }),
       );
       await repository.addPendingHostTurn(record.hostThreadId, future);
-      const aligned = await repository.alignSnapshot(read, { turns: [turn] });
+      await expect(repository.alignSnapshot(read, { turns: [turn] })).rejects.toMatchObject({
+        code: "STALE_RECORD",
+      });
+      const fresh = await repository.find(hostThreadId);
+      if (!fresh) throw new Error("Thread disappeared");
+      const aligned = await repository.alignSnapshot(fresh, { turns: [turn] });
       expect(aligned.record.turnMappings[0]?.hostTurnId).toBe(hostA);
       expect(aligned.record.turnMappings[0]).not.toHaveProperty("nativeCheckpointRef");
       expect(aligned.record.pendingHostTurnIds).toEqual([future]);

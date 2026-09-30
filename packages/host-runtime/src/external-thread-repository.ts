@@ -5,7 +5,6 @@ import path from "node:path";
 import type { HostSubagentState, HostThreadSnapshot } from "@codexhost/harness-adapter";
 import {
   MappingStore,
-  MappingStoreError,
   type CommitReadyThreadInput,
   type CreateDelegationInput,
   type CreateProvisionalThreadInput,
@@ -117,10 +116,6 @@ function nativeTurnKey(ref: NativeTurnRef): string {
   return `${ref.harnessId}\u0000${ref.nativeSessionId}\u0000${ref.nativeTurnKey}\u0000${ref.formatVersion}`;
 }
 
-function sameMapping(left: StoredTurnMappingV1, right: StoredTurnMappingV1): boolean {
-  return JSON.stringify(left) === JSON.stringify(right);
-}
-
 export function defaultMappingStoreDirectory(environment: NodeJS.ProcessEnv): string {
   const dataDirectory = environment.CODEXHOST_DATA_DIR;
   return path.join(
@@ -128,9 +123,6 @@ export function defaultMappingStoreDirectory(environment: NodeJS.ProcessEnv): st
     "mapping-store",
   );
 }
-
-/** A Snapshot alignment that keeps losing the race to other writers gives up. */
-const ALIGN_ATTEMPTS = 3;
 
 export function createProductionExternalThreadStore(
   environment: NodeJS.ProcessEnv,
@@ -479,35 +471,8 @@ export class ExternalThreadRepository {
     return current.hostThreadId;
   }
 
-  /**
-   * Maps a native Snapshot's Turns onto the stored Thread. The mapping list
-   * is computed from `record`, so it is written only if the record is still
-   * that revision; when another writer (a live Turn, a delegation send)
-   * changed it meanwhile, the record is read again and aligned again.
-   */
+  /** Aligns one Snapshot against the revision captured before its native read. */
   async alignSnapshot(
-    record: StoredThreadRecordV1,
-    snapshot: HostThreadSnapshot,
-  ): Promise<AlignedExternalSnapshot> {
-    let current = record;
-    for (let attempt = 1; ; attempt += 1) {
-      try {
-        return await this.#alignSnapshotOnce(current, snapshot);
-      } catch (error) {
-        if (
-          !(error instanceof MappingStoreError && error.code === "STALE_RECORD") ||
-          attempt >= ALIGN_ATTEMPTS
-        ) {
-          throw error;
-        }
-        const fresh = await this.find(current.hostThreadId);
-        if (!fresh) throw error;
-        current = fresh;
-      }
-    }
-  }
-
-  async #alignSnapshotOnce(
     record: StoredThreadRecordV1,
     snapshot: HostThreadSnapshot,
   ): Promise<AlignedExternalSnapshot> {
@@ -558,19 +523,13 @@ export class ExternalThreadRepository {
     const remainingPending = pendingHostTurnIds.filter((id) => !mappedHostTurnIds.has(id));
 
     const orderedMappings = aligned.map(({ mapping }) => mapping);
-    const mappingsChanged =
-      orderedMappings.length !== record.turnMappings.length ||
-      orderedMappings.some((mapping, index) => {
-        const persisted = record.turnMappings[index];
-        return !persisted || !sameMapping(mapping, persisted);
-      });
-    let nextRecord = mappingsChanged
-      ? await this.store.reconcileTurnMappings(
-          record.hostThreadId,
-          orderedMappings,
-          record.revision,
-        )
-      : record;
+    // Even an unchanged list must validate the revision. The store keeps this
+    // check atomic and avoids a write when the mappings are identical.
+    let nextRecord = await this.store.reconcileTurnMappings(
+      record.hostThreadId,
+      orderedMappings,
+      record.revision,
+    );
     // Only the pending Turns this alignment consumed (or found mapped) are
     // removed; one added since `record` was read stays pending.
     const removed = (record.pendingHostTurnIds ?? []).filter(

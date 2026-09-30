@@ -4273,7 +4273,9 @@ export class AppServerHost {
       await this.#resolveDesktopQuestion(event.interactionId);
     }
     const ephemeralTurn =
-      event.type === "turn.completed" && thread.ephemeralTurnIds.has(event.turnId);
+      event.type === "turn.completed" &&
+      thread.ephemeralTurnIds.has(event.turnId) &&
+      !event.nativeTurnRef;
     if (event.type === "turn.completed" && !ephemeralTurn) {
       const persistenceError = await this.#persistTerminalIdentity(thread, event);
       if (persistenceError) {
@@ -4319,9 +4321,8 @@ export class AppServerHost {
     if (event.type === "turn.completed") {
       if (!result.completedTurn) throw new Error("Turn projector returned no completed Turn");
       const completedAt = Math.floor(Date.now() / 1000);
-      if (ephemeralTurn) {
-        thread.ephemeralTurnIds.delete(event.turnId);
-      } else {
+      thread.ephemeralTurnIds.delete(event.turnId);
+      if (!ephemeralTurn) {
         thread.turns.push(result.completedTurn);
         thread.thread.updatedAt = completedAt;
         thread.thread.recencyAt = completedAt;

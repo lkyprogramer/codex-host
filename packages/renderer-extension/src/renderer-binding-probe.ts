@@ -975,16 +975,42 @@ export function installRendererBindingProbe(
     }
   };
 
+  const composerModelClient = (mounted: MountedComposer) => {
+    const hostId = mounted.hostId;
+    const client = hostId ? modelClientForHost(hostId) : null;
+    if (!hostId || !client || activeModelHostId(mounted.composer) !== hostId) return null;
+    const threadId = threadIdFromComposerModelTarget(mounted.modelTarget);
+    const sameTarget = () =>
+      !disposed &&
+      mountedByComposer.get(mounted.composer) === mounted &&
+      mounted.composer.isConnected &&
+      mounted.hostId === hostId &&
+      activeModelHostId(mounted.composer) === hostId &&
+      threadIdFromComposerModelTarget(mounted.modelTarget) === threadId;
+    return {
+      client,
+      sameTarget,
+      isCurrent: () => sameTarget() && modelClientForHost(hostId) === client,
+      refreshIfReplaced: () => {
+        if (sameTarget() && modelClientForHost(hostId) !== client) {
+          void loadThreadOwnership(mounted);
+        }
+      },
+    };
+  };
+
   const executeCommand = async (
     mounted: MountedComposer,
     command: HarnessCommandDescriptor,
   ): Promise<void> => {
     const threadId = threadIdFromComposerModelTarget(mounted.modelTarget);
-    if (!threadId || !modelControl || controller.get(mounted.composer).agent === "codex") return;
+    const route = composerModelClient(mounted);
+    if (!threadId || !route || controller.get(mounted.composer).agent === "codex") return;
     mounted.control.harnessCommands.setExecuting(command.id);
     try {
-      await modelControl.executeThreadCommand({ threadId, commandId: command.id });
+      await route.client.executeThreadCommand({ threadId, commandId: command.id });
     } catch (error) {
+      if (!route.isCurrent()) return;
       showComposerCommandError(
         mounted.composer,
         error instanceof Error ? error.message : String(error),
@@ -994,7 +1020,7 @@ export function installRendererBindingProbe(
         error instanceof Error ? error.message : String(error),
       );
     } finally {
-      mounted.control.harnessCommands.setExecuting(null);
+      if (route.sameTarget()) mounted.control.harnessCommands.setExecuting(null);
     }
   };
 
@@ -1677,6 +1703,8 @@ export function installRendererBindingProbe(
 
   const selectExternalModel = async (mounted: MountedComposer, modelId: string): Promise<void> => {
     controller.clearPendingSubmission(mounted.composer);
+    const route = composerModelClient(mounted);
+    if (!route) return;
     const current = controller.get(mounted.composer);
     if (current.agent === "codex") return;
     const agent = current.agent;
@@ -1688,6 +1716,7 @@ export function installRendererBindingProbe(
     const previousPermissionModeId = controller.permissionModeForAgent(mounted.composer, agent);
     const supportsThinkingSelection = mounted.modelView.thinkingSelectionSupported === true;
     const generation = controller.beginModelRequest(mounted.composer);
+    const isCurrent = () => route.isCurrent() && isCurrentModelRequest(mounted, generation);
     mounted.modelView = {
       status: "selecting",
       catalog,
@@ -1721,7 +1750,7 @@ export function installRendererBindingProbe(
         try {
           await clearDraftPrewarm(mounted.composer);
         } catch (error) {
-          if (previousModel && isCurrentModelRequest(mounted, generation)) {
+          if (previousModel && isCurrent()) {
             applyExternalConfiguration(
               mounted,
               agent,
@@ -1732,17 +1761,14 @@ export function installRendererBindingProbe(
           }
           throw error;
         }
-        if (!isCurrentModelRequest(mounted, generation)) return;
+        if (!isCurrent()) return;
       } else {
         const threadId = threadIdFromComposerModelTarget(mounted.modelTarget);
         if (!threadId) {
           throw new Error("External Thread identity is unavailable for Model selection");
         }
-        const state = await modelControl.selectThreadModel({ threadId, model: selected });
-        if (
-          !isCurrentModelRequest(mounted, generation) ||
-          controller.get(mounted.composer).agent !== agent
-        ) {
+        const state = await route.client.selectThreadModel({ threadId, model: selected });
+        if (!isCurrent() || controller.get(mounted.composer).agent !== agent) {
           return;
         }
         if (!state.effectiveModel) {
@@ -1774,7 +1800,7 @@ export function installRendererBindingProbe(
         }
         mounted.threadConfiguration = state;
       }
-      if (!isCurrentModelRequest(mounted, generation)) return;
+      if (!isCurrent()) return;
       controller.setExternalModel(mounted.composer, agent, effectiveModel);
       controller.setExternalThinkingOption(mounted.composer, agent, effectiveThinkingOptionId);
       const effectivePermissionModeId =
@@ -1801,7 +1827,7 @@ export function installRendererBindingProbe(
         thinkingSelectionSupported: supportsThinkingSelection,
       };
     } catch (error) {
-      if (!isCurrentModelRequest(mounted, generation)) return;
+      if (!isCurrent()) return;
       if (previousModel) {
         applyExternalConfiguration(
           mounted,
@@ -1820,7 +1846,8 @@ export function installRendererBindingProbe(
         error: error instanceof Error ? error.message : String(error),
       };
     } finally {
-      if (isCurrentModelRequest(mounted, generation)) renderMounted(mounted);
+      if (isCurrent()) renderMounted(mounted);
+      else if (isCurrentModelRequest(mounted, generation)) route.refreshIfReplaced();
     }
   };
 
@@ -1829,6 +1856,8 @@ export function installRendererBindingProbe(
     permissionModeId: string,
   ): Promise<void> => {
     controller.clearPendingSubmission(mounted.composer);
+    const route = composerModelClient(mounted);
+    if (!route) return;
     const current = controller.get(mounted.composer);
     if (current.agent === "codex") return;
     const agent = current.agent;
@@ -1847,6 +1876,7 @@ export function installRendererBindingProbe(
     const previousPermissionModeId = controller.permissionModeForAgent(mounted.composer, agent);
     const thinkingOptionId = controller.thinkingOptionForAgent(mounted.composer, agent);
     const generation = controller.beginModelRequest(mounted.composer);
+    const isCurrent = () => route.isCurrent() && isCurrentModelRequest(mounted, generation);
     mounted.permissionModeView = {
       status: "selecting",
       catalog,
@@ -1870,7 +1900,7 @@ export function installRendererBindingProbe(
         try {
           await clearDraftPrewarm(mounted.composer);
         } catch (error) {
-          if (isCurrentModelRequest(mounted, generation)) {
+          if (isCurrent()) {
             applyExternalConfiguration(
               mounted,
               agent,
@@ -1881,20 +1911,17 @@ export function installRendererBindingProbe(
           }
           throw error;
         }
-        if (!isCurrentModelRequest(mounted, generation)) return;
+        if (!isCurrent()) return;
       } else {
         const threadId = threadIdFromComposerModelTarget(mounted.modelTarget);
         if (!threadId) {
           throw new Error("External Thread identity is unavailable for Permission Mode selection");
         }
-        const state = await modelControl.selectThreadPermissionMode({
+        const state = await route.client.selectThreadPermissionMode({
           threadId,
           permissionModeId: selectedPermissionModeId,
         });
-        if (
-          !isCurrentModelRequest(mounted, generation) ||
-          controller.get(mounted.composer).agent !== agent
-        ) {
+        if (!isCurrent() || controller.get(mounted.composer).agent !== agent) {
           return;
         }
         if (
@@ -1917,7 +1944,7 @@ export function installRendererBindingProbe(
         }
         mounted.threadConfiguration = state;
       }
-      if (!isCurrentModelRequest(mounted, generation)) return;
+      if (!isCurrent()) return;
       controller.setExternalPermissionMode(mounted.composer, agent, effectivePermissionModeId);
       if (shouldPersistNewThreadConfigurationSelection(current.phase)) {
         writeNewThreadExternalConfigurationPreference(
@@ -1936,7 +1963,7 @@ export function installRendererBindingProbe(
         selected: effectivePermissionModeId,
       };
     } catch (error) {
-      if (!isCurrentModelRequest(mounted, generation)) return;
+      if (!isCurrent()) return;
       if (previousPermissionModeId) {
         applyExternalConfiguration(
           mounted,
@@ -1953,7 +1980,8 @@ export function installRendererBindingProbe(
         error: error instanceof Error ? error.message : String(error),
       };
     } finally {
-      if (isCurrentModelRequest(mounted, generation)) renderMounted(mounted);
+      if (isCurrent()) renderMounted(mounted);
+      else if (isCurrentModelRequest(mounted, generation)) route.refreshIfReplaced();
     }
   };
 
@@ -1962,6 +1990,8 @@ export function installRendererBindingProbe(
     thinkingOptionId: string,
   ): Promise<void> => {
     controller.clearPendingSubmission(mounted.composer);
+    const route = composerModelClient(mounted);
+    if (!route) return;
     const current = controller.get(mounted.composer);
     if (current.agent === "codex") return;
     const agent = current.agent;
@@ -1983,6 +2013,7 @@ export function installRendererBindingProbe(
     }
     const previousThinking = controller.thinkingOptionForAgent(mounted.composer, agent);
     const generation = controller.beginModelRequest(mounted.composer);
+    const isCurrent = () => route.isCurrent() && isCurrentModelRequest(mounted, generation);
     mounted.modelView = {
       status: "selecting",
       catalog,
@@ -2009,25 +2040,22 @@ export function installRendererBindingProbe(
         try {
           await clearDraftPrewarm(mounted.composer);
         } catch (error) {
-          if (isCurrentModelRequest(mounted, generation)) {
+          if (isCurrent()) {
             applyExternalConfiguration(mounted, agent, model, previousThinking, permissionModeId);
           }
           throw error;
         }
-        if (!isCurrentModelRequest(mounted, generation)) return;
+        if (!isCurrent()) return;
       } else {
         const threadId = threadIdFromComposerModelTarget(mounted.modelTarget);
         if (!threadId || !modelControl) {
           throw new Error("External Thread identity is unavailable for Thinking selection");
         }
-        const state = await modelControl.selectThreadThinking({
+        const state = await route.client.selectThreadThinking({
           threadId,
           thinkingOptionId: selectedThinkingOptionId,
         });
-        if (
-          !isCurrentModelRequest(mounted, generation) ||
-          controller.get(mounted.composer).agent !== agent
-        ) {
+        if (!isCurrent() || controller.get(mounted.composer).agent !== agent) {
           return;
         }
         if (state.effectiveModel && state.effectiveModel.id !== model.id) {
@@ -2051,7 +2079,7 @@ export function installRendererBindingProbe(
         }
         mounted.threadConfiguration = state;
       }
-      if (!isCurrentModelRequest(mounted, generation)) return;
+      if (!isCurrent()) return;
       controller.setExternalThinkingOption(mounted.composer, agent, effectiveThinkingOptionId);
       const effectivePermissionModeId =
         mounted.threadConfiguration?.effectivePermissionModeId ?? permissionModeId;
@@ -2074,7 +2102,7 @@ export function installRendererBindingProbe(
         thinkingSelectionSupported: true,
       };
     } catch (error) {
-      if (!isCurrentModelRequest(mounted, generation)) return;
+      if (!isCurrent()) return;
       applyExternalConfiguration(mounted, agent, model, previousThinking, permissionModeId);
       mounted.modelView = {
         status: "error",
@@ -2085,7 +2113,8 @@ export function installRendererBindingProbe(
         error: error instanceof Error ? error.message : String(error),
       };
     } finally {
-      if (isCurrentModelRequest(mounted, generation)) renderMounted(mounted);
+      if (isCurrent()) renderMounted(mounted);
+      else if (isCurrentModelRequest(mounted, generation)) route.refreshIfReplaced();
     }
   };
 

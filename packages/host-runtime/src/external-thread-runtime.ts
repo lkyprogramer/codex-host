@@ -13,7 +13,7 @@ import type {
   HostUsage,
   TurnCompletedEvent,
 } from "@codexhost/harness-adapter";
-import type { StoredThreadRecordV1 } from "@codexhost/mapping-store";
+import { MappingStoreError, type StoredThreadRecordV1 } from "@codexhost/mapping-store";
 import {
   decodeExternalTransportSelection,
   encodeExternalTransportSelection,
@@ -40,6 +40,7 @@ import {
 import {
   externalThreadValue,
   type ExternalThreadRepository,
+  type AlignedExternalSnapshot,
 } from "./external-thread-repository.js";
 import { DELEGATION_THREAD_ID_ENV } from "./delegation-types.js";
 import { SessionStateObserver } from "./session-state-observer.js";
@@ -740,11 +741,16 @@ export class ExternalThreadRuntime {
           thread.turns.at(-1) === latestTurn;
         const pending = Promise.resolve()
           .then(async () => {
-            const snapshot = await thread.session.readSnapshot();
-            signal.throwIfAborted();
-            if (!snapshot.ok) return mapExternalThreadHarnessError(snapshot.error, "read");
-            if (!current()) return null;
-            const aligned = await this.#repository.alignSnapshot(thread.record, snapshot.value);
+            const read = await this.#readAlignedSnapshot(
+              thread.record,
+              () => thread.session.readSnapshot(),
+              () => {
+                signal.throwIfAborted();
+                return current();
+              },
+            );
+            if (!read) return null;
+            const { aligned } = read;
             // Identity mappings are already committed. Preserve them even if cancellation
             // invalidated this snapshot, without rolling back a newer persisted revision.
             if (
@@ -775,6 +781,7 @@ export class ExternalThreadRuntime {
         callerSignal ? AbortSignal.any([refresh.signal, callerSignal]) : refresh.signal,
       );
     } catch (error) {
+      if (error instanceof ExternalThreadOpenError) return error.rpcError;
       return {
         code: -32081,
         message:
@@ -866,6 +873,48 @@ export class ExternalThreadRuntime {
     return resumed.session;
   }
 
+  #readAlignedSnapshot(
+    record: StoredThreadRecordV1,
+    readSnapshot: () => Promise<HarnessResult<HostThreadSnapshot>>,
+  ): Promise<{ snapshot: HostThreadSnapshot; aligned: AlignedExternalSnapshot }>;
+  #readAlignedSnapshot(
+    record: StoredThreadRecordV1,
+    readSnapshot: () => Promise<HarnessResult<HostThreadSnapshot>>,
+    isCurrent: () => boolean,
+  ): Promise<{ snapshot: HostThreadSnapshot; aligned: AlignedExternalSnapshot } | null>;
+  async #readAlignedSnapshot(
+    record: StoredThreadRecordV1,
+    readSnapshot: () => Promise<HarnessResult<HostThreadSnapshot>>,
+    isCurrent: () => boolean = () => true,
+  ): Promise<{ snapshot: HostThreadSnapshot; aligned: AlignedExternalSnapshot } | null> {
+    const nativeIdentity = JSON.stringify(record.nativeSessionRef);
+    for (let attempt = 1; ; attempt += 1) {
+      if (!isCurrent()) return null;
+      // Freeze both the record revision and native read together. A CAS retry
+      // must obtain a new native Snapshot, not apply old history to new mappings.
+      const snapshot = await readSnapshot();
+      if (!isCurrent()) return null;
+      if (!snapshot.ok) {
+        throw new ExternalThreadOpenError(mapExternalThreadHarnessError(snapshot.error, "read"));
+      }
+      try {
+        const aligned = await this.#repository.alignSnapshot(record, snapshot.value);
+        return { snapshot: snapshot.value, aligned };
+      } catch (error) {
+        if (
+          !(error instanceof MappingStoreError && error.code === "STALE_RECORD") ||
+          attempt >= 3
+        ) {
+          throw error;
+        }
+        if (!isCurrent()) return null;
+        const latest = await this.#repository.find(record.hostThreadId);
+        if (!latest || JSON.stringify(latest.nativeSessionRef) !== nativeIdentity) throw error;
+        record = latest;
+      }
+    }
+  }
+
   async #openResumedNativeSession(
     record: StoredThreadRecordV1,
     validateResume?: (session: HarnessSession) => void,
@@ -954,12 +1003,11 @@ export class ExternalThreadRuntime {
           transportModelId: record.transportModelId,
         };
       }
-      const snapshot = await session.readSnapshot();
-      if (!snapshot.ok) {
-        throw new ExternalThreadOpenError(mapExternalThreadHarnessError(snapshot.error, "read"));
-      }
-      let aligned = await this.#repository.alignSnapshot(record, snapshot.value);
-      const restoredState = snapshot.value.state;
+      const { snapshot, aligned: initialAlignment } = await this.#readAlignedSnapshot(record, () =>
+        session.readSnapshot(),
+      );
+      let aligned = initialAlignment;
+      const restoredState = snapshot.state;
       const state = restoredState ?? session.initialState;
       const effectiveModel = restoredState
         ? restoredState.effectiveModel
@@ -1032,34 +1080,34 @@ export class ExternalThreadRuntime {
       }
       const subagent = record.subagent;
       const parent = record.nativeSessionRef as NativeSessionRef;
-      const snapshot = await subagents.readSnapshot({
-        parent,
-        nativeSubagentId: subagent.nativeSubagentId,
-        cwd: record.cwd,
-      });
-      const latest = await this.#repository.find(record.hostThreadId);
-      if (
-        latest?.state === "ready" &&
-        latest.nativeSessionRef &&
-        JSON.stringify(latest.nativeSessionRef) !== JSON.stringify(parent)
-      ) {
-        return this.#restore(latest);
-      }
-      if (!snapshot.ok) {
-        throw new ExternalThreadOpenError(mapExternalThreadHarnessError(snapshot.error, "read"));
-      }
-      const session = new ReadonlySnapshotSession(
-        record.harnessId,
-        record.nativeSessionRef as NativeSessionRef,
-        snapshot.value,
-        () =>
+      let read;
+      try {
+        read = await this.#readAlignedSnapshot(record, () =>
           subagents.readSnapshot({
             parent,
             nativeSubagentId: subagent.nativeSubagentId,
             cwd: record.cwd,
           }),
+        );
+      } catch (error) {
+        const latest = await this.#repository.find(record.hostThreadId);
+        if (
+          latest?.state === "ready" &&
+          latest.nativeSessionRef &&
+          JSON.stringify(latest.nativeSessionRef) !== JSON.stringify(parent)
+        ) {
+          return this.#restore(latest);
+        }
+        throw error;
+      }
+      const { snapshot, aligned } = read;
+      const session = new ReadonlySnapshotSession(record.harnessId, parent, snapshot, () =>
+        subagents.readSnapshot({
+          parent,
+          nativeSubagentId: subagent.nativeSubagentId,
+          cwd: record.cwd,
+        }),
       );
-      const aligned = await this.#repository.alignSnapshot(record, snapshot.value);
       const sessionId = await this.#repository.sessionTreeId(aligned.record);
       return this.register({
         record: aligned.record,
@@ -1067,7 +1115,7 @@ export class ExternalThreadRuntime {
         sessionId,
         thread: externalThreadValue({ record: aligned.record, turns: aligned.turns, sessionId }),
         turns: aligned.turns,
-        ...(snapshot.value.state ? { restoredState: snapshot.value.state } : {}),
+        ...(snapshot.state ? { restoredState: snapshot.state } : {}),
       });
     }
     const resumed = await this.#openResumedNativeSession(record, undefined, { historyOnly: true });

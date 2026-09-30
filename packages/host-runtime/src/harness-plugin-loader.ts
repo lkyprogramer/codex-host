@@ -92,6 +92,7 @@ function validatePluginAdapter(
 ): HarnessAdapter {
   return {
     harnessId: adapter.harnessId,
+    ...(adapter.permissionModeScope ? { permissionModeScope: adapter.permissionModeScope } : {}),
     ...(adapter.commandCatalog ? { commandCatalog: adapter.commandCatalog } : {}),
     ...(adapter.liveCommandCatalog ? { liveCommandCatalog: adapter.liveCommandCatalog } : {}),
     ...(adapter.inspectCommands ? { inspectCommands: adapter.inspectCommands.bind(adapter) } : {}),
@@ -176,7 +177,10 @@ async function loadAdapter(
         })
         .catch(() => diagnose({ id: manifest.id, code: "warmupFailed" }));
     }
-    return validatePluginAdapter(value, diagnose);
+    return validatePluginAdapter(
+      manifest.adapterApiVersion < HARNESS_PLUGIN_API_VERSION ? legacyPluginAdapter(value) : value,
+      diagnose,
+    );
   })();
   try {
     const races: Array<Promise<HarnessAdapter | undefined>> = [
@@ -344,9 +348,6 @@ export async function loadHarnessPlugins(
             options.warmup !== false,
             options.signal,
           );
-          if (manifest.adapterApiVersion < HARNESS_PLUGIN_API_VERSION) {
-            adapter = legacyPluginAdapter(adapter);
-          }
           if (options.signal?.aborted) {
             await adapter.close().catch(() => diagnose({ id: manifest.id, code: "cleanupFailed" }));
             return;
