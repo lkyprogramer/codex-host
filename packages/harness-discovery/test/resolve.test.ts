@@ -4,6 +4,7 @@ import {
   commandInvocation,
   harnessCandidates,
   resolveHarnessExecutable,
+  runOwnedProcess,
   versionManagerBinaryDirectories,
   withNodeRuntimeOnPath,
   VERSION_MANAGER_ROOTS,
@@ -199,11 +200,55 @@ describe("command invocation", () => {
 });
 
 describe("node runtime on PATH", () => {
-  it("prepends the host runtime directory once", () => {
+  it("appends the host runtime after an existing PATH and does not duplicate it", () => {
     const environment = withNodeRuntimeOnPath({ PATH: "/usr/bin" }, "/opt/runtime/node", "linux");
-    expect(environment.PATH).toBe("/opt/runtime:/usr/bin");
+    expect(environment.PATH).toBe("/usr/bin:/opt/runtime");
+    expect(withNodeRuntimeOnPath(environment, "/opt/runtime/node", "linux").PATH).toBe(
+      "/usr/bin:/opt/runtime",
+    );
+  });
+
+  it("fills an empty PATH and leaves a version-manager shim first", () => {
+    expect(withNodeRuntimeOnPath({ PATH: "" }, "/opt/runtime/node", "linux").PATH).toBe(
+      "/opt/runtime",
+    );
     expect(
-      withNodeRuntimeOnPath({ PATH: "/opt/runtime:/usr/bin" }, "/opt/runtime/node", "linux").PATH,
-    ).toBe("/opt/runtime:/usr/bin");
+      withNodeRuntimeOnPath(
+        { PATH: "/home/user/.volta/bin:/usr/bin" },
+        "/opt/runtime/node",
+        "linux",
+      ).PATH,
+    ).toBe("/home/user/.volta/bin:/usr/bin:/opt/runtime");
+  });
+
+  it("preserves a Windows Path key and deduplicates the runtime directory without case sensitivity", () => {
+    const environment = withNodeRuntimeOnPath(
+      { Path: String.raw`C:\shims;C:\RUNTIME`, PATHEXT: ".EXE;.CMD" },
+      String.raw`c:\runtime\node.exe`,
+      "win32",
+    );
+    expect(environment).toEqual({ Path: String.raw`C:\shims;C:\RUNTIME`, PATHEXT: ".EXE;.CMD" });
+    expect(
+      withNodeRuntimeOnPath(
+        { Path: String.raw`C:\shims` },
+        String.raw`C:\runtime\node.exe`,
+        "win32",
+      ).Path,
+    ).toBe(String.raw`C:\shims;C:\runtime`);
+  });
+
+  it("passes the same PATH to an owned process", async () => {
+    const environment = withNodeRuntimeOnPath({ PATH: "/opt/shims" }, process.execPath);
+    const result = await runOwnedProcess(
+      process.execPath,
+      ["-e", "process.stdout.write(process.env.PATH)"],
+      {
+        env: environment,
+        timeoutMs: 5_000,
+        maxOutputBytes: 4_096,
+      },
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(environment.PATH);
   });
 });

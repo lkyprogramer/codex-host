@@ -1,0 +1,17 @@
+{
+  "crates/shim/src/lib.rs": "5c991ca0b566c26df823ef2ba5dc5558abc0f5e6d92908fe947532567f741535",
+  "crates/shim/tests/proxy.rs": "fa14a609ef3861f0c51ca2e39a59033ccebe6a8eb492f0616975069ec3afdf82",
+  "packages/adapters/deepseek-harness/src/modern/history.ts": "f85ec796c1e45736647a0de5390af5bf22863a03bb740f76b0aebac18bf4e88e",
+  "packages/adapters/deepseek-harness/test/modern/history.test.ts": "899dcea9df81136111f49f67b7d81894970dcdb279b826d18262b148d4665eb2",
+  "packages/harness-discovery/src/node-runtime.ts": "6cf5b5e3bb4b2ed9eeace517ba98dc48b397455b9dfd1624a3e8c0b81ee76fdc",
+  "packages/harness-discovery/test/resolve.test.ts": "d66a3656a6dd7cef4a4756a9ffbf68aedae95584eafd02d0eedf61bfb80280d4",
+  "packages/host-runtime/src/remote-official-app-server.ts": "7d95694f0a452667ef91c72cd90a311a7a1087128715aa8c06f5b840a2340bf4",
+  "packages/host-runtime/src/remote-official-connection.ts": "e53c69d9c3189dabb1037d16f1c47648b69dd91d98d4367528519dc6c2a9e2df",
+  "packages/host-runtime/test/managed-harness-session.test.ts": "64679657b0afc533d3a29fd0c3d31e475a949d14612f93fd5a96a99c5ab98663",
+  "packages/host-runtime/test/remote-official-app-server.test.ts": "045d2ba67fab1203ef09d5fcd99774ce59bb7e29095a831f5e87ede80a995272",
+  "packages/host-runtime/test/remote-official-connection.test.ts": "cc92388aafe4d274691ced6ded563a6db7bf26837ee9dba1d2053f0e03ba8ab6",
+  "packages/protocol-core/src/jsonl.ts": "300b6b62699628b3caf16c5fd30e2870f978755f8d724eaa99b4e063496a3e55",
+  "packages/protocol-core/test/jsonl.test.ts": "971c8f9f3073d4457ac235e6c81105ebfaf1124feba9362a3a7b52789a312140",
+  "scripts/release/prepare-npm.mjs": "5efca23a0c1c00e17781c46efc79e76b920f129568557cbd6d83b3b777404d63",
+  "tests/release/npm-package.test.mjs": "6edb922fae3826b7616e9bbd7ec81b5e409c88a883c4a50b82bccb8a8d3f184e"
+}

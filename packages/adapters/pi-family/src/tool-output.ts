@@ -81,7 +81,7 @@ export function displayPath(
   const relative = path.relative(resolvedCwd, resolvedPath);
   const inside = relative.length > 0 && relative !== ".." && !relative.startsWith(`..${path.sep}`);
   const selected = inside ? relative : resolvedPath;
-  const normalized = selected.replaceAll("\\", "/");
+  const normalized = path.sep === "\\" ? selected.replaceAll("\\", "/") : selected;
   if (normalized.length === 0 || normalized === ".") return null;
   return { path: normalized, absolute: !inside };
 }
@@ -118,7 +118,7 @@ export function nestedToolString(value: unknown, keys: readonly string[]): strin
   return undefined;
 }
 
-export function patchFromResult(result: JsonValue): string | undefined {
+export function patchFromResult(result: unknown): string | undefined {
   if (!isRecord(result)) return undefined;
   for (const key of ["patch", "diff", "unifiedDiff"] as const) {
     const field = result[key];
@@ -223,4 +223,15 @@ export function reliableFileChange(
     if (fromPatch) return fromPatch;
   }
   return synthesizeFileChange(kind, args, cwd) ?? synthesizeFileChange(kind, result, cwd);
+}
+
+/** Native patch evidence only; never infer persisted changes from call arguments. */
+export function nativePatchFileChange(
+  toolName: string,
+  result: unknown,
+  cwd: string,
+): HostFileChange[] | null {
+  if (!fileMutatingKind(toolName)) return null;
+  const patch = patchFromResult(result);
+  return patch ? fileChangeFromPatch(patch, cwd) : null;
 }

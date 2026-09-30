@@ -30,7 +30,7 @@ import type {
   TurnStartAccepted,
   TurnStartCommand,
 } from "@codexhost/harness-adapter";
-import type { HarnessId } from "@codexhost/shared-contracts";
+import type { HarnessId, LoadedSessionResourceState } from "@codexhost/shared-contracts";
 
 type SessionOperation<T> = (session: HarnessSession) => Promise<T>;
 
@@ -286,6 +286,14 @@ export class ManagedHarnessSession implements HarnessSession {
   /** Native process was released; the next Host read or execute must resume it. */
   get nativeSuspended(): boolean {
     return this.#suspended !== null;
+  }
+
+  /** Cached lifecycle facts only; observing never resumes or probes native resources. */
+  get resourceState(): LoadedSessionResourceState {
+    if (this.#admissionClosed) return "unavailable";
+    if (this.#suspended) return "suspended";
+    if (this.#suspendingGeneration !== null) return "suspending";
+    return this.#deferredLive ? "historyOnly" : "loaded";
   }
 
   refreshUsage(): Promise<void> {

@@ -29,7 +29,7 @@ function closeServer(server: Server): Promise<void> {
   });
 }
 
-function respond(socket: Socket, value: "ready" | "rejected" | "failed"): void {
+function respond(socket: Socket, value: "ready" | "busy" | "rejected" | "failed"): void {
   socket.end(`${value}\n`);
 }
 
@@ -42,6 +42,7 @@ export async function startControllerAttachmentServer(
   }
 
   const sockets = new Set<Socket>();
+  let attaching = false;
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
@@ -62,10 +63,20 @@ export async function startControllerAttachmentServer(
       handled = true;
       const line = request.slice(0, newline).replace(/\r$/, "");
       if (line === `ATTACH ${options.nonce}`) {
-        void options.attach().then(
-          () => respond(socket, "ready"),
-          () => respond(socket, "failed"),
-        );
+        if (attaching) {
+          respond(socket, "busy");
+          return;
+        }
+        attaching = true;
+        void Promise.resolve()
+          .then(() => options.attach())
+          .then(
+            () => respond(socket, "ready"),
+            () => respond(socket, "failed"),
+          )
+          .finally(() => {
+            attaching = false;
+          });
         return;
       }
       respond(socket, "rejected");

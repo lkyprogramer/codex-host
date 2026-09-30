@@ -1,5 +1,5 @@
 import { createReadStream } from "node:fs";
-import { open, realpath } from "node:fs/promises";
+import { open, realpath, type FileHandle } from "node:fs/promises";
 import readline from "node:readline";
 
 import type { JsonObject } from "@codexhost/shared-contracts";
@@ -61,17 +61,74 @@ export async function readOmpSessionHistory(sessionFile: string): Promise<OmpSes
   return { entries, leafId };
 }
 
+/** Read a fixed byte snapshot of a child file. A changing or incomplete file is never reported as complete. */
+export async function readOmpBoundedSessionHistory(
+  handle: FileHandle,
+  initialSize: number,
+  maxBytes: number,
+): Promise<OmpSessionHistory> {
+  if (!Number.isSafeInteger(initialSize) || initialSize < 0 || initialSize > maxBytes) {
+    throw new Error("Omp Subagent transcript exceeds the supported size");
+  }
+  const entries: JsonObject[] = [];
+  let leafId: string | null = null;
+  let offset = 0;
+  let pending = Buffer.alloc(0);
+  const chunk = Buffer.allocUnsafe(64 * 1024);
+  while (offset < initialSize) {
+    const { bytesRead } = await handle.read(
+      chunk,
+      0,
+      Math.min(chunk.length, initialSize - offset),
+      offset,
+    );
+    if (bytesRead === 0) throw new Error("Omp Subagent transcript changed while reading");
+    offset += bytesRead;
+    pending = Buffer.concat([pending, chunk.subarray(0, bytesRead)]);
+    let newline: number;
+    while ((newline = pending.indexOf(0x0a)) >= 0) {
+      const line = pending.subarray(0, newline);
+      pending = pending.subarray(newline + 1);
+      if (line.length === 0) continue;
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(utf8Decoder.decode(line));
+      } catch {
+        throw new Error("Omp Subagent transcript contains an invalid JSONL record");
+      }
+      const entry = historyEntry(parsed);
+      if (entry) {
+        entries.push(entry);
+        leafId = entry.id as string;
+      } else if (!isRecord(parsed) || (parsed.type !== "title" && parsed.type !== "session")) {
+        throw new Error("Omp Subagent transcript contains an invalid history entry");
+      }
+    }
+  }
+  const finalSize = (await handle.stat()).size;
+  if (finalSize > maxBytes) throw new Error("Omp Subagent transcript exceeds the supported size");
+  if (finalSize !== initialSize || pending.length !== 0) {
+    throw new Error("Omp Subagent transcript changed or is incomplete");
+  }
+  if (leafId === null) throw new Error("Omp Subagent transcript has no history entries");
+  return { entries, leafId };
+}
+
 async function readOmpSessionHeader(sessionFile: string): Promise<OmpSessionHeader> {
   const handle = await open(sessionFile, "r");
   try {
     const buffer = Buffer.allocUnsafe(MAX_SESSION_HEADER_BYTES);
     const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
     const contents = buffer.subarray(0, bytesRead);
-    const newline = contents.indexOf(0x0a);
-    if (newline < 0 && bytesRead === buffer.length) {
+    const lastNewline = contents.lastIndexOf(0x0a);
+    if (lastNewline < 0 && bytesRead === buffer.length) {
       throw new Error("Omp Session header exceeds the supported size");
     }
-    const contentsText = utf8Decoder.decode(contents);
+    // At the byte bound, the final record may end mid UTF-8 code point.
+    // Decode only complete lines there; a smaller file may have no trailing newline.
+    const completeRecords =
+      bytesRead === buffer.length ? contents.subarray(0, lastNewline + 1) : contents;
+    const contentsText = utf8Decoder.decode(completeRecords);
     for (const line of contentsText.split("\n")) {
       if (line.length === 0) continue;
       let parsed: unknown;
@@ -94,6 +151,16 @@ async function readOmpSessionHeader(sessionFile: string): Promise<OmpSessionHead
     throw new Error("Omp Session header is invalid");
   } finally {
     await handle.close();
+  }
+}
+
+export async function verifyOmpSessionIdentity(
+  sessionFile: string,
+  sessionId: string,
+): Promise<void> {
+  const header = await readOmpSessionHeader(sessionFile);
+  if (header.id !== sessionId) {
+    throw new Error("Omp parent Session header identity does not match its Native Session Ref");
   }
 }
 

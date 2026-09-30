@@ -18,6 +18,7 @@ export {
   fileChangeFromPatch,
   fileMutatingKind,
   nativeText,
+  nativePatchFileChange,
   nestedToolString,
   numberField,
   outputText,

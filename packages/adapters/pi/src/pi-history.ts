@@ -1,5 +1,6 @@
 import {
   createPiFamilyHistory,
+  nativePatchFileChange,
   type PiFamilyHistoryState,
   type PiFamilySessionHistory,
 } from "@codexhost/adapter-pi-family";
@@ -21,6 +22,8 @@ const history = createPiFamilyHistory({
     ...call,
     ...(output ? { output } : {}),
   }),
+  fileChanges: (call, nativeMessage, cwd) =>
+    nativePatchFileChange(call.toolName, nativeMessage, cwd),
 });
 
 export const activePiEntries = history.activeEntries;

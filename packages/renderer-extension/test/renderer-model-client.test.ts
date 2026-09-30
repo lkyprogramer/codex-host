@@ -1,5 +1,6 @@
 import {
   harnessIdSchema,
+  LOADED_SESSIONS_METHOD,
   harnessModelRefSchema,
   harnessPermissionModeIdSchema,
   harnessThinkingOptionIdSchema,
@@ -73,6 +74,25 @@ const inspection = {
 };
 
 describe("Renderer fixed Model request client", () => {
+  it("requests and validates the local Host resource projection", async () => {
+    const sessions = [
+      {
+        threadId: hostThreadIdSchema.parse("thread-1"),
+        harnessId: piHarnessId,
+        running: false,
+        resourceState: "suspended",
+        lastActivityAt: 1_000,
+        lastRelease: { status: "suspended", observedAt: 2_000 },
+      },
+    ];
+    const sendRequest = vi.fn().mockResolvedValue({ sessions });
+    const client = createRendererModelClient([{ sendRequest }]);
+    await expect(client?.listLoadedSessions?.()).resolves.toEqual({ sessions });
+    expect(sendRequest).toHaveBeenCalledExactlyOnceWith(LOADED_SESSIONS_METHOD, {});
+    sendRequest.mockResolvedValueOnce({ sessions: [{ ...sessions[0], resourceState: "unsafe" }] });
+    await expect(client?.listLoadedSessions?.()).rejects.toThrow();
+  });
+
   it("reads draft quota for the selected Account without activating it", async () => {
     const result = {
       accountId: "account-b",
@@ -299,6 +319,7 @@ describe("Renderer fixed Model request client", () => {
       "listHarnessAccounts",
       "listHarnessPlugins",
       "listHarnessSessions",
+      "listLoadedSessions",
       "listSessionImportSources",
       "listThreadOwnership",
       "openHarnessWebUi",

@@ -301,6 +301,7 @@ export function mapGrokReplay(
       type: "fileChange",
       itemId: stableId("file-change", turnIndex, ++messageIndex),
       changes,
+      sourceItemIds: [tool.itemId],
     };
     items.push({ item: fileItem, outcome: { status: "succeeded" } });
   };

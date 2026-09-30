@@ -14,19 +14,21 @@ vi.mock("../../src/settings/icons.js", () => ({
 }));
 
 import { RendererSettingsPageScope } from "../../src/settings/core.js";
+import {
+  RENDERER_UPDATE_REQUEST_TIMEOUT_MS,
+  RendererUpdateRequestTimeoutError,
+} from "../../src/settings/update-request.js";
 import { createHarnessAccounts } from "../../src/settings/harness-accounts.js";
 import { rendererSettingsMessages } from "../../src/settings/localization.js";
 import { createRendererModelClient } from "../../src/renderer-model-client.js";
 import { RendererSessionImportUnavailableError } from "../../src/renderer-session-import-client.js";
 const HARNESS_SESSION_LIST_METHOD = "codexhost/harness/session-import/list";
 const HARNESS_SESSION_IMPORT_METHOD = "codexhost/harness/session-import/import";
-import {
-  CODEXHOST_RELEASES_LATEST_URL,
-  createDefaultRendererSettingsPages,
-} from "../../src/settings/pages.js";
+import { createDefaultRendererSettingsPages } from "../../src/settings/pages.js";
 import type {
   RendererConnectionDiagnostics,
   RendererConnectionSnapshot,
+  RendererUpdateClient,
 } from "../../src/settings/pages.js";
 
 class FakeElement {
@@ -919,6 +921,213 @@ describe("Renderer Codex Accounts page", () => {
 });
 
 describe("Renderer Updates page", () => {
+  it.each(["succeeded", "failed"] as const)(
+    "observes %s after start/status timeouts and a temporary disconnection",
+    async (terminalPhase) => {
+      vi.useFakeTimers();
+      const request = deferred<{ status: UpdateStatus }>();
+      const terminalStatus = updateStatus(terminalPhase);
+      const client = {
+        checkUpdate: vi.fn(async () => updateCheck()),
+        startUpdate: vi.fn(() => request.promise),
+        readUpdateStatus: vi
+          .fn<() => Promise<{ status: UpdateStatus | null }>>()
+          .mockRejectedValueOnce(new RendererUpdateRequestTimeoutError())
+          .mockRejectedValueOnce(new Error("connection lost"))
+          .mockResolvedValueOnce({ status: null })
+          .mockResolvedValueOnce({ status: updateStatus("prepared") })
+          .mockResolvedValueOnce({ status: updateStatus("downloading") })
+          .mockResolvedValueOnce({ status: terminalStatus }),
+      };
+      const page = createDefaultRendererSettingsPages(undefined, () => client).find(
+        ({ id }) => id === "updates",
+      );
+      if (!page) throw new Error("Updates page is not registered");
+      const document = new FakeDocument();
+      const content = document.createElement("main");
+      const scope = new RendererSettingsPageScope();
+      const cleanup = page.mount({
+        content: content as unknown as HTMLElement,
+        signal: scope.signal,
+        runLatest: (operation, handlers) => scope.runLatest(operation, handlers),
+      });
+      try {
+        await vi.advanceTimersByTimeAsync(0);
+        const panel = elementWithClass(content, "settings-update-panel");
+        const startButton = descendants(panel).find(({ tagName }) => tagName === "button");
+        if (!startButton) throw new Error("Update command is not rendered");
+        startButton.dispatch("click");
+        startButton.dispatch("click");
+        expect(client.startUpdate).toHaveBeenCalledOnce();
+
+        await vi.advanceTimersByTimeAsync(RENDERER_UPDATE_REQUEST_TIMEOUT_MS);
+        expect(panel.dataset.updateState).toBe("pending");
+        expect(visibleText(panel)).toContain("Preparing update");
+        startButton.dispatch("click");
+        expect(client.startUpdate).toHaveBeenCalledOnce();
+
+        for (const expected of [
+          "pending",
+          "pending",
+          "pending",
+          "prepared",
+          "downloading",
+          terminalPhase,
+        ]) {
+          const poll = vi.mocked(document.defaultView.setTimeout).mock.calls.at(-1)?.[0];
+          if (typeof poll !== "function") throw new Error("Missing status poll callback");
+          poll();
+          await vi.advanceTimersByTimeAsync(0);
+          expect(panel.dataset.updateState).toBe(expected);
+        }
+        expect(client.readUpdateStatus).toHaveBeenCalledTimes(6);
+        expect(client.startUpdate).toHaveBeenCalledOnce();
+        const releaseLink = descendants(content).find(
+          ({ tagName, href }) =>
+            tagName === "a" &&
+            href === "https://github.com/BytePioneer-AI/codex-host/releases/tag/v1.2.3",
+        );
+        expect(releaseLink).toBeDefined();
+        if (terminalPhase === "failed") {
+          expect(visibleText(panel)).toContain("Update failed");
+        }
+        request.resolve({ status: updateStatus("prepared") });
+        await vi.advanceTimersByTimeAsync(0);
+        expect(panel.dataset.updateState).toBe(terminalPhase);
+      } finally {
+        cleanup?.();
+        scope.dispose();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it.each(["succeeded", "failed"] as const)(
+    "reacquires the local client after disconnection to observe %s without restarting",
+    async (terminalPhase) => {
+      const first = {
+        checkUpdate: vi.fn(async () => updateCheck()),
+        startUpdate: vi.fn(async () => {
+          throw new RendererUpdateRequestTimeoutError();
+        }),
+        readUpdateStatus: vi.fn(async () => ({ status: null as UpdateStatus | null })),
+      };
+      const replacement = {
+        checkUpdate: vi.fn(async () => updateCheck()),
+        startUpdate: vi.fn(async () => ({ status: updateStatus("prepared") })),
+        readUpdateStatus: vi.fn(async () => ({ status: updateStatus(terminalPhase) })),
+      };
+      let current: RendererUpdateClient | null = first;
+      const page = createDefaultRendererSettingsPages(undefined, () => current).find(
+        ({ id }) => id === "updates",
+      );
+      if (!page) throw new Error("Updates page is not registered");
+      const document = new FakeDocument();
+      const content = document.createElement("main");
+      const scope = new RendererSettingsPageScope();
+      const cleanup = page.mount({
+        content: content as unknown as HTMLElement,
+        signal: scope.signal,
+        runLatest: (operation, handlers) => scope.runLatest(operation, handlers),
+      });
+      try {
+        const panel = elementWithClass(content, "settings-update-panel");
+        await vi.waitFor(() => expect(panel.dataset.updateState).toBe("available"));
+        const startButton = descendants(panel).find(({ tagName }) => tagName === "button");
+        if (!startButton) throw new Error("Update command is not rendered");
+        startButton.dispatch("click");
+        await vi.waitFor(() => expect(document.defaultView.setTimeout).toHaveBeenCalledTimes(1));
+        current = null;
+        const poll = vi.mocked(document.defaultView.setTimeout).mock.calls.at(-1)?.[0];
+        if (typeof poll !== "function") throw new Error("Missing status poll callback");
+        poll();
+        await vi.waitFor(() => expect(document.defaultView.setTimeout).toHaveBeenCalledTimes(2));
+        expect(panel.dataset.updateState).toBe("pending");
+        expect(first.readUpdateStatus).not.toHaveBeenCalled();
+        current = replacement;
+        const nextPoll = vi.mocked(document.defaultView.setTimeout).mock.calls.at(-1)?.[0];
+        if (typeof nextPoll !== "function") throw new Error("Missing status poll callback");
+        nextPoll();
+        await vi.waitFor(() => expect(panel.dataset.updateState).toBe(terminalPhase));
+        expect(replacement.readUpdateStatus).toHaveBeenCalledOnce();
+        expect(first.startUpdate).toHaveBeenCalledOnce();
+        expect(replacement.startUpdate).not.toHaveBeenCalled();
+        expect(document.defaultView.setTimeout).toHaveBeenCalledTimes(2);
+      } finally {
+        cleanup?.();
+        scope.dispose();
+      }
+    },
+  );
+
+  it("bounds status polling and lets the user resume observation without starting again", async () => {
+    const reportedStatus: UpdateStatus | null = null;
+    const client = {
+      checkUpdate: vi.fn(async () => updateCheck()),
+      startUpdate: vi.fn(async () => {
+        throw new RendererUpdateRequestTimeoutError();
+      }),
+      readUpdateStatus: vi.fn(async () => ({ status: reportedStatus })),
+    };
+    let current: RendererUpdateClient = client;
+    const replacement = {
+      ...client,
+      startUpdate: vi.fn(async () => ({ status: updateStatus("prepared") })),
+      readUpdateStatus: vi.fn(async () => ({ status: updateStatus("succeeded") })),
+    };
+    const page = createDefaultRendererSettingsPages(undefined, () => current).find(
+      ({ id }) => id === "updates",
+    );
+    if (!page) throw new Error("Updates page is not registered");
+    const document = new FakeDocument();
+    const content = document.createElement("main");
+    const scope = new RendererSettingsPageScope();
+    const cleanup = page.mount({
+      content: content as unknown as HTMLElement,
+      signal: scope.signal,
+      runLatest: (operation, handlers) => scope.runLatest(operation, handlers),
+    });
+    try {
+      await vi.waitFor(() =>
+        expect(elementWithClass(content, "settings-update-panel").dataset.updateState).toBe(
+          "available",
+        ),
+      );
+      const panel = elementWithClass(content, "settings-update-panel");
+      const startButton = descendants(panel).find(({ tagName }) => tagName === "button");
+      if (!startButton) throw new Error("Update command is not rendered");
+      startButton.dispatch("click");
+      await vi.waitFor(() => expect(document.defaultView.setTimeout).toHaveBeenCalledTimes(1));
+
+      for (let index = 0; index < 320; index += 1) {
+        const poll = vi.mocked(document.defaultView.setTimeout).mock.calls.at(-1)?.[0];
+        if (typeof poll !== "function") throw new Error("Missing status poll callback");
+        poll();
+        await vi.waitFor(() => expect(client.readUpdateStatus).toHaveBeenCalledTimes(index + 1));
+        await Promise.resolve();
+      }
+      expect(panel.dataset.updateState).toBe("pending");
+      expect(visibleText(panel)).toContain("did not respond");
+      expect(document.defaultView.setTimeout).toHaveBeenCalledTimes(320);
+      startButton.dispatch("click");
+      expect(client.startUpdate).toHaveBeenCalledOnce();
+
+      current = replacement;
+      const retry = descendants(panel).find(({ tagName }) => tagName === "button");
+      if (!retry) throw new Error("Status retry is not rendered");
+      retry.dispatch("click");
+      await vi.waitFor(() => expect(panel.dataset.updateState).toBe("succeeded"));
+      expect(client.readUpdateStatus).toHaveBeenCalledTimes(320);
+      expect(replacement.readUpdateStatus).toHaveBeenCalledOnce();
+      expect(replacement.startUpdate).not.toHaveBeenCalled();
+      expect(client.startUpdate).toHaveBeenCalledOnce();
+      expect(document.defaultView.setTimeout).toHaveBeenCalledTimes(320);
+    } finally {
+      cleanup?.();
+      scope.dispose();
+    }
+  });
+
   it.each([
     [updateStatus("prepared"), "正在准备更新..."],
     [updateStatus("waiting-for-exit"), "正在等待应用退出..."],
@@ -988,7 +1197,7 @@ describe("Renderer Updates page", () => {
     scope.dispose();
   });
 
-  it("keeps a manual GitHub Releases download available before discovery and after update failure", async () => {
+  it("uses the checked fork release URL after a start failure", async () => {
     const client = {
       checkUpdate: vi.fn(async () => updateCheck()),
       startUpdate: vi.fn(async () => {
@@ -1016,7 +1225,8 @@ describe("Renderer Updates page", () => {
         visibleNotesText(candidate).includes("Download from GitHub Releases"),
     );
     if (!releaseLink) throw new Error("GitHub Releases link is not rendered");
-    expect(releaseLink.href).toBe(CODEXHOST_RELEASES_LATEST_URL);
+    expect(releaseLink.hidden).toBe(true);
+    expect(releaseLink.href).toBe("");
     expect(releaseLink.target).toBe("_blank");
     expect(releaseLink.rel).toBe("noopener noreferrer");
 
@@ -1025,6 +1235,7 @@ describe("Renderer Updates page", () => {
         "https://github.com/BytePioneer-AI/codex-host/releases/tag/v1.2.3",
       );
     });
+    expect(releaseLink.hidden).toBe(false);
 
     const panel = elementWithClass(content, "settings-update-panel");
     const updateButton = descendants(panel).find(({ tagName }) => tagName === "button");
@@ -1039,6 +1250,39 @@ describe("Renderer Updates page", () => {
       "https://github.com/BytePioneer-AI/codex-host/releases/tag/v1.2.3",
     );
 
+    cleanup?.();
+    scope.dispose();
+  });
+
+  it("does not invent a release download URL when the check has none", async () => {
+    const client = {
+      checkUpdate: vi.fn(async () => ({
+        ...updateCheck(updateStatus("failed")),
+        releaseNotesUrl: null,
+      })),
+      startUpdate: vi.fn(),
+      readUpdateStatus: vi.fn(async () => ({ status: null })),
+    };
+    const page = createDefaultRendererSettingsPages(undefined, () => client).find(
+      ({ id }) => id === "updates",
+    );
+    if (!page) throw new Error("Updates page is not registered");
+    const document = new FakeDocument();
+    const content = document.createElement("main");
+    const scope = new RendererSettingsPageScope();
+    const cleanup = page.mount({
+      content: content as unknown as HTMLElement,
+      signal: scope.signal,
+      runLatest: (operation, handlers) => scope.runLatest(operation, handlers),
+    });
+
+    await vi.waitFor(() =>
+      expect(elementWithClass(content, "settings-update-panel").dataset.updateState).toBe(
+        "available",
+      ),
+    );
+    const releaseLink = descendants(content).find(({ tagName }) => tagName === "a");
+    expect(releaseLink).toMatchObject({ hidden: true, href: "" });
     cleanup?.();
     scope.dispose();
   });
@@ -1088,10 +1332,9 @@ describe("Renderer Updates page", () => {
       const link = descendants(content).find(
         ({ tagName, href }) =>
           tagName === "a" &&
-          href ===
-            "https://github.com/BytePioneer-AI/codex-host/releases/download/v1.2.3/codexhost-1.2.3-windows-x64.exe",
+          href === "https://github.com/BytePioneer-AI/codex-host/releases/tag/v1.2.3",
       );
-      expect(link).toMatchObject({ target: "_blank", rel: "noopener noreferrer" });
+      expect(link).toMatchObject({ hidden: false, target: "_blank", rel: "noopener noreferrer" });
     }
 
     cleanup?.();

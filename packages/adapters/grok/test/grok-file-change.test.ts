@@ -3,6 +3,18 @@ import { describe, expect, it } from "vitest";
 import { projectGrokFileChanges } from "../src/grok-file-change.js";
 
 describe("Grok ACP file changes", () => {
+  it.skipIf(process.platform === "win32")(
+    "preserves a POSIX backslash in a native Diff path",
+    () => {
+      expect(
+        projectGrokFileChanges(
+          [{ type: "diff", path: "/workspace/a\\b.txt", oldText: "old\n", newText: "new\n" }],
+          "/workspace",
+        ),
+      ).toMatchObject([{ path: "a\\b.txt" }]);
+    },
+  );
+
   it("serializes native before and after text as an update Unified Diff", () => {
     expect(
       projectGrokFileChanges(

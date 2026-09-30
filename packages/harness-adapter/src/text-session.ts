@@ -100,6 +100,8 @@ export interface ForkSessionInput {
   kind: "fork";
   sourceRef: NativeSessionRef;
   checkpoint: NativeCheckpointRef;
+  /** Saved source selection when the native source is not live in this Adapter. */
+  model?: HarnessModelRef;
   /** Execution cwd for the derived Native Session. */
   cwd: string;
   environment?: Record<string, string | undefined>;
@@ -351,12 +353,18 @@ export interface HostFileChange {
   path: string;
   kind: "add" | "update" | "delete";
   unifiedDiff: string;
+  /** A local edit fragment without stable file-wide coordinates. */
+  diffScope?: "fragment";
+  /** Tool previews for this path covered by a native file result; not causal source IDs. */
+  coveredToolItemIds?: HostItemId[];
 }
 
 export interface HostFileChangeItem {
   type: "fileChange";
   itemId: HostItemId;
   changes: HostFileChange[];
+  /** Original tool Item IDs represented by this native file-change Item. */
+  sourceItemIds?: HostItemId[];
 }
 
 export type HostSubagentStatus = "pending" | "running" | "completed" | "failed" | "interrupted";
@@ -639,6 +647,18 @@ export interface HarnessSessionImportCapability {
   resolveCandidate?(nativeSessionId: string): Promise<HarnessResult<HarnessSessionImportSource>>;
 }
 
+/** Structural cancellation signal; the public Adapter contract has no DOM/Node dependency. */
+export interface HarnessCatalogSignal {
+  readonly aborted: boolean;
+  readonly reason?: unknown;
+  addEventListener(type: "abort", listener: () => void, options?: { once?: boolean }): void;
+  removeEventListener(type: "abort", listener: () => void): void;
+}
+export interface InspectHarnessCommandsInput {
+  cwd: string;
+  signal: HarnessCatalogSignal;
+}
+
 export interface HarnessAdapter {
   readonly harnessId: HarnessId;
   /**
@@ -649,6 +669,13 @@ export interface HarnessAdapter {
   readonly permissionModeScope?: HarnessPermissionModeScope;
   /** Static command metadata. Reading it must not inspect, connect to, or open a Native Session. */
   readonly commandCatalog?: HarnessCommandCatalog;
+  /** Session command lists include native workspace metadata, not only builtin entries. */
+  readonly liveCommandCatalog?: boolean;
+  /** Bounded read-only metadata discovery. No model Turn or retained Native Session;
+   * close all temporary resources on success, failure, cancellation and timeout. */
+  inspectCommands?(
+    input: InspectHarnessCommandsInput,
+  ): Promise<HarnessResult<HarnessCommandCatalog>>;
   readonly sessionImport?: HarnessSessionImportCapability;
   readonly subagents?: HarnessSubagentCapability;
   readonly webUi?: HarnessWebUiAction;

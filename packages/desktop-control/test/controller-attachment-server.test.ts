@@ -82,6 +82,48 @@ describe("Controller attachment server", () => {
     }
   });
 
+  it("reports busy during an attachment and permits recovery after a disconnected client", async () => {
+    const port = await availablePort();
+    let finishAttach: (() => void) | undefined;
+    let attachmentStarted: (() => void) | undefined;
+    const started = new Promise<void>((resolve) => {
+      attachmentStarted = resolve;
+    });
+    const attach = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          finishAttach = resolve;
+          attachmentStarted?.();
+        }),
+    );
+    const server = await startControllerAttachmentServer({ port, nonce, attach });
+    try {
+      const first = createConnection({ host: "127.0.0.1", port });
+      await new Promise<void>((resolve) => first.once("connect", resolve));
+      first.write(`ATTACH ${nonce}\n`);
+      await started;
+      await expect(request(port, `ATTACH ${nonce}\n`)).resolves.toBe("busy\n");
+      expect(attach).toHaveBeenCalledOnce();
+      first.destroy();
+      await expect(request(port, `ATTACH ${nonce}\n`)).resolves.toBe("busy\n");
+      finishAttach?.();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(attach).toHaveBeenCalledOnce();
+      // A later Launcher can activate again once the prior recovery has completed.
+      const nextStarted = new Promise<void>((resolve) => {
+        attachmentStarted = resolve;
+      });
+      const next = request(port, `ATTACH ${nonce}\n`);
+      await nextStarted;
+      finishAttach?.();
+      await expect(next).resolves.toBe("ready\n");
+      expect(attach).toHaveBeenCalledTimes(2);
+    } finally {
+      finishAttach?.();
+      await server.close();
+    }
+  });
+
   it("rejects the retired Desktop quit command", async () => {
     const port = await availablePort();
     const server = await startControllerAttachmentServer({

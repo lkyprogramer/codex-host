@@ -6,6 +6,7 @@ import type {
   HostThreadSnapshot,
   HostItem,
   HostToolOutput,
+  HostFileChange,
   HistoricalTurnOutcome,
 } from "@codexhost/harness-adapter";
 import {
@@ -31,6 +32,7 @@ export interface PiFamilySessionHistory {
 export interface PiFamilyHistoryState {
   sessionId: string;
   model: PiFamilyNativeModelRef | null;
+  cwd?: string;
 }
 
 export interface PiFamilyEntry extends JsonObject {
@@ -80,6 +82,12 @@ export interface PiFamilyHistory {
     call: { itemId: HostItemId; toolName: string; arguments: JsonValue },
     output: HostToolOutput | undefined,
   ): HostItem;
+  /** Project only file changes backed by a successful persisted native result. */
+  fileChanges?(
+    call: { toolName: string; arguments: JsonValue },
+    nativeMessage: Record<string, unknown>,
+    cwd: string,
+  ): HostFileChange[] | null;
 }
 
 /** History mapping every Pi-family Harness shares: branches, Turns, items, boundaries. */
@@ -182,6 +190,7 @@ export function createPiFamilyHistory(family: PiFamilyHistory) {
   function snapshotItems(
     entries: PiFamilyEntry[],
     outcome: HistoricalTurnOutcome,
+    cwd?: string,
   ): HostItemSnapshot[] {
     const snapshots: HostItemSnapshot[] = [];
     const toolCalls = new Map<
@@ -269,6 +278,24 @@ export function createPiFamilyHistory(family: PiFamilyHistory) {
               },
             },
       });
+      if (toolSucceeded && cwd) {
+        const changes = family.fileChanges?.(
+          { toolName: call.name, arguments: call.arguments },
+          nativeMessage,
+          cwd,
+        );
+        if (changes?.length) {
+          snapshots.push({
+            item: {
+              type: "fileChange",
+              itemId: itemId(entry.id, "file-change", 0),
+              sourceItemIds: [item.itemId],
+              changes,
+            },
+            outcome: { status: "succeeded" },
+          });
+        }
+      }
     }
     return snapshots;
   }
@@ -321,7 +348,7 @@ export function createPiFamilyHistory(family: PiFamilyHistory) {
         nativeTurnRef,
         checkpoint,
         input: [{ type: "text", text: userText }],
-        items: snapshotItems(entries, outcome),
+        items: snapshotItems(entries, outcome, state.cwd),
         outcome,
         ...(effectiveModel ? { model: family.encodeModelRef(effectiveModel) } : {}),
       });

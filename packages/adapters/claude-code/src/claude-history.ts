@@ -13,6 +13,7 @@ import {
 } from "@codexhost/shared-contracts";
 
 import { claudeTranscriptItemId } from "./item-identity.js";
+import { parseClaudeNativeFileChange, projectClaudeFileChange } from "./file-change.js";
 
 interface ClaudeHistoryMessage {
   type: "user" | "assistant";
@@ -26,6 +27,7 @@ interface ClaudeHistoryMessage {
    * the same Turn here.
    */
   autonomousStart: boolean;
+  nativeToolResult?: unknown;
 }
 
 const claudeCodeHarnessId: HarnessId = harnessIdSchema.parse("claude-code");
@@ -159,6 +161,9 @@ function conversationMessages(values: unknown[], sessionId: string): ClaudeHisto
       message: value.message,
       interrupted,
       autonomousStart: value.type === "user" && isAutonomousStart(value),
+      ...(value.toolUseResult !== undefined || value.tool_use_result !== undefined
+        ? { nativeToolResult: value.toolUseResult ?? value.tool_use_result }
+        : {}),
       syntheticUser:
         value.type === "user" &&
         (interrupted ||
@@ -214,7 +219,11 @@ function itemOutcome(outcome: HistoricalTurnOutcome): HostItemOutcome {
   return { status: "succeeded" };
 }
 
-export function mapClaudeSnapshot(values: unknown[], sessionId: string): HostThreadSnapshot {
+export function mapClaudeSnapshot(
+  values: unknown[],
+  sessionId: string,
+  cwd?: string,
+): HostThreadSnapshot {
   const messages = conversationMessages(values, sessionId);
   const turns: HostThreadSnapshot["turns"] = [];
   for (let index = 0; index < messages.length;) {
@@ -228,6 +237,7 @@ export function mapClaudeSnapshot(values: unknown[], sessionId: string): HostThr
     const turnMessages = messages.slice(index, end);
     const outcome = turnOutcome(turnMessages);
     const results = toolResultBlocks(turnMessages);
+    const nativeResults = nativeToolResults(turnMessages);
     const checkpointMessage = turnMessages.findLast(
       ({ type, interrupted }) => type === "assistant" || interrupted,
     );
@@ -385,6 +395,22 @@ export function mapClaudeSnapshot(values: unknown[], sessionId: string): HostThr
             },
             outcome: toolOutcome,
           });
+          const nativeChange =
+            !failed && cwd
+              ? parseClaudeNativeFileChange(block.name, nativeResults.get(block.id))
+              : null;
+          const change = nativeChange && cwd ? projectClaudeFileChange(nativeChange, cwd) : null;
+          if (change) {
+            items.push({
+              item: {
+                type: "fileChange",
+                itemId: hostItemIdSchema.parse(`claude-item-v1-${message.uuid}-file-${blockIndex}`),
+                changes: [change],
+                sourceItemIds: [itemId],
+              },
+              outcome: { status: "succeeded" },
+            });
+          }
         }
         return items;
       }),
@@ -408,6 +434,21 @@ function toolResultBlocks(messages: ClaudeHistoryMessage[]): Map<string, Record<
         results.set(block.tool_use_id, block);
       }
     }
+  }
+  return results;
+}
+
+function nativeToolResults(messages: ClaudeHistoryMessage[]): Map<string, unknown> {
+  const results = new Map<string, unknown>();
+  for (const message of messages) {
+    if (message.type !== "user" || !Array.isArray(message.message.content)) continue;
+    const blocks = message.message.content.filter(
+      (block): block is Record<string, unknown> => isRecord(block) && block.type === "tool_result",
+    );
+    // A single user-level native result cannot be attributed to multiple tool results.
+    if (blocks.length !== 1 || message.nativeToolResult === undefined) continue;
+    const id = blocks[0]?.tool_use_id;
+    if (typeof id === "string") results.set(id, message.nativeToolResult);
   }
   return results;
 }

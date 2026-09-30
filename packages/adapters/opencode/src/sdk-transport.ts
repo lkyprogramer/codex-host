@@ -1,11 +1,18 @@
 import type { OpencodeClient } from "@opencode-ai/sdk/v2/client";
-import type { PermissionRuleset, QuestionAnswer, SessionStatus } from "@opencode-ai/sdk/v2";
+import type {
+  AssistantMessage,
+  Command,
+  PermissionRuleset,
+  QuestionAnswer,
+  SessionStatus,
+} from "@opencode-ai/sdk/v2";
 
 import type { OpenCodeMessageWithParts } from "./history.js";
 import type { OpenCodeNativeModelRef } from "./model-catalog.js";
 import {
   OpenCodeTransportError,
   type OpenCodePromptInput,
+  type OpenCodeCommandInput,
   type OpenCodeProviderCatalogResponse,
   type OpenCodeTransport,
   type OpenCodeTransportListener,
@@ -133,6 +140,18 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
     return responseData(
       await withTimeout(client.provider.list(), this.#commandTimeoutMs, "OpenCode Provider list"),
       "Provider list",
+    );
+  }
+
+  async commands(signal?: AbortSignal): Promise<Command[]> {
+    const client = await this.#getClient();
+    return responseData(
+      await withTimeout(
+        client.command.list({ directory: this.cwd }, signal ? { signal } : {}),
+        this.#commandTimeoutMs,
+        "OpenCode command list",
+      ),
+      "command list",
     );
   }
 
@@ -308,6 +327,31 @@ export class SdkOpenCodeTransport implements OpenCodeTransport {
         "OpenCode prompt admission",
       ),
       "prompt admission",
+    );
+  }
+
+  async executeCommand(
+    input: OpenCodeCommandInput,
+  ): Promise<OpenCodeMessageWithParts & { info: AssistantMessage }> {
+    const client = await this.#getClient();
+    if (input.signal?.aborted) {
+      throw new OpenCodeTransportError(
+        "invalidState",
+        "OpenCode native command was cancelled before dispatch",
+      );
+    }
+    return responseData(
+      await client.session.command(
+        {
+          sessionID: input.sessionID,
+          command: input.command,
+          arguments: input.arguments,
+          ...(input.model ? { model: `${input.model.providerID}/${input.model.modelID}` } : {}),
+          ...(input.variant ? { variant: input.variant } : {}),
+        },
+        input.signal ? { signal: input.signal } : {},
+      ),
+      "native command",
     );
   }
 

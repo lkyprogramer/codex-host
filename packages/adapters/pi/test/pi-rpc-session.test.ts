@@ -51,7 +51,9 @@ type Scenario =
   | "stats-unsupported-mismatch"
   | "stats-error"
   | "stats-timeout"
-  | "missing-session-id";
+  | "missing-session-id"
+  | "handled-command"
+  | "handled-command-delayed-state";
 
 /** Fakes own no OS process, so their tree must never signal a real pid. */
 function owned(child: FakePiRpcProcess): OwnedProcess<ChildProcessWithoutNullStreams> {
@@ -74,17 +76,20 @@ class FakePiRpcProcess extends EventEmitter {
   #sessionId = "synthetic-session";
   #sessionFile: string | null = "/synthetic/session.jsonl";
   #stateRequestCount = 0;
+  #deferredHandledState: Record<string, unknown> | null = null;
   #isStreaming = false;
   #provider = "synthetic-provider";
   #modelId = "synthetic-model";
   #thinkingLevel = "high";
   readonly #scenario: Scenario;
   readonly #compactionDelayMs: number | undefined;
+  readonly #cancelDelayMs: number | undefined;
 
-  constructor(scenario: Scenario, compactionDelayMs?: number) {
+  constructor(scenario: Scenario, compactionDelayMs?: number, cancelDelayMs?: number) {
     super();
     this.#scenario = scenario;
     this.#compactionDelayMs = compactionDelayMs;
+    this.#cancelDelayMs = cancelDelayMs;
     this.stdin.on("data", (chunk: Buffer) => this.#push(chunk));
     this.stdin.once("finish", () => {
       this.exitCode = 0;
@@ -93,6 +98,10 @@ class FakePiRpcProcess extends EventEmitter {
       this.emit("exit", 0, null);
     });
     queueMicrotask(() => this.emit("spawn"));
+  }
+
+  get deferredHandledState(): boolean {
+    return this.#deferredHandledState !== null;
   }
 
   emitAutonomousTurn(
@@ -218,6 +227,10 @@ class FakePiRpcProcess extends EventEmitter {
     }
     if (command.type === "get_state") {
       this.#stateRequestCount += 1;
+      if (this.#scenario === "handled-command-delayed-state" && this.#stateRequestCount > 1) {
+        this.#deferredHandledState = command;
+        return;
+      }
       this.#respond(command, {
         ...(this.#scenario === "missing-session-id" ? {} : { sessionId: this.#sessionId }),
         sessionFile: this.#sessionFile,
@@ -231,6 +244,15 @@ class FakePiRpcProcess extends EventEmitter {
         thinkingLevel: this.#thinkingLevel,
         isStreaming: this.#isStreaming,
         contextUsage: { tokens: 45, contextWindow: 200 },
+      });
+      return;
+    }
+    if (command.type === "get_commands") {
+      this.#respond(command, {
+        commands: [
+          { name: "review", description: "Review project", source: "prompt" },
+          { name: "skill:review", description: "Skill review", source: "skill" },
+        ],
       });
       return;
     }
@@ -423,6 +445,13 @@ class FakePiRpcProcess extends EventEmitter {
       }, this.#compactionDelayMs ?? 20);
       return;
     }
+    if (
+      command.type === "prompt" &&
+      (this.#scenario === "handled-command" || this.#scenario === "handled-command-delayed-state")
+    ) {
+      this.#respond(command, { disposition: "handled" });
+      return;
+    }
     if (command.type === "prompt") this.#isStreaming = true;
     if (
       command.type === "prompt" &&
@@ -437,21 +466,38 @@ class FakePiRpcProcess extends EventEmitter {
       return;
     }
     this.#respond(command);
+    if (command.type === "abort" && this.#scenario === "handled-command-delayed-state") {
+      const waiting = this.#deferredHandledState;
+      this.#deferredHandledState = null;
+      if (waiting)
+        this.#respond(waiting, {
+          sessionId: this.#sessionId,
+          sessionFile: this.#sessionFile,
+          model: { provider: this.#provider, id: this.#modelId },
+          thinkingLevel: this.#thinkingLevel,
+          isStreaming: false,
+        });
+      return;
+    }
     if (
       command.type === "abort" &&
       ["cancel", "cancel-no-settle", "interaction-cancel"].includes(this.#scenario)
     ) {
       if (this.#scenario === "cancel-no-settle") return;
-      if (this.#scenario === "cancel") {
-        this.#output({
-          type: "tool_execution_end",
-          toolCallId: "long-tool",
-          toolName: "gate_long_tool",
-          result: { content: [{ type: "text", text: "cancelled" }] },
-          isError: true,
-        });
-      }
-      this.#settleAgent();
+      const settle = () => {
+        if (this.#scenario === "cancel") {
+          this.#output({
+            type: "tool_execution_end",
+            toolCallId: "long-tool",
+            toolName: "gate_long_tool",
+            result: { content: [{ type: "text", text: "cancelled" }] },
+            isError: true,
+          });
+        }
+        this.#settleAgent();
+      };
+      if (this.#cancelDelayMs) setTimeout(settle, this.#cancelDelayMs);
+      else settle();
       return;
     }
     if (command.type !== "prompt") return;
@@ -733,20 +779,29 @@ function session(
   options: {
     commandTimeoutMs?: number;
     nativeCompactionDelayMs?: number;
+    nativeCancelDelayMs?: number;
     cancelTimeoutMs?: number;
     maxFrameBytes?: number;
   } = {},
 ): PiRpcSession {
   const processAdapter: PiRpcProcessAdapter = {
     spawn() {
-      return owned(new FakePiRpcProcess(scenario, options.nativeCompactionDelayMs));
+      return owned(
+        new FakePiRpcProcess(
+          scenario,
+          options.nativeCompactionDelayMs,
+          options.nativeCancelDelayMs,
+        ),
+      );
     },
   };
   return new PiRpcSession(
     {
       cwd: process.cwd(),
       commandTimeoutMs: options.commandTimeoutMs ?? 2_000,
-      cancelTimeoutMs: options.cancelTimeoutMs ?? 500,
+      ...(options.cancelTimeoutMs === undefined
+        ? {}
+        : { cancelTimeoutMs: options.cancelTimeoutMs }),
       closeTimeoutMs: 500,
       ...(options.maxFrameBytes !== undefined ? { maxFrameBytes: options.maxFrameBytes } : {}),
       onFault,
@@ -794,6 +849,35 @@ async function waitFor(predicate: () => boolean): Promise<void> {
 }
 
 describe("Pi RPC Turn aggregation", () => {
+  it("reads native command metadata and completes a handled extension prompt without agent_settled", async () => {
+    const rpc = session("handled-command");
+    await rpc.start();
+    await expect(rpc.getCommands()).resolves.toEqual([
+      { name: "review", description: "Review project", source: "prompt" },
+      { name: "skill:review", description: "Skill review", source: "skill" },
+    ]);
+    await expect(rpc.runTurn("/review", () => undefined)).resolves.toEqual({
+      text: "",
+      cancelled: false,
+      handled: true,
+    });
+    await rpc.close();
+  });
+
+  it("preserves handled identity when cancellation wins a delayed stable-state read", async () => {
+    const child = new FakePiRpcProcess("handled-command-delayed-state");
+    const rpc = new PiRpcSession(
+      { cwd: process.cwd(), commandTimeoutMs: 2_000, closeTimeoutMs: 500 },
+      { spawn: () => owned(child) },
+    );
+    await rpc.start();
+    const turn = rpc.runTurn("/extension", () => undefined);
+    await waitFor(() => child.deferredHandledState);
+    await rpc.abort();
+    await expect(turn).resolves.toEqual({ text: "", cancelled: true, handled: true });
+    await rpc.close();
+  });
+
   it("shares pending close confirmation between concurrent callers", async () => {
     const child = new FakePiRpcProcess("final-only");
     const rpc = new PiRpcSession(
@@ -1040,6 +1124,12 @@ describe("Pi RPC Turn aggregation", () => {
       command: "/synthetic/pi",
       arguments: ["--mode", "rpc", "--fork", "/synthetic/source.jsonl"],
     });
+    expect(piRpcProcessCommand({ ...options, noSession: true })).toMatchObject({
+      arguments: ["--mode", "rpc", "--no-session"],
+    });
+    expect(() =>
+      piRpcProcessCommand({ ...options, noSession: true, sessionFile: "/synthetic/source.jsonl" }),
+    ).toThrow("cannot combine");
     expect(
       piRpcProcessCommand({
         ...options,
@@ -1571,6 +1661,74 @@ describe("Pi RPC Turn aggregation", () => {
       cancelled: false,
     });
     await rpc.close();
+  });
+
+  it.each([1_000, 5_000, 25_000])(
+    "keeps the default cancellation alive until native settlement at %i ms",
+    async (delay) => {
+      vi.useFakeTimers();
+      const onFault = vi.fn();
+      const rpc = session("cancel", onFault, { nativeCancelDelayMs: delay });
+      try {
+        await rpc.start();
+        const completed = vi.fn();
+        const turn = rpc.runTurn("cancel slowly", () => undefined);
+        void turn.then(completed);
+        await rpc.abort();
+        await vi.advanceTimersByTimeAsync(delay - 1);
+        expect(completed).not.toHaveBeenCalled();
+        expect(onFault).not.toHaveBeenCalled();
+        await vi.advanceTimersByTimeAsync(1);
+        await expect(turn).resolves.toEqual({ text: "", cancelled: true });
+        await expect(rpc.runTurn("continue", () => undefined)).resolves.toMatchObject({
+          cancelled: false,
+        });
+        expect(onFault).not.toHaveBeenCalled();
+      } finally {
+        await rpc.close();
+        vi.useRealTimers();
+      }
+    },
+  );
+
+  it("bounds native cancellation at 30 seconds without treating acknowledgement as completion", async () => {
+    vi.useFakeTimers();
+    const onFault = vi.fn();
+    const rpc = session("cancel-no-settle", onFault);
+    try {
+      await rpc.start();
+      const turn = rpc.runTurn("never settles", () => undefined);
+      const rejected = expect(turn).rejects.toThrow("cancellation did not settle");
+      await rpc.abort();
+      await vi.advanceTimersByTimeAsync(29_999);
+      expect(onFault).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      await rejected;
+      expect(onFault).toHaveBeenCalledOnce();
+      await expect(rpc.runTurn("unavailable", () => undefined)).rejects.toThrow("unavailable");
+    } finally {
+      await rpc.close();
+      vi.useRealTimers();
+    }
+  });
+
+  it("lets close finish without waiting for the longer native cancellation window", async () => {
+    vi.useFakeTimers();
+    const onFault = vi.fn();
+    const rpc = session("cancel", onFault, { nativeCancelDelayMs: 25_000 });
+    try {
+      await rpc.start();
+      const turn = rpc.runTurn("close during cancel", () => undefined);
+      const rejected = expect(turn).rejects.toThrow("closed");
+      await rpc.abort();
+      await rpc.close();
+      await rejected;
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(onFault).not.toHaveBeenCalled();
+    } finally {
+      await rpc.close();
+      vi.useRealTimers();
+    }
   });
 
   it("fails and closes a cancellation that does not reach stable settlement", async () => {

@@ -1767,6 +1767,115 @@ mod tests {
         server.join().expect("attachment server");
     }
 
+    #[test]
+    fn controlled_attachment_retries_busy_and_disconnect() {
+        use crate::desktop_attachment::try_activate_controlled_instance;
+        use crate::runtime_instance::RuntimeDescriptor;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("attachment listener");
+        let port = listener.local_addr().expect("attachment address").port();
+        let descriptor =
+            RuntimeDescriptor::new(10, port, "0123456789abcdef0123456789abcdef".into())
+                .expect("runtime descriptor");
+        let server = thread::spawn(move || {
+            for response in [Some("busy"), None, Some("ready")] {
+                let (mut stream, _) = listener.accept().expect("attachment connection");
+                let mut request = String::new();
+                BufReader::new(stream.try_clone().expect("clone stream"))
+                    .read_line(&mut request)
+                    .expect("attachment request");
+                assert_eq!(request, "ATTACH 0123456789abcdef0123456789abcdef\n");
+                if let Some(response) = response {
+                    writeln!(stream, "{response}").expect("attachment response");
+                }
+            }
+        });
+        assert!(!try_activate_controlled_instance(&descriptor).expect("busy"));
+        assert!(!try_activate_controlled_instance(&descriptor).expect("disconnect"));
+        assert!(try_activate_controlled_instance(&descriptor).expect("recovered"));
+        server.join().expect("attachment server");
+    }
+
+    #[test]
+    fn controlled_attachment_read_timeout_stays_within_remaining_deadline() {
+        use crate::desktop_attachment::try_activate_controlled_instance_with_timeout;
+        use crate::runtime_instance::RuntimeDescriptor;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("attachment listener");
+        let port = listener.local_addr().expect("attachment address").port();
+        let descriptor =
+            RuntimeDescriptor::new(10, port, "0123456789abcdef0123456789abcdef".into())
+                .expect("runtime descriptor");
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("attachment connection");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut request)
+                .expect("attachment request");
+            thread::sleep(Duration::from_millis(200));
+            drop(stream);
+            let (mut recovered, _) = listener.accept().expect("recovery connection");
+            writeln!(recovered, "ready").expect("recovery response");
+        });
+        let started = Instant::now();
+        assert!(
+            !try_activate_controlled_instance_with_timeout(&descriptor, Duration::from_millis(40))
+                .expect("read timeout is transient")
+        );
+        assert!(started.elapsed() < Duration::from_millis(180));
+        assert!(
+            try_activate_controlled_instance_with_timeout(&descriptor, Duration::from_secs(1))
+                .expect("Controller recovers after a read timeout")
+        );
+        server.join().expect("attachment server");
+    }
+
+    #[test]
+    fn controlled_attachment_fragments_cannot_extend_the_deadline() {
+        use crate::desktop_attachment::try_activate_controlled_instance_with_timeout;
+        use crate::runtime_instance::RuntimeDescriptor;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("attachment listener");
+        let port = listener.local_addr().expect("attachment address").port();
+        let descriptor =
+            RuntimeDescriptor::new(10, port, "0123456789abcdef0123456789abcdef".into())
+                .expect("runtime descriptor");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("attachment connection");
+            let mut request = String::new();
+            BufReader::new(stream.try_clone().expect("clone stream"))
+                .read_line(&mut request)
+                .expect("attachment request");
+            for fragment in b"ready\n" {
+                if stream.write_all(&[*fragment]).is_err() {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(30));
+            }
+        });
+        let started = Instant::now();
+        assert!(
+            !try_activate_controlled_instance_with_timeout(&descriptor, Duration::from_millis(75))
+                .expect("slow response is transient")
+        );
+        assert!(started.elapsed() < Duration::from_millis(150));
+        server.join().expect("attachment server");
+    }
+
+    #[test]
+    fn controlled_attachment_rejects_invalid_protocol_without_retry() {
+        use crate::desktop_attachment::try_activate_controlled_instance;
+        use crate::runtime_instance::RuntimeDescriptor;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("attachment listener");
+        let port = listener.local_addr().expect("attachment address").port();
+        let descriptor =
+            RuntimeDescriptor::new(10, port, "0123456789abcdef0123456789abcdef".into())
+                .expect("runtime descriptor");
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("attachment connection");
+            writeln!(stream, "unexpected").expect("attachment response");
+        });
+        assert!(try_activate_controlled_instance(&descriptor).is_err());
+        server.join().expect("attachment server");
+    }
+
     #[cfg(target_os = "windows")]
     #[test]
     fn production_controller_normalizes_a_verbatim_node_entrypoint() {

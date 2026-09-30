@@ -1,4 +1,8 @@
 import type { DefaultRendererSettingsPageId } from "./pages.js";
+import type {
+  LoadedSessionReleaseStatus,
+  LoadedSessionResourceState,
+} from "@codexhost/shared-contracts";
 
 export const RENDERER_SETTINGS_LOCALES = ["en", "zh-CN"] as const;
 export type RendererSettingsLocale = (typeof RENDERER_SETTINGS_LOCALES)[number];
@@ -32,6 +36,18 @@ export interface RendererSettingsMessages {
   readonly inDevelopment: string;
   readonly notAvailable: string;
   readonly runtimeCapabilityNotInstalled: string;
+  readonly resourcesDescription: string;
+  readonly resourcesRefresh: string;
+  readonly resourcesLoading: string;
+  readonly resourcesEmpty: string;
+  readonly resourcesUnavailable: string;
+  readonly resourcesLoadFailed: string;
+  readonly resourcesRunning: string;
+  readonly resourcesNotRunning: string;
+  readonly resourcesLastActivity: string;
+  readonly resourcesLastRelease: string;
+  readonly resourcesState: Readonly<Record<LoadedSessionResourceState, string>>;
+  readonly resourcesReleaseStatus: Readonly<Record<LoadedSessionReleaseStatus, string>>;
   readonly sessionImportHarness: string;
   readonly sessionImportDescription: string;
   readonly sessionImportAvailabilityNote: string;
@@ -233,6 +249,31 @@ const ENGLISH_MESSAGES: RendererSettingsMessages = Object.freeze({
   inDevelopment: "In development",
   notAvailable: "Not available",
   runtimeCapabilityNotInstalled: "This runtime capability is not installed yet.",
+  resourcesDescription:
+    "Local Host only. This list shows cached lifecycle observations; refreshing reads Host state without probing native processes. A last release result is historical.",
+  resourcesRefresh: "Refresh",
+  resourcesLoading: "Loading local resources...",
+  resourcesEmpty: "No loaded Thread resources are currently observed on the local Host.",
+  resourcesUnavailable: "Local Host resource observations are unavailable. Reconnect and refresh.",
+  resourcesLoadFailed: "Could not read local Host resource observations. Refresh to retry.",
+  resourcesRunning: "Running",
+  resourcesNotRunning: "Not running",
+  resourcesLastActivity: "Last activity",
+  resourcesLastRelease: "Last release (historical)",
+  resourcesState: Object.freeze({
+    loaded: "Loaded",
+    historyOnly: "History only",
+    suspending: "Suspending",
+    suspended: "Native resource released",
+    unavailable: "State unavailable",
+  }),
+  resourcesReleaseStatus: Object.freeze({
+    suspended: "Released",
+    busy: "Busy",
+    unknown: "Unknown",
+    releaseFailed: "Release failed",
+    unsupported: "Unsupported",
+  }),
   sessionImportHarness: "Harness",
   sessionImportDescription:
     "Sessions keep their original project path. If a folder is not in the Codex sidebar, add it as a project first. Original history remains managed by the Harness.",
@@ -438,6 +479,7 @@ const ENGLISH_MESSAGES: RendererSettingsMessages = Object.freeze({
   aboutRepository: "Open-source repository",
   pageLabels: Object.freeze({
     connections: "Connections",
+    resources: "Resources",
     appearance: "Appearance",
     accounts: "Accounts",
     "session-import": "Session Import",
@@ -461,6 +503,31 @@ const CHINESE_MESSAGES: RendererSettingsMessages = Object.freeze({
   inDevelopment: "开发中",
   notAvailable: "暂不可用",
   runtimeCapabilityNotInstalled: "运行时尚未安装该项能力，因此暂不可用。",
+  resourcesDescription:
+    "仅显示本地 Host。这里是生命周期状态的缓存观察；刷新只读取 Host 状态，不探测原生进程。最近释放结果是历史记录。",
+  resourcesRefresh: "刷新",
+  resourcesLoading: "正在读取本地资源状态……",
+  resourcesEmpty: "本地 Host 当前没有观察到已加载的 Thread 资源。",
+  resourcesUnavailable: "本地 Host 资源状态暂不可用。请重连后刷新。",
+  resourcesLoadFailed: "无法读取本地 Host 资源状态，请刷新重试。",
+  resourcesRunning: "运行中",
+  resourcesNotRunning: "未运行",
+  resourcesLastActivity: "最近活动",
+  resourcesLastRelease: "最近释放（历史记录）",
+  resourcesState: Object.freeze({
+    loaded: "已加载",
+    historyOnly: "仅历史记录",
+    suspending: "正在挂起",
+    suspended: "原生资源已释放",
+    unavailable: "状态不可用",
+  }),
+  resourcesReleaseStatus: Object.freeze({
+    suspended: "已释放",
+    busy: "繁忙",
+    unknown: "未知",
+    releaseFailed: "释放失败",
+    unsupported: "不支持",
+  }),
   sessionImportHarness: "Harness",
   sessionImportDescription:
     "会话将保留原始项目路径；若该文件夹尚未出现在 Codex 侧栏，请先将其添加为项目。原始历史仍由 Harness 管理。",
@@ -658,6 +725,7 @@ const CHINESE_MESSAGES: RendererSettingsMessages = Object.freeze({
   aboutRepository: "开源仓库",
   pageLabels: Object.freeze({
     connections: "连接",
+    resources: "资源",
     appearance: "外观",
     accounts: "账号",
     "session-import": "会话导入",

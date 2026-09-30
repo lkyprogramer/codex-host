@@ -111,6 +111,7 @@ import {
   type OmpPermissionMode,
 } from "./omp-permission-modes.js";
 import { OmpSubagentLifecycle } from "./omp-subagent-lifecycle.js";
+import { readOmpSubagentTranscript } from "./omp-subagent-transcript.js";
 import { projectOmpToolItem } from "./omp-tool-presentation.js";
 
 export interface OmpAdapterOptions {
@@ -643,6 +644,7 @@ class OmpHarnessSession implements HarnessSession {
           ...mapOmpSnapshot(history, {
             sessionId: transport.state.sessionId,
             model: nativeModelForHistory(transport.state),
+            cwd: this.#cwd,
           }),
           state: this.#state,
         },
@@ -728,6 +730,7 @@ class OmpHarnessSession implements HarnessSession {
           beforeHistory = mapOmpSnapshot(await transport.getEntries(), {
             sessionId: transport.state.sessionId,
             model: nativeModelForHistory(transport.state),
+            cwd: this.#cwd,
           });
         } catch (error) {
           return { ok: false, error: normalizedError(error, "protocolError") };
@@ -1759,7 +1762,12 @@ class OmpHarnessSession implements HarnessSession {
         }
         const changes = reliableFileChange(event.toolName, args, event.result, this.#cwd);
         if (changes) {
-          const fileItem: HostItem = { type: "fileChange", itemId: this.#newItemId(), changes };
+          const fileItem: HostItem = {
+            type: "fileChange",
+            itemId: this.#newItemId(),
+            sourceItemIds: [tool.item.itemId],
+            changes,
+          };
           this.#event({ type: "item.started", turnId: active.command.turnId, item: fileItem });
           this.#completeItem(active, fileItem, { status: "succeeded" });
         }
@@ -1785,6 +1793,7 @@ class OmpHarnessSession implements HarnessSession {
     const snapshot = mapOmpSnapshot(await transport.getEntries(), {
       sessionId: transport.state.sessionId,
       model: nativeModelForHistory(transport.state),
+      cwd: this.#cwd,
     });
     const created = snapshot.turns.filter(
       (turn) => !active.beforeNativeTurnKeys.has(turn.nativeTurnRef.nativeTurnKey),
@@ -1917,9 +1926,25 @@ export class OmpAdapter implements HarnessAdapter {
       }
       let transport: OmpTurnTransport | undefined;
       try {
+        const sessionFile = sessionFileFromRef(input.parent);
+        const savedHistory = await readOmpSubagentTranscript({
+          parentSessionFile: sessionFile,
+          parentSessionId: input.parent.nativeSessionId,
+          nativeSubagentId: input.nativeSubagentId,
+        });
+        if (savedHistory !== null) {
+          return {
+            ok: true,
+            value: mapOmpSnapshot(savedHistory, {
+              sessionId: input.parent.nativeSessionId,
+              model: null,
+              cwd: input.cwd,
+            }),
+          };
+        }
         transport = this.#createTransport({
           cwd: input.cwd,
-          sessionFile: sessionFileFromRef(input.parent),
+          sessionFile,
           onFault: () => undefined,
         });
         this.#ephemeralTransports.add(transport);
@@ -1934,6 +1959,7 @@ export class OmpAdapter implements HarnessAdapter {
           {
             sessionId: input.parent.nativeSessionId,
             model: nativeModelFromState(transport.state),
+            cwd: input.cwd,
           },
         );
         return { ok: true, value: snapshot };
@@ -2283,6 +2309,7 @@ export class OmpAdapter implements HarnessAdapter {
         const derivedSnapshot = mapOmpSnapshot(await transport.getEntries(), {
           sessionId: derivedState.sessionId,
           model: nativeModelForHistory(derivedState),
+          cwd: input.cwd,
         });
         const terminal = derivedSnapshot.turns.at(-1);
         if (

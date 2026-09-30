@@ -14,6 +14,41 @@ import {
 const grokHarnessId = harnessIdSchema.parse("grok");
 
 describe("Grok history Fork mapping", () => {
+  it("links restored native file changes to their source tool", () => {
+    const snapshot = mapGrokReplay(
+      [
+        { type: "user.text", text: "edit", metadata: { eventId: "user-1" } },
+        {
+          type: "tool.call",
+          callId: "edit-1",
+          title: "Edit sample.txt",
+          name: "search_replace",
+          rawInput: { file_path: "/workspace/sample.txt" },
+          status: "in_progress",
+        },
+        {
+          type: "tool.update",
+          callId: "edit-1",
+          status: "completed",
+          content: [
+            { type: "diff", path: "/workspace/sample.txt", oldText: "old\n", newText: "new\n" },
+          ],
+        },
+        { type: "turn.completed", nativeTurnKey: "prompt-1", stopReason: "end_turn" },
+      ],
+      grokHarnessId,
+      "session-1",
+      "/workspace",
+    );
+    const [tool, file] = snapshot.turns[0]?.items ?? [];
+    expect(tool?.item.type).toBe("toolExecution");
+    expect(file?.item).toMatchObject({
+      type: "fileChange",
+      sourceItemIds: [tool?.item.itemId],
+      changes: [{ path: "sample.txt", kind: "update" }],
+    });
+  });
+
   it("assigns Native Prompt Index Checkpoints and skips synthetic user runs", () => {
     const snapshot = mapGrokReplay(
       [

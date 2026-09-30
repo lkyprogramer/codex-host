@@ -9,6 +9,7 @@ import {
   hostItemIdSchema,
   hostThreadIdSchema,
   hostTurnIdSchema,
+  nativeCheckpointRefSchema,
   nativeSessionRefSchema,
   nativeTurnRefSchema,
 } from "@codexhost/shared-contracts";
@@ -68,6 +69,42 @@ afterEach(async () => {
 });
 
 describe("ExternalThreadRepository", () => {
+  it("revokes a persisted checkpoint when the native Snapshot no longer advertises it", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = new MappingStore({ directory });
+    const repository = new ExternalThreadRepository(store);
+    await repository.initialize();
+    await store.createProvisional({
+      hostThreadId,
+      createRequestId: "checkpoint-clear",
+      harnessId,
+      cwd: "/synthetic",
+      transportModelId: "codexhost/claude-code-native",
+      ephemeral: false,
+      historyMode: "legacy",
+    });
+    const turn = snapshotTurn("native-a");
+    const checkpoint = nativeCheckpointRefSchema.parse({
+      harnessId,
+      nativeSessionId: nativeSessionRef.nativeSessionId,
+      checkpointId: "native-a",
+      formatVersion: 1,
+    });
+    const ready = await store.commitReady({
+      hostThreadId,
+      nativeSessionRef,
+      turnMappings: [
+        {
+          hostTurnId: hostTurnIdSchema.parse("host-a"),
+          nativeTurnRef: turn.nativeTurnRef,
+          nativeCheckpointRef: checkpoint,
+        },
+      ],
+    });
+    const aligned = await repository.alignSnapshot(ready, { turns: [turn] });
+    expect(aligned.record.turnMappings[0]).not.toHaveProperty("nativeCheckpointRef");
+    await repository.close();
+  });
   it("reuses legacy child identities and deduplicates overlapping native child materialization", async () => {
     const directory = await temporaryStoreDirectory();
     const store = new MappingStore({ directory });
@@ -476,6 +513,30 @@ describe("ExternalThreadRepository", () => {
         hostTurnId: live,
         nativeTurnRef: { nativeTurnKey: "native-b" },
       });
+      await repository.close();
+    });
+
+    it("revokes a stale checkpoint without losing a concurrently added pending Turn", async () => {
+      const { repository, record } = await readyThread("create-race-checkpoint");
+      const hostA = hostTurnIdSchema.parse("host-a");
+      const future = hostTurnIdSchema.parse("host-future");
+      const turn = snapshotTurn("native-a");
+      const read = await repository.persistTurn(
+        record,
+        hostA,
+        turn.nativeTurnRef,
+        nativeCheckpointRefSchema.parse({
+          harnessId,
+          nativeSessionId: nativeSessionRef.nativeSessionId,
+          checkpointId: "native-a",
+          formatVersion: 1,
+        }),
+      );
+      await repository.addPendingHostTurn(record.hostThreadId, future);
+      const aligned = await repository.alignSnapshot(read, { turns: [turn] });
+      expect(aligned.record.turnMappings[0]?.hostTurnId).toBe(hostA);
+      expect(aligned.record.turnMappings[0]).not.toHaveProperty("nativeCheckpointRef");
+      expect(aligned.record.pendingHostTurnIds).toEqual([future]);
       await repository.close();
     });
   });

@@ -2,7 +2,7 @@
 use std::env;
 use std::error::Error;
 use std::ffi::OsString;
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
 use std::thread;
@@ -63,13 +63,27 @@ pub(super) fn acquire_launcher_ownership(
 
     let descriptor_path = default_descriptor_path()?;
     let started = Instant::now();
+    let mut retry_delay = Duration::from_millis(100);
     while started.elapsed() < timeout {
         let descriptor = read_descriptor(&descriptor_path).ok().flatten();
         if let Some(descriptor) = &descriptor {
-            if try_activate_controlled_instance(descriptor)? {
+            if try_activate_controlled_instance_with_timeout(
+                descriptor,
+                timeout.saturating_sub(started.elapsed()),
+            )? {
                 return Ok(LauncherOwnership::Attached);
             }
-            if desktop_root_process_ids_for_installation(installation)?.is_empty() {
+            if started.elapsed() >= timeout {
+                break;
+            }
+            if desktop_root_process_ids_for_installation(installation)?.is_empty()
+                && !endpoint_ready(
+                    descriptor.control_port,
+                    timeout
+                        .saturating_sub(started.elapsed())
+                        .min(Duration::from_millis(100)),
+                )
+            {
                 stop_stale_launcher(descriptor)?;
                 let _ = remove_matching_descriptor(&descriptor_path, descriptor)?;
             }
@@ -77,7 +91,9 @@ pub(super) fn acquire_launcher_ownership(
         if let Some(guard) = try_acquire_launcher_guard(&guard_path)? {
             return Ok(LauncherOwnership::Acquired(guard));
         }
-        thread::sleep(Duration::from_millis(100));
+        let remaining = timeout.saturating_sub(started.elapsed());
+        thread::sleep(retry_delay.min(remaining));
+        retry_delay = next_retry_delay(retry_delay);
     }
     Err("another codexhost Launcher did not become attachable before timeout".into())
 }
@@ -124,49 +140,152 @@ pub(super) fn publish_runtime_descriptor(
     )?)
 }
 
-fn connect_controlled_instance(descriptor: &RuntimeDescriptor) -> std::io::Result<TcpStream> {
+fn connect_controlled_instance(
+    descriptor: &RuntimeDescriptor,
+    timeout: Duration,
+) -> std::io::Result<TcpStream> {
     TcpStream::connect_timeout(
         &format!("127.0.0.1:{}", descriptor.control_port)
             .parse()
             .expect("valid loopback socket address"),
-        Duration::from_secs(2),
+        timeout.min(Duration::from_secs(2)),
     )
 }
 
 fn send_controlled_attachment(
     mut stream: TcpStream,
     descriptor: &RuntimeDescriptor,
+    timeout: Duration,
 ) -> Result<bool, Box<dyn Error>> {
-    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
-    writeln!(stream, "ATTACH {}", descriptor.nonce)?;
-    let mut response = String::new();
-    match BufReader::new(stream).read_line(&mut response) {
-        Ok(_) => {}
-        // An orderly Controller close is an empty response, but Winsock may surface the same
-        // close as WSAECONNRESET. Both mean the controlled Desktop is not attachable yet.
-        Err(error) if error.kind() == io::ErrorKind::ConnectionReset => return Ok(false),
-        Err(error) => return Err(error.into()),
+    let started = Instant::now();
+    stream.set_write_timeout(Some(timeout.min(Duration::from_secs(2))))?;
+    if let Err(error) = writeln!(stream, "ATTACH {}", descriptor.nonce) {
+        return if transient_socket_error(&error) {
+            Ok(false)
+        } else {
+            Err(error.into())
+        };
     }
-    match response.trim_end() {
-        "ready" => Ok(true),
-        "rejected" => Err("Desktop Controller rejected the attachment nonce".into()),
-        "failed" => Err("Desktop Controller could not restore the running Desktop".into()),
-        // An empty or malformed status means the Controller was still restoring
-        // the Desktop when its socket timeout fired. The acquisition loop treats
-        // this as transient and retries rather than failing the whole launch.
-        _ => Ok(false),
+    // Read the short protocol line against one deadline. A timeout on each fragment
+    // would let a slow peer extend the launch deadline indefinitely.
+    stream.set_nonblocking(true)?;
+    let read_deadline = timeout.min(Duration::from_secs(10));
+    let read_started = Instant::now();
+    let mut response = [0_u8; 16];
+    let mut length = 0;
+    loop {
+        let remaining = timeout
+            .saturating_sub(started.elapsed())
+            .min(read_deadline.saturating_sub(read_started.elapsed()));
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        match stream.read(&mut response[length..length + 1]) {
+            Ok(0) => return Ok(false),
+            Ok(_) => {
+                length += 1;
+                if started.elapsed() >= timeout {
+                    return Ok(false);
+                }
+                if response[length - 1] == b'\n' {
+                    break;
+                }
+                if length == response.len() {
+                    return Err("Desktop Controller sent an invalid attachment response".into());
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                thread::sleep(remaining.min(Duration::from_millis(5)));
+            }
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) if transient_socket_error(&error) => return Ok(false),
+            Err(error) => return Err(error.into()),
+        }
+    }
+    match &response[..length] {
+        b"ready\n" | b"ready\r\n" => Ok(true),
+        b"busy\n" | b"busy\r\n" => Ok(false),
+        b"rejected\n" | b"rejected\r\n" => {
+            Err("Desktop Controller rejected the attachment nonce".into())
+        }
+        b"failed\n" | b"failed\r\n" => {
+            Err("Desktop Controller could not restore the running Desktop".into())
+        }
+        _ => Err("Desktop Controller sent an invalid attachment response".into()),
     }
 }
 
+fn next_retry_delay(delay: Duration) -> Duration {
+    (delay * 2).min(Duration::from_secs(1))
+}
+
+fn transient_socket_error(error: &io::Error) -> bool {
+    matches!(
+        error.kind(),
+        io::ErrorKind::ConnectionRefused
+            | io::ErrorKind::ConnectionReset
+            | io::ErrorKind::ConnectionAborted
+            | io::ErrorKind::BrokenPipe
+            | io::ErrorKind::NotConnected
+            | io::ErrorKind::TimedOut
+            | io::ErrorKind::WouldBlock
+            | io::ErrorKind::Interrupted
+            | io::ErrorKind::UnexpectedEof
+    )
+}
+
+pub(super) fn try_activate_controlled_instance_with_timeout(
+    descriptor: &RuntimeDescriptor,
+    timeout: Duration,
+) -> Result<bool, Box<dyn Error>> {
+    if timeout.is_zero() {
+        return Ok(false);
+    }
+    let started = Instant::now();
+    let stream = match connect_controlled_instance(descriptor, timeout) {
+        Ok(stream) => stream,
+        Err(error) if transient_socket_error(&error) => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    let remaining = timeout.saturating_sub(started.elapsed());
+    if remaining.is_zero() {
+        return Ok(false);
+    }
+    send_controlled_attachment(stream, descriptor, remaining)
+}
+
+#[cfg(test)]
 pub(super) fn try_activate_controlled_instance(
     descriptor: &RuntimeDescriptor,
 ) -> Result<bool, Box<dyn Error>> {
-    let stream = match connect_controlled_instance(descriptor) {
-        Ok(stream) => stream,
-        Err(_) => return Ok(false),
-    };
-    send_controlled_attachment(stream, descriptor)
+    try_activate_controlled_instance_with_timeout(descriptor, Duration::from_secs(12))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{next_retry_delay, transient_socket_error};
+    use std::io;
+    use std::time::Duration;
+
+    #[test]
+    fn retry_delay_doubles_and_caps_at_one_second() {
+        let delays = [100, 200, 400, 800, 1_000, 1_000];
+        let mut delay = Duration::from_millis(delays[0]);
+        for expected in delays.into_iter().skip(1) {
+            delay = next_retry_delay(delay);
+            assert_eq!(delay, Duration::from_millis(expected));
+        }
+    }
+
+    #[test]
+    fn permission_failure_is_not_a_transient_socket_error() {
+        assert!(!transient_socket_error(&io::Error::from(
+            io::ErrorKind::PermissionDenied
+        )));
+        assert!(transient_socket_error(&io::Error::from(
+            io::ErrorKind::TimedOut
+        )));
+    }
 }
 
 #[cfg(target_os = "windows")]

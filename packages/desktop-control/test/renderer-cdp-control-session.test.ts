@@ -117,6 +117,104 @@ describe("Renderer CDP Control Session", () => {
     session.close();
   });
 
+  it("accepts Agent reorder without re-injecting and refreshes a changed explicit catalog", async () => {
+    const binding = readyBinding();
+    binding.enabledAgents = ["pi", "codex"];
+    const first = rendererClient(binding);
+    const replacement = rendererClient();
+    const connect = vi.fn().mockResolvedValueOnce(first).mockResolvedValueOnce(replacement);
+    const session = await createRendererCdpControlSession({
+      rendererCdpEndpoint: "http://127.0.0.1:43123",
+      rendererSource: "production renderer",
+      enabledAgents: ["codex", "pi"],
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+      operations: {
+        listTargets: vi.fn(async () => [target("page-1")]),
+        connect,
+        installDraftPrewarmPolicy: vi.fn(async () => ({
+          state: "ready" as const,
+          reason: "owned-request-bridge" as const,
+        })),
+      },
+    });
+
+    await expect(session.ensureInstalled()).resolves.toMatchObject({
+      binding: { enabledAgents: ["pi", "codex"] },
+    });
+    expect(connect).toHaveBeenCalledOnce();
+    expect(first.commands.filter(({ method }) => method === "Runtime.evaluate")).toHaveLength(1);
+
+    binding.enabledAgents = ["codex", "other"];
+    await expect(session.ensureInstalled()).resolves.toMatchObject({
+      binding: { enabledAgents: ["codex", "pi"] },
+    });
+    expect(connect).toHaveBeenCalledTimes(2);
+    expect(first.close).toHaveBeenCalledOnce();
+    session.close();
+  });
+
+  it("keeps the production Session while the Renderer loads or reorders plugin Agents", async () => {
+    const binding = readyBinding();
+    binding.enabledAgents = ["codex"];
+    const client = rendererClient(binding);
+    const connect = vi.fn(async () => client);
+    const session = await createRendererCdpControlSession({
+      rendererCdpEndpoint: "http://127.0.0.1:43123",
+      rendererSource: "production renderer",
+      enabledAgents: ["codex"],
+      pollIntervalMs: 1,
+      timeoutMs: 100,
+      operations: {
+        listTargets: vi.fn(async () => [target("page-1")]),
+        connect,
+        installDraftPrewarmPolicy: vi.fn(async () => ({
+          state: "ready" as const,
+          reason: "owned-request-bridge" as const,
+        })),
+      },
+    });
+
+    binding.enabledAgents = ["pi", "codex"];
+    await expect(session.ensureInstalled()).resolves.toMatchObject({
+      binding: { enabledAgents: ["pi", "codex"] },
+    });
+    binding.enabledAgents = ["codex", "pi"];
+    await session.ensureInstalled();
+    expect(connect).toHaveBeenCalledOnce();
+    expect(client.commands.filter(({ method }) => method === "Runtime.evaluate")).toHaveLength(1);
+    session.close();
+  });
+
+  it.each([{ enabledAgents: ["pi"] }, { enabledAgents: ["codex", "pi", "pi"] }])(
+    "rejects a production catalog without unique built-in Codex identity: $enabledAgents",
+    async ({ enabledAgents }) => {
+      const client = rendererClient({
+        version: 2,
+        enabledAgents,
+        adapter: { state: "ready", reason: "ready" },
+      });
+      await expect(
+        createRendererCdpControlSession({
+          rendererCdpEndpoint: "http://127.0.0.1:43123",
+          rendererSource: "production renderer",
+          enabledAgents: ["codex"],
+          pollIntervalMs: 1,
+          timeoutMs: 100,
+          operations: {
+            listTargets: vi.fn(async () => [target("page-1")]),
+            connect: vi.fn(async () => client),
+            installDraftPrewarmPolicy: vi.fn(async () => ({
+              state: "ready" as const,
+              reason: "owned-request-bridge" as const,
+            })),
+          },
+        }),
+      ).rejects.toThrow("Production Renderer binding returned an invalid status");
+      expect(client.close).toHaveBeenCalledOnce();
+    },
+  );
+
   it("fails closed when the injected Adapter is unsupported", async () => {
     const client = rendererClient({
       version: 2,

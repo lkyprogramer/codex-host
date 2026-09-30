@@ -96,6 +96,7 @@ const { outputFiles } = await build({
           inspectHarness: async () => inspection,
           inspectHarnessCommands: async (input) => {
             globalThis.commandCatalogRequests.push(input);
+            if (input.cwd && globalThis.holdLiveCatalog) await new Promise(() => {});
             if (kiro) return KIRO_COMMAND_CATALOG;
             return { commands: globalThis.startupCommands ?? [{
               id: "pi.compact", invocation: "/compact", label: "Compact", argumentMode: "text",
@@ -163,15 +164,11 @@ test("a new conversation shows Harness commands but disables compact before a Th
   await expect(trigger).toBeVisible();
   await expect(trigger).toBeEnabled();
   await trigger.click();
-  const menu = page.locator("[data-codexhost-harness-command-menu]");
+  const menu = page.locator("[data-codexhost-delegation-mention-menu]");
   await expect(menu).toBeVisible();
-  const compact = menu.locator('[data-command-id="pi.compact"]');
-  await expect(compact).toBeDisabled();
-  await expect(compact).toHaveAttribute(
-    "title",
-    "Start a conversation before running this command",
-  );
-  await expect(page.locator("[data-codex-composer]")).toBeEmpty();
+  await expect(menu.locator('[aria-disabled="true"] [data-command-id="pi.compact"]')).toBeVisible();
+  await expect(menu).toContainText("Start a conversation before running this command");
+  await expect(page.locator("[data-codex-composer]")).toHaveText("#");
   expect(await page.evaluate(() => Reflect.get(globalThis, "threadCommandRequests"))).toEqual([]);
 });
 
@@ -187,15 +184,21 @@ test("a DSH draft offers goal and plan but explains why compact cannot run", asy
   });
   await page.addScriptTag({ content: browserBundle });
   const trigger = page.locator("[data-codexhost-harness-command-control] > button");
-  const menu = page.locator("[data-codexhost-harness-command-menu]");
+  const menu = page.locator("[data-codexhost-delegation-mention-menu]");
   await trigger.click();
-  await expect(menu.locator('[role="menuitem"]')).toHaveCount(3);
-  await expect(menu.locator('[data-command-id="dsh.compact"]')).toBeDisabled();
+  await expect(menu.locator("[data-command-id]")).toHaveCount(3);
+  await expect(
+    menu.locator('[aria-disabled="true"] [data-command-id="dsh.compact"]'),
+  ).toBeVisible();
   await expect(menu).toContainText("Start a conversation before running this command");
+  await page.keyboard.press("Escape");
   for (const [id, invocation] of [
     ["dsh.goal", "/dsh-goal"],
     ["dsh.plan", "/plan"],
   ] as const) {
+    await page.locator("[data-codex-composer]").evaluate((editor) => {
+      editor.textContent = "";
+    });
     await trigger.click();
     await menu.locator(`[data-command-id="${id}"]`).click();
     await expect(page.locator("[data-codex-composer]")).toContainText(invocation);
@@ -204,6 +207,135 @@ test("a DSH draft offers goal and plan but explains why compact cannot run", asy
   expect(
     await page.evaluate(() => Reflect.get(globalThis, "commandCatalogRequests")),
   ).toContainEqual({ harnessId: "deepseek-harness" });
+});
+
+test("ambiguous command chips keep the draft and explain the blocked submit", async ({ page }) => {
+  await page.setContent("<!doctype html><body></body>");
+  await page.addScriptTag({ content: browserBundle });
+  await expect(page.locator("[data-codexhost-model-control]")).toBeVisible();
+  const result = await page.evaluate(() => {
+    const editor = document.querySelector<HTMLElement>("[data-codex-composer]");
+    const send = document.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (!editor || !send) throw new Error("Composer fixture missing");
+    editor.textContent =
+      "[@plan](subagent://codexhost-command.pi%3Aplan) " +
+      "[@review](subagent://codexhost-command.pi%3Areview) context";
+    const unchanged = editor.textContent;
+    const accepted = send.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    return { accepted, unchanged, after: editor.textContent };
+  });
+  expect(result.accepted).toBe(false);
+  expect(result.after).toBe(result.unchanged);
+  await expect(page.locator("[data-codexhost-command-chip-error]")).toContainText(
+    "Only one command or skill chip",
+  );
+});
+
+test("command examples inside code DOM do not block submit or claim a Harness", async ({
+  page,
+}) => {
+  await page.setContent("<!doctype html><body></body>");
+  await page.addScriptTag({ content: browserBundle });
+  await expect(page.locator("[data-codexhost-model-control]")).toBeVisible();
+  for (const html of [
+    "<pre><code>[@one](subagent://codexhost-command.pi%3Aplan) [@two](subagent://codexhost-command.pi%3Areview)</code></pre>",
+    "<div>```md</div><div>[@one](subagent://codexhost-command.pi%3Aplan) [@two](subagent://codexhost-command.pi%3Areview)</div><div>````</div>",
+    '<code><span agent-mention-path="subagent://codexhost-command.omp%3Aplan">example</span></code><p>ordinary text</p>',
+  ]) {
+    await page.evaluate((source) => {
+      const editor = document.querySelector<HTMLElement>("[data-codex-composer]");
+      const send = document.querySelector<HTMLButtonElement>('button[type="submit"]');
+      if (!editor || !send) throw new Error("Composer fixture missing");
+      editor.innerHTML = source;
+      send.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+    }, html);
+    await expect(page.locator("[data-codexhost-command-chip-error]")).toHaveCount(0);
+  }
+});
+
+test("mixed command and delegation chips keep the draft on submit", async ({ page }) => {
+  await page.setContent("<!doctype html><body></body>");
+  await page.addScriptTag({ content: browserBundle });
+  await expect(page.locator("[data-codexhost-model-control]")).toBeVisible();
+  const result = await page.evaluate(() => {
+    const editor = document.querySelector<HTMLElement>("[data-codex-composer]");
+    const send = document.querySelector<HTMLButtonElement>('button[type="submit"]');
+    if (!editor || !send) throw new Error("Composer fixture missing");
+    editor.textContent =
+      "[@plan](subagent://codexhost-command.pi%3Aplan) " +
+      "[@Claude](subagent://codexhost.claude-code) explain";
+    const unchanged = editor.textContent;
+    const accepted = send.dispatchEvent(
+      new MouseEvent("click", { bubbles: true, cancelable: true }),
+    );
+    return { accepted, unchanged, after: editor.textContent };
+  });
+  expect(result.accepted).toBe(false);
+  expect(result.after).toBe(result.unchanged);
+  await expect(page.locator("[data-codexhost-command-chip-error]")).toContainText(
+    "Command and delegation chips cannot be sent",
+  );
+});
+
+test("draft command inspection follows workspace changes and clears stale cwd", async ({
+  page,
+}) => {
+  await page.setContent("<!doctype html><body></body>");
+  await page.addScriptTag({ content: browserBundle });
+  await expect(page.locator("[data-codexhost-harness-command-control]")).toBeVisible();
+  for (const cwd of ["/tmp/project-a", "/tmp/project-b", null]) {
+    const before = await page.evaluate(
+      () => Reflect.get(globalThis, "commandCatalogRequests").length,
+    );
+    await page.evaluate((nextCwd) => {
+      window.dispatchEvent(
+        new CustomEvent("codexhost:draft-workspace", {
+          detail: { hostId: "local", cwd: nextCwd },
+        }),
+      );
+    }, cwd);
+    await expect
+      .poll(() => page.evaluate(() => Reflect.get(globalThis, "commandCatalogRequests").length))
+      .toBeGreaterThan(before);
+    await expect
+      .poll(() =>
+        page.evaluate(() => {
+          const requests = Reflect.get(globalThis, "commandCatalogRequests");
+          return requests.at(-1)?.cwd ?? null;
+        }),
+      )
+      .toBe(cwd);
+  }
+});
+
+test("draft shows builtin commands while its live workspace catalog is pending", async ({
+  page,
+}) => {
+  await page.setContent("<!doctype html><body></body>");
+  await page.evaluate(() => {
+    Reflect.set(globalThis, "holdLiveCatalog", true);
+    Reflect.set(globalThis, "__codexhostDraftWorkspacesV1", { local: "/tmp/project" });
+  });
+  await page.addScriptTag({ content: browserBundle });
+  const trigger = page.locator("[data-codexhost-harness-command-control] button");
+  await expect(trigger).toBeVisible();
+  await trigger.click();
+  const menu = page.locator("[data-codexhost-delegation-mention-menu]");
+  await expect(menu.locator('[data-command-id="pi.compact"]')).toBeVisible();
+  await expect(menu).toContainText("Loading workspace commands and skills");
+  await expect
+    .poll(() =>
+      page.evaluate(() =>
+        Reflect.get(globalThis, "commandCatalogRequests").some(
+          (request: { cwd?: string }) => request.cwd === "/tmp/project",
+        ),
+      ),
+    )
+    .toBe(true);
+  const requests = await page.evaluate(() => Reflect.get(globalThis, "commandCatalogRequests"));
+  expect(requests[0]?.cwd).toBeUndefined();
 });
 
 test("a native Codex draft hides the external Harness command button", async ({ page }) => {

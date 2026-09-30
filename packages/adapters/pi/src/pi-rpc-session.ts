@@ -111,6 +111,13 @@ export type PiTurnEvent =
 export interface PiTurnResult {
   text: string;
   cancelled: boolean;
+  handled?: boolean;
+}
+
+export interface PiNativeCommand {
+  name: string;
+  description?: string;
+  source: "extension" | "prompt" | "skill";
 }
 
 export type PiAutonomousTurnResult =
@@ -151,6 +158,7 @@ export class PiRpcUnsupportedCommandError extends Error {
 
 export interface PiRpcSessionOptions {
   cwd: string;
+  noSession?: boolean;
   command?: string;
   environment?: NodeJS.ProcessEnv;
   sessionFile?: string;
@@ -167,6 +175,7 @@ export interface PiRpcSessionOptions {
 
 export interface PiRpcProcessOptions {
   cwd: string;
+  noSession?: boolean;
   command?: string;
   environment: NodeJS.ProcessEnv;
   sessionFile?: string;
@@ -203,6 +212,7 @@ interface ManualCompaction {
 
 interface ActiveTurn {
   origin: "requested" | "autonomous";
+  handled?: boolean;
   autonomousEvents: PiTurnEvent[] | null;
   nativeTurnKey: string | null;
   nativeCancellationObserved: boolean;
@@ -376,6 +386,9 @@ export function piRpcProcessCommand(
   if (options.sessionFile && options.forkSessionFile) {
     throw new Error("Pi RPC cannot combine Session resume and Fork startup");
   }
+  if (options.noSession && (options.sessionFile || options.forkSessionFile)) {
+    throw new Error("Pi RPC cannot combine ephemeral and persisted Session startup");
+  }
   if (options.model && (options.sessionFile || options.forkSessionFile)) {
     throw new Error("Pi RPC cannot combine a startup Model with Session restore or Fork");
   }
@@ -401,7 +414,9 @@ export function piRpcProcessCommand(
     ? ["--fork", options.forkSessionFile]
     : options.sessionFile
       ? ["--session", options.sessionFile]
-      : [];
+      : options.noSession
+        ? ["--no-session"]
+        : [];
   const startupModel = options.emptySessionConfiguration?.model ?? options.model;
   const modelArguments = startupModel
     ? ["--provider", startupModel.provider, "--model", startupModel.id]
@@ -475,7 +490,8 @@ export class PiRpcSession {
     }
     this.#options = {
       commandTimeoutMs: 30_000,
-      cancelTimeoutMs: 2_000,
+      // Abort acknowledgement is not settlement: native tools may still be unwinding.
+      cancelTimeoutMs: 30_000,
       closeTimeoutMs: 2_000,
       ...options,
     };
@@ -500,6 +516,7 @@ export class PiRpcSession {
     const { child, tree } = this.#processAdapter.spawn(
       {
         cwd: this.#options.cwd,
+        ...(this.#options.noSession ? { noSession: true } : {}),
         ...(this.#options.command ? { command: this.#options.command } : {}),
         environment: withNodeRuntimeOnPath({
           ...process.env,
@@ -594,6 +611,32 @@ export class PiRpcSession {
       if (error instanceof PiRpcFaultError) this.#fail(error);
       throw error;
     }
+  }
+
+  async getCommands(): Promise<PiNativeCommand[]> {
+    const response = await this.#send("get_commands", {});
+    const data = response.data;
+    if (!isRecord(data) || !Array.isArray(data.commands)) {
+      throw new PiRpcFaultError("protocolError", "Pi RPC command catalog is malformed");
+    }
+    return data.commands.map((value: unknown) => {
+      if (
+        !isRecord(value) ||
+        typeof value.name !== "string" ||
+        value.name.length === 0 ||
+        (value.source !== "extension" && value.source !== "prompt" && value.source !== "skill")
+      ) {
+        throw new PiRpcFaultError(
+          "protocolError",
+          "Pi RPC command catalog contains an invalid command",
+        );
+      }
+      return {
+        name: value.name,
+        source: value.source,
+        ...(typeof value.description === "string" ? { description: value.description } : {}),
+      };
+    });
   }
 
   async compact(
@@ -760,7 +803,24 @@ export class PiRpcSession {
       };
     });
     try {
-      await this.#send("prompt", { message: text });
+      const response = await this.#send("prompt", { message: text });
+      const disposition = isRecord(response.data) ? response.data.disposition : undefined;
+      const active = this.#activeTurn as ActiveTurn | null;
+      if (disposition === "handled" && active?.origin === "requested") {
+        active.handled = true;
+        const stateResponse = await this.#send("get_state", {});
+        this.#state = parseSessionState(stateResponse);
+        if ((this.#activeTurn as ActiveTurn | null) === active) {
+          if (parseSessionStreaming(stateResponse)) {
+            // The extension started its own run. Use its normal settled
+            // events/history rather than treating the command as local-only.
+            active.handled = false;
+          } else {
+            active.settlement = "confirmed";
+            this.#finishSettledTurn(active);
+          }
+        }
+      }
     } catch (error) {
       this.#rejectActiveTurn(error instanceof Error ? error : new Error(message(error)));
     }
@@ -1373,9 +1433,15 @@ export class PiRpcSession {
       return;
     }
     if (active.cancellation === "accepted") {
-      active.resolve({ text: active.text, cancelled: true });
+      active.resolve({
+        text: active.text,
+        cancelled: true,
+        ...(active.handled ? { handled: true } : {}),
+      });
     } else if (active.failure) {
       active.reject(active.failure);
+    } else if (active.handled) {
+      active.resolve({ text: active.text, cancelled: false, handled: true });
     } else if (active.text.trim().length === 0 && !active.sawTool) {
       active.reject(new Error("Pi RPC settled without displayable output"));
     } else {

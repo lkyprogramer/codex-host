@@ -1,5 +1,7 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { EventEmitter } from "node:events";
+import { chmodSync, existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { PassThrough } from "node:stream";
 
@@ -72,6 +74,11 @@ function clientWith(overrides: Record<string, unknown> = {}): OpencodeClient {
   } as unknown as OpencodeClient;
 }
 
+function requiredCwd(cwd: string | undefined): string {
+  if (!cwd) throw new Error("Managed Server did not receive a startup directory");
+  return cwd;
+}
+
 describe("OpenCode SDK transport", () => {
   it("keeps default permissions native and scopes unattended permissions to the supplied Server env", () => {
     const input = {
@@ -112,7 +119,12 @@ describe("OpenCode SDK transport", () => {
       directory?: string;
       headers: Record<string, string>;
     }> = [];
-    const spawnCalls: Array<{ command: string; args: string[]; env: NodeJS.ProcessEnv }> = [];
+    const spawnCalls: Array<{
+      command: string;
+      args: string[];
+      cwd: string;
+      env: NodeJS.ProcessEnv;
+    }> = [];
     const dependencies: OpenCodeServerDependencies = {
       createClient: (options) => {
         clientOptions.push(options);
@@ -120,7 +132,7 @@ describe("OpenCode SDK transport", () => {
       },
       randomPassword: () => "synthetic-password",
       spawn: (command, args, options) => {
-        spawnCalls.push({ command, args, env: options.env });
+        spawnCalls.push({ command, args, cwd: options.cwd, env: options.env });
         const child = new FakeChild();
         child.pid += children.length;
         children.push(child);
@@ -140,7 +152,9 @@ describe("OpenCode SDK transport", () => {
 
     await connection.client("/first");
     expect(spawnCalls).toHaveLength(1);
-    expect(spawnCalls[0]).toMatchObject({
+    const firstSpawn = spawnCalls[0];
+    if (!firstSpawn) throw new Error("Managed Server did not spawn");
+    expect(firstSpawn).toMatchObject({
       command: process.execPath,
       args: ["serve", "--hostname=127.0.0.1", "--port=0"],
       env: {
@@ -148,6 +162,9 @@ describe("OpenCode SDK transport", () => {
         OPENCODE_SERVER_PASSWORD: "synthetic-password",
       },
     });
+    expect(path.isAbsolute(requiredCwd(firstSpawn.cwd))).toBe(true);
+    expect(requiredCwd(firstSpawn.cwd)).not.toBe("/first");
+    expect(existsSync(requiredCwd(firstSpawn.cwd))).toBe(true);
     expect(clientOptions.at(-1)).toMatchObject({
       baseUrl: "http://127.0.0.1:4001",
       directory: "/first",
@@ -156,11 +173,19 @@ describe("OpenCode SDK transport", () => {
       },
     });
 
+    await connection.client("/second");
+    expect(spawnCalls).toHaveLength(1);
+    expect(clientOptions.at(-1)).toMatchObject({ directory: "/second" });
+
     const first = children[0] as FakeChild;
     first.exitCode = 1;
     first.emit("exit", 1, null);
     await connection.client("/second");
     expect(spawnCalls).toHaveLength(2);
+    const secondSpawn = spawnCalls[1];
+    if (!secondSpawn) throw new Error("Managed Server did not restart");
+    expect(existsSync(requiredCwd(firstSpawn.cwd))).toBe(false);
+    expect(requiredCwd(secondSpawn.cwd)).not.toBe(requiredCwd(firstSpawn.cwd));
     expect(clientOptions.at(-1)).toMatchObject({
       baseUrl: "http://127.0.0.1:4002",
       directory: "/second",
@@ -169,16 +194,60 @@ describe("OpenCode SDK transport", () => {
     const second = children[1] as FakeChild;
     second.exitCode = 0;
     await connection.close();
+    expect(existsSync(requiredCwd(secondSpawn.cwd))).toBe(false);
+  });
+
+  it("starts outside a read-only project and forwards even a missing project directory", async () => {
+    const project = mkdtempSync(path.join(tmpdir(), "codexhost-opencode-project-"));
+    const missingProject = path.join(project, "missing");
+    const clientDirectories: Array<string | undefined> = [];
+    const child = new FakeChild();
+    let serverCwd: string | undefined;
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath },
+      {
+        createClient: (options) => {
+          clientDirectories.push(options.directory);
+          return clientWith();
+        },
+        randomPassword: () => "synthetic-password",
+        spawn: (_command, _args, options) => {
+          serverCwd = options.cwd;
+          queueMicrotask(() => {
+            child.stdout.write("opencode server listening on http://127.0.0.1:4013\n");
+          });
+          return owned(child);
+        },
+        sleep: async () => undefined,
+      },
+    );
+    try {
+      chmodSync(project, 0o555);
+      await connection.client(project);
+      await connection.client(missingProject);
+      expect(serverCwd).toBeDefined();
+      expect(serverCwd).not.toBe(project);
+      expect(serverCwd).not.toBe(missingProject);
+      expect(existsSync(requiredCwd(serverCwd))).toBe(true);
+      expect(clientDirectories).toEqual([undefined, project, missingProject]);
+    } finally {
+      await connection.close();
+      chmodSync(project, 0o755);
+      rmSync(project, { recursive: true });
+    }
+    expect(existsSync(requiredCwd(serverCwd))).toBe(false);
   });
 
   it("allows a later retry after startup fails before a child is available", async () => {
     let attempts = 0;
+    const startupDirectories: string[] = [];
     const child = new FakeChild();
     const dependencies: OpenCodeServerDependencies = {
       createClient: () => clientWith(),
       randomPassword: () => "synthetic-password",
-      spawn: () => {
+      spawn: (_command, _args, options) => {
         attempts += 1;
+        startupDirectories.push(options.cwd);
         if (attempts === 1) throw Object.assign(new Error("missing"), { code: "ENOENT" });
         queueMicrotask(() => {
           child.stdout.write("opencode server listening on http://127.0.0.1:4010\n");
@@ -193,14 +262,18 @@ describe("OpenCode SDK transport", () => {
     );
 
     await expect(connection.client()).rejects.toMatchObject({ code: "notInstalled" });
+    expect(existsSync(requiredCwd(startupDirectories[0]))).toBe(false);
     await expect(connection.client()).resolves.toBeDefined();
     expect(attempts).toBe(2);
+    expect(startupDirectories[1]).not.toBe(startupDirectories[0]);
     child.exitCode = 0;
     await connection.close();
+    expect(existsSync(requiredCwd(startupDirectories[1]))).toBe(false);
   });
 
   it("bounds a stalled Server health check and releases its managed child", async () => {
     const child = new FakeChild();
+    let serverCwd: string | undefined;
     const connection = new OpenCodeServerConnection(
       {
         command: process.execPath,
@@ -212,7 +285,8 @@ describe("OpenCode SDK transport", () => {
         createClient: () =>
           clientWith({ global: { health: async () => await new Promise<never>(() => undefined) } }),
         randomPassword: () => "synthetic-password",
-        spawn: () => {
+        spawn: (_command, _args, options) => {
+          serverCwd = options.cwd;
           queueMicrotask(() => {
             child.stdout.write("opencode server listening on http://127.0.0.1:4011\n");
           });
@@ -227,6 +301,7 @@ describe("OpenCode SDK transport", () => {
       message: expect.stringMatching(/health check timed out/),
     });
     await expect(connection.close()).resolves.toBeUndefined();
+    expect(existsSync(requiredCwd(serverCwd))).toBe(false);
   });
 
   it.skipIf(process.platform === "win32")(
@@ -275,15 +350,18 @@ describe("OpenCode SDK transport", () => {
 
   it("keeps Server admission closed while its process tree cannot be released", async () => {
     const child = new FakeChild();
+    let serverCwd: string | undefined;
+    let failures = 0;
     const release = vi.fn(async () => {
-      throw Object.assign(new Error("permission denied"), { code: "EPERM" });
+      if (failures++ < 2) throw Object.assign(new Error("permission denied"), { code: "EPERM" });
     });
     const connection = new OpenCodeServerConnection(
       { command: process.execPath, environment: { PATH: process.env.PATH }, closeTimeoutMs: 20 },
       {
         createClient: () => clientWith(),
         randomPassword: () => "synthetic-password",
-        spawn: () => {
+        spawn: (_command, _args, options) => {
+          serverCwd = options.cwd;
           queueMicrotask(() => {
             child.stdout.write("opencode server listening on http://127.0.0.1:4012\n");
           });
@@ -295,9 +373,12 @@ describe("OpenCode SDK transport", () => {
     await connection.client();
     await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
     await expect(connection.client()).rejects.toMatchObject({ code: "unavailable" });
+    expect(existsSync(requiredCwd(serverCwd))).toBe(true);
     // The owned tree is asked again rather than a bare pid being guessed at.
     await expect(connection.close()).rejects.toMatchObject({ code: "EPERM" });
     expect(release).toHaveBeenCalledTimes(2);
+    await expect(connection.close()).resolves.toBeUndefined();
+    expect(existsSync(requiredCwd(serverCwd))).toBe(false);
   });
 
   it("checks SDK result errors while accepting the prompt_async 204 payload", async () => {
@@ -319,6 +400,59 @@ describe("OpenCode SDK transport", () => {
       expect.not.objectContaining({ messageID: expect.anything() }),
     );
     await expect(transport.promptAsync(input)).rejects.toMatchObject({ code: "unavailable" });
+  });
+
+  it("lists native metadata and executes slash commands through the dedicated SDK endpoint", async () => {
+    const list = vi.fn().mockResolvedValue({
+      data: [{ name: "review", source: "command", template: "Review", hints: [] }],
+      error: undefined,
+    });
+    const command = vi.fn().mockResolvedValue({
+      data: {
+        info: { id: "assistant-1", parentID: "user-1", sessionID: "session-1", role: "assistant" },
+        parts: [],
+      },
+      error: undefined,
+    });
+    const transport = new SdkOpenCodeTransport(
+      {
+        stderrTail: "",
+        client: async () => clientWith({ command: { list }, session: { command } }),
+        close: async () => undefined,
+      },
+      "/synthetic",
+      { commandTimeoutMs: 100 },
+    );
+    await expect(transport.commands()).resolves.toMatchObject([{ name: "review" }]);
+    expect(list).toHaveBeenCalledWith({ directory: "/synthetic" }, {});
+    await expect(
+      transport.executeCommand({
+        sessionID: "session-1",
+        command: "review",
+        arguments: " security ",
+        model: { providerID: "provider", modelID: "model" },
+      }),
+    ).resolves.toMatchObject({ info: { id: "assistant-1" } });
+    expect(command).toHaveBeenCalledWith(
+      {
+        sessionID: "session-1",
+        command: "review",
+        arguments: " security ",
+        model: "provider/model",
+      },
+      {},
+    );
+    const cancelled = new AbortController();
+    cancelled.abort();
+    await expect(
+      transport.executeCommand({
+        sessionID: "session-1",
+        command: "review",
+        arguments: "",
+        signal: cancelled.signal,
+      }),
+    ).rejects.toMatchObject({ code: "invalidState" });
+    expect(command).toHaveBeenCalledOnce();
   });
 
   it("updates Session metadata through the SDK", async () => {

@@ -1,10 +1,18 @@
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import {
   CLAUDE_DEFAULT_MODEL_REF,
   decodeClaudeModelRef,
   encodeClaudeModelRef,
+  mergeClaudeModelPickerOptions,
   normalizeClaudeModelCatalog,
+  parseClaudeModelPickerSettings,
+  readClaudeUserModelPicker,
+  resolveClaudeConfigDirectory,
 } from "../src/model-catalog.js";
 
 function snapshot(models: unknown) {
@@ -143,5 +151,99 @@ describe("Claude Code runtime Model catalog", () => {
         canSelectPermissionMode: false,
       }),
     ).toThrow("unavailable");
+  });
+});
+
+describe("Claude Code user modelPicker", () => {
+  const sdkModels = [
+    { value: "default", displayName: "Default" },
+    { value: "sonnet", displayName: "Sonnet" },
+    { value: "opus", displayName: "Opus" },
+  ];
+
+  it("appends valid options, deduplicates native values, and preserves picker refs", () => {
+    const settings = parseClaudeModelPickerSettings({
+      options: [
+        { model: " gateway/model[1m] ", label: "Gateway", behavesAs: "sonnet" },
+        { model: "gateway/model[1m]", label: "Duplicate" },
+        { model: "sonnet", label: "Duplicate SDK model" },
+        { model: " ", label: "Invalid" },
+      ],
+    });
+    const merged = mergeClaudeModelPickerOptions(sdkModels, settings);
+    expect(merged).toEqual([
+      ...sdkModels,
+      { value: "gateway/model[1m]", displayName: "Gateway", resolvedModel: "sonnet" },
+    ]);
+    const catalog = normalizeClaudeModelCatalog(snapshot(merged)).catalog;
+    const custom = catalog.models.find(({ label }) => label === "Gateway");
+    expect(custom?.resolvedModelLabel).toBe("sonnet");
+    expect(custom && decodeClaudeModelRef(custom.ref)).toBe("gateway/model[1m]");
+  });
+
+  it("replaces built-ins while retaining default and the native model value", () => {
+    const settings = parseClaudeModelPickerSettings({
+      replaceBuiltInOptions: true,
+      options: [{ model: "gateway/model", label: "Gateway" }],
+    });
+    const catalog = normalizeClaudeModelCatalog(
+      snapshot(mergeClaudeModelPickerOptions(sdkModels, settings)),
+    ).catalog;
+    expect(catalog.models.map(({ ref }) => decodeClaudeModelRef(ref))).toEqual([
+      undefined,
+      "gateway/model",
+    ]);
+  });
+
+  it("treats an explicit empty list as replacement and leaves SDK models for invalid settings", () => {
+    const empty = parseClaudeModelPickerSettings({
+      replaceBuiltInOptions: true,
+      options: [],
+    });
+    expect(mergeClaudeModelPickerOptions(sdkModels, empty)).toEqual([sdkModels[0]]);
+    for (const value of [
+      { replaceBuiltInOptions: true, options: [{ label: "missing model" }, null] },
+      { replaceBuiltInOptions: true, options: [{ model: "x".repeat(400) }] },
+      { replaceBuiltInOptions: true, options: "invalid" },
+      { replaceBuiltInOptions: "invalid", options: [{ model: "gateway" }] },
+      {},
+    ]) {
+      expect(
+        mergeClaudeModelPickerOptions(sdkModels, parseClaudeModelPickerSettings(value)),
+      ).toEqual(sdkModels);
+    }
+  });
+
+  it("reads only a temporary custom config directory and ignores missing or malformed files", async () => {
+    const configDirectory = await mkdtemp(path.join(os.tmpdir(), "codexhost-claude-models-"));
+    const environment = { CLAUDE_CONFIG_DIR: configDirectory };
+    try {
+      expect(resolveClaudeConfigDirectory(environment)).toBe(path.resolve(configDirectory));
+      await expect(readClaudeUserModelPicker(environment)).resolves.toBeUndefined();
+      await writeFile(path.join(configDirectory, "settings.json"), "{invalid-json");
+      await expect(readClaudeUserModelPicker(environment)).resolves.toBeUndefined();
+      await writeFile(
+        path.join(configDirectory, "settings.json"),
+        JSON.stringify({
+          modelPicker: {
+            replaceBuiltInOptions: true,
+            options: [
+              { model: "gateway/model", label: "Gateway" },
+              { model: "gateway/model", label: "Duplicate" },
+              { model: "  " },
+            ],
+          },
+          apiKey: "never-projected",
+        }),
+      );
+      const settings = await readClaudeUserModelPicker(environment);
+      expect(settings).toEqual({
+        replaceBuiltInOptions: true,
+        options: [{ model: "gateway/model", label: "Gateway" }],
+      });
+      expect(JSON.stringify(settings)).not.toContain("never-projected");
+    } finally {
+      await rm(configDirectory, { recursive: true, force: true });
+    }
   });
 });

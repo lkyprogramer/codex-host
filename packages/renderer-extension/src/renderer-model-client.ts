@@ -1,6 +1,10 @@
 import {
   harnessAccountListResultSchema,
   type HarnessAccountListResult,
+  LOADED_SESSIONS_METHOD,
+  loadedSessionsParamsSchema,
+  loadedSessionsResultSchema,
+  type LoadedSessionsResult,
   codexAccountUsageParamsSchema,
   codexAccountUsageResultSchema,
   codexAccountResetCreditConsumeParamsSchema,
@@ -161,6 +165,7 @@ export interface RendererModelClient extends Partial<RendererSessionImportClient
   currentHostId?(): string | null;
   listHarnessPlugins?(): Promise<HarnessPluginListResult>;
   clientForHost?(hostId: string): RendererModelClient | null;
+  listLoadedSessions?(): Promise<LoadedSessionsResult>;
   forkThread(input: ExternalThreadForkParams): Promise<ExternalThreadForkResult>;
   inspectHarness(input: HarnessInspectParams): Promise<HarnessInspection>;
   openHarnessWebUi?(input: HarnessWebUiOpenParams): Promise<void>;
@@ -324,6 +329,11 @@ export function createRendererModelClient(
   };
 
   return Object.freeze({
+    async listLoadedSessions(): Promise<LoadedSessionsResult> {
+      return loadedSessionsResultSchema.parse(
+        await manager.sendRequest(LOADED_SESSIONS_METHOD, loadedSessionsParamsSchema.parse({})),
+      );
+    },
     ...createRendererSessionImportClient(async (method, params) =>
       manager.sendRequest(method, params),
     ),

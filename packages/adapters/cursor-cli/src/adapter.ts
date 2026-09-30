@@ -14,6 +14,8 @@ import {
   type HarnessModelRef,
   type InspectHarnessInput,
   type OpenSessionInput,
+  type ForkSessionInput,
+  type RollbackLastTurnSessionInput,
   type TurnOutcome,
   type TurnStartCommand,
   type TurnStartAccepted,
@@ -48,6 +50,8 @@ import {
   type CursorTransportOptions,
 } from "./transport.js";
 import { readCursorNativeTurns, type CursorNativeTurn } from "./native-history.js";
+import { cursorForkAvailable, cursorCheckpoint } from "./fork-support.js";
+import { forkCursorSession, validateCursorFork } from "./fork.js";
 import { CursorTurnOutput, cursorSnapshot } from "./projection.js";
 import { CursorInteractions } from "./interactions.js";
 import { type CursorSubagents, cursorTaskAddress } from "./subagents.js";
@@ -112,12 +116,22 @@ function rejected(code: HarnessError["code"], message: string): { ok: false; err
   return { ok: false, error: { code, message, retryable: false } };
 }
 
+class CursorCleanupUnconfirmed extends Error {
+  constructor(cause: unknown) {
+    super("Cursor ACP process cleanup could not be confirmed", { cause });
+  }
+}
+
 async function openCursorCatalog(
   create: () => CursorTransport,
   sessionId?: string,
+  onClosed?: (transport: CursorTransport) => void,
+  signal?: AbortSignal,
 ): Promise<{ transport: CursorTransport; info: CursorSessionInfo }> {
   const attempt = async (transport: CursorTransport) => {
+    signal?.throwIfAborted();
     const info = await transport.open(sessionId);
+    signal?.throwIfAborted();
     cursorCatalog(info);
     return { transport, info };
   };
@@ -125,13 +139,24 @@ async function openCursorCatalog(
   try {
     return await attempt(transport);
   } catch (error) {
-    await transport.close().catch(() => undefined);
+    try {
+      await transport.close();
+      onClosed?.(transport);
+    } catch (cleanupError) {
+      throw new CursorCleanupUnconfirmed(cleanupError);
+    }
     if (!isEmptyCursorCatalogError(error)) throw error;
+    signal?.throwIfAborted();
     transport = create();
     try {
       return await attempt(transport);
     } catch (retryError) {
-      await transport.close().catch(() => undefined);
+      try {
+        await transport.close();
+        onClosed?.(transport);
+      } catch (cleanupError) {
+        throw new CursorCleanupUnconfirmed(cleanupError);
+      }
       throw retryError;
     }
   }
@@ -175,6 +200,7 @@ export class CursorAdapter implements HarnessAdapter {
   };
   readonly harnessId = harnessIdSchema.parse("cursor-cli");
   readonly #sessions = new Set<CursorSession>();
+  readonly #forks = new Map<AbortController, Promise<HarnessResult<HarnessSession>>>();
   readonly #ephemeralTransports = new Set<CursorTransport>();
   readonly #openingTransports = new Set<CursorTransport>();
   /** Account-level catalog. cwd is only the ACP spawn directory, not a cache key. */
@@ -243,15 +269,26 @@ export class CursorAdapter implements HarnessAdapter {
     );
     return result;
   }
-  async open(input: OpenSessionInput): Promise<HarnessResult<HarnessSession>> {
+  async open(
+    input: OpenSessionInput,
+    signal?: AbortSignal,
+  ): Promise<HarnessResult<HarnessSession>> {
     if (this.#closed) return rejected("invalidState", "Cursor adapter is closed");
-    if (input.kind !== "create" && input.kind !== "resume")
-      return rejected("unsupported", "Cursor fork and rollback are not supported");
-    if (input.thinkingOptionId)
+    if ("thinkingOptionId" in input && input.thinkingOptionId)
       return rejected(
         "unsupported",
         "Cursor ACP exposes model variants, not an independent thinking selector",
       );
+    if (input.kind === "fork" || input.kind === "rollbackLastTurn") {
+      const controller = new AbortController();
+      const task = this.#derive(input, controller);
+      this.#forks.set(controller, task);
+      try {
+        return await task;
+      } finally {
+        this.#forks.delete(controller);
+      }
+    }
     if (input.kind === "resume" && input.nativeRef.harnessId !== this.harnessId)
       return rejected("invalidRequest", "Session belongs to another Harness");
     const options = {
@@ -273,12 +310,24 @@ export class CursorAdapter implements HarnessAdapter {
         this.#openingTransports.add(transport);
         info = await transport.open(sessionId, { historyOnly: true });
       } else {
-        const opened = await openCursorCatalog(() => new CursorTransport(options), sessionId);
+        const opened = await openCursorCatalog(
+          () => {
+            if (this.#closed || signal?.aborted)
+              throw new Error("Cursor adapter closed during session startup");
+            const candidate = new CursorTransport(options);
+            transport = candidate;
+            this.#openingTransports.add(candidate);
+            return candidate;
+          },
+          sessionId,
+          (closed) => this.#openingTransports.delete(closed),
+          signal,
+        );
         transport = opened.transport;
-        this.#openingTransports.add(transport);
         info = opened.info;
       }
       if (!transport) throw new Error("Cursor transport failed to open");
+      signal?.throwIfAborted();
       if (!historyOnly && input.model) {
         let value: string;
         try {
@@ -350,11 +399,156 @@ export class CursorAdapter implements HarnessAdapter {
           this.#openingTransports.delete(transport);
         }
       } catch (cleanupError) {
-        return { ok: false, error: cursorError(cleanupError) };
+        return {
+          ok: false,
+          error: {
+            ...cursorError(new CursorCleanupUnconfirmed(cleanupError)),
+            diagnostic: "cursorNativeCleanupUnconfirmed",
+          },
+        };
       }
+      if (error instanceof CursorCleanupUnconfirmed)
+        return {
+          ok: false,
+          error: { ...failure, diagnostic: "cursorNativeCleanupUnconfirmed" },
+        };
       return { ok: false, error: failure };
     }
   }
+  /** Native derivation admission adapts upstream Cursor Adapter at 997f62a0 (LGPLv3),
+   * using this fork's Session ownership, configuration and close contracts. */
+  async #derive(
+    input: ForkSessionInput | RollbackLastTurnSessionInput,
+    controller: AbortController,
+  ): Promise<HarnessResult<HarnessSession>> {
+    if (!cursorForkAvailable())
+      return rejected(
+        "unsupported",
+        "Cursor native derivation requires macOS/Linux with /usr/bin/script",
+      );
+    try {
+      if (input.kind === "fork") validateCursorFork(input.sourceRef, input.checkpoint);
+      else if (input.sourceRef.harnessId !== this.harnessId || input.sourceRef.formatVersion !== 1)
+        return rejected("invalidRequest", "Invalid Cursor rollback source");
+    } catch {
+      return rejected("invalidRequest", "Invalid Cursor fork checkpoint");
+    }
+    const source = [...this.#sessions].find(
+      (session) => session.transport.sessionId === input.sourceRef.nativeSessionId,
+    );
+    if (source && path.resolve(source.transport.options.cwd) !== path.resolve(input.cwd))
+      return rejected("unsupported", "Cursor native derivation cannot change workspace");
+    const release = source?.lockForFork();
+    if (source && !release) return rejected("sessionBusy", "Cursor source session is busy");
+    const signal = controller.signal;
+    const options = source
+      ? {
+          ...source.transport.options,
+          environment: { ...source.transport.options.environment, ...input.environment },
+        }
+      : this.transportOptions(input.cwd, input.environment);
+    let derived: Awaited<ReturnType<typeof forkCursorSession>> | undefined;
+    let session: HarnessSession | undefined;
+    try {
+      const native = readCursorNativeTurns(
+        input.sourceRef.nativeSessionId,
+        input.cwd,
+        options.environment,
+      );
+      const retained =
+        input.kind === "fork"
+          ? native.findIndex((turn) => turn.id === input.checkpoint.checkpointId) + 1
+          : native.length - 1;
+      if (!native.length || (input.kind === "fork" && retained === 0))
+        return rejected("checkpointNotFound", "Cursor derivation boundary no longer exists");
+      if (native[retained] && !native[retained]?.rewindRoot)
+        return rejected("unsupported", "Cursor target has no native rewind checkpoint");
+      signal.throwIfAborted();
+      derived = await forkCursorSession(
+        input.sourceRef,
+        input.kind === "fork" ? input.checkpoint : undefined,
+        options,
+        signal,
+      );
+      signal.throwIfAborted();
+      const model =
+        input.kind === "rollbackLastTurn"
+          ? (input.model ?? source?.initialState.effectiveModel)
+          : (input.model ?? source?.initialState.effectiveModel);
+      const sourceMode = source?.initialState.effectivePermissionModeId;
+      const mode =
+        input.kind === "rollbackLastTurn" && input.permissionModeId
+          ? input.permissionModeId
+          : sourceMode && sourceMode !== "agent"
+            ? sourceMode
+            : undefined;
+      const opened = await this.open(
+        {
+          kind: "resume",
+          cwd: input.cwd,
+          environment: options.environment,
+          ...(input.executionPolicy ? { executionPolicy: input.executionPolicy } : {}),
+          nativeRef: nativeSessionRefSchema.parse({
+            harnessId: this.harnessId,
+            nativeSessionId: derived.sessionId,
+            formatVersion: 1,
+          }),
+          ...(model ? { model } : {}),
+          ...(mode ? { permissionModeId: mode } : {}),
+        },
+        signal,
+      );
+      if (!opened.ok) {
+        if (opened.error.diagnostic === "cursorNativeCleanupUnconfirmed")
+          throw new CursorCleanupUnconfirmed(opened.error.message);
+        throw new Error(opened.error.message);
+      }
+      session = opened.value;
+      signal.throwIfAborted();
+      if (
+        JSON.stringify(readCursorNativeTurns(derived.sessionId, input.cwd, options.environment)) !==
+          JSON.stringify(derived.expected) ||
+        JSON.stringify(
+          readCursorNativeTurns(input.sourceRef.nativeSessionId, input.cwd, options.environment),
+        ) !== JSON.stringify(derived.sourceTurns)
+      )
+        throw new Error("Cursor native history changed during derivation adoption");
+      derived.commit();
+      return { ok: true, value: session };
+    } catch (error) {
+      if (error instanceof CursorCleanupUnconfirmed)
+        return {
+          ok: false,
+          error: {
+            ...cursorError(error),
+            diagnostic: "cursorNativeCleanupUnconfirmed",
+            message: `${error.message}; derived Cursor Session ${derived?.sessionId ?? "unknown"} retained`,
+          },
+        };
+      try {
+        // The staged native store is retained if ACP process release was not confirmed.
+        await session?.close();
+      } catch (cleanupError) {
+        return {
+          ok: false,
+          error: {
+            ...cursorError(new CursorCleanupUnconfirmed(cleanupError)),
+            diagnostic: "cursorNativeCleanupUnconfirmed",
+            message: `Cursor ACP cleanup could not be confirmed; derived Cursor Session ${derived?.sessionId ?? "unknown"} retained`,
+          },
+        };
+      }
+      try {
+        await derived?.discard();
+      } catch (cleanupError) {
+        return { ok: false, error: cursorError(cleanupError) };
+      }
+      return { ok: false, error: cursorError(error) };
+    } finally {
+      release?.();
+    }
+  }
+
   /**
    * A live session outcome that contradicts the settled cached inspection (login
    * lost, install removed, catalog drifted) must not stay hidden behind the long
@@ -369,7 +563,9 @@ export class CursorAdapter implements HarnessAdapter {
     return this.#closePromise;
   }
   async #close(): Promise<void> {
+    for (const controller of this.#forks.keys()) controller.abort();
     const results = await Promise.allSettled([
+      ...this.#forks.values(),
       ...[...this.#sessions].map((session) => session.close()),
       ...[...this.#ephemeralTransports].map((transport) => transport.close()),
       ...[...this.#openingTransports].map((transport) => transport.close()),
@@ -470,6 +666,14 @@ export class CursorSession implements HarnessSession {
   }
   get executionReady(): boolean {
     return !this.transport.historyOnly;
+  }
+  lockForFork(): (() => void) | null {
+    if (!this.#kernel.open || this.#active || this.#configuring || this.transport.closed)
+      return null;
+    this.#configuring = true;
+    return () => {
+      this.#configuring = false;
+    };
   }
   #native(allowMissing = false) {
     return readCursorNativeTurns(
@@ -695,6 +899,11 @@ export class CursorSession implements HarnessSession {
         formatVersion: 1,
       });
       this.#fresh = false;
+      if (outcome.status === "succeeded" && cursorForkAvailable())
+        outcome = {
+          ...outcome,
+          checkpoint: cursorCheckpoint(this.transport.sessionId, added[0].id),
+        };
     } catch (error) {
       if (outcome.status === "succeeded") outcome = { status: "failed", error: cursorError(error) };
     }

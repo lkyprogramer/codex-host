@@ -15,6 +15,7 @@ import type {
   RendererImportedThreadOpener,
 } from "./settings/session-import-page.js";
 import { installRendererSettingsShell, type RendererSettingsShell } from "./settings/shell.js";
+import type { RendererResourcesClient } from "./settings/resources-page.js";
 import {
   installRendererSettingsHeaderTrigger,
   type RendererSettingsHeaderTriggerControl,
@@ -27,6 +28,7 @@ export interface RendererSettingsLifecycleOptions {
   getUpdateClient?(): RendererUpdateClient | null;
   getConnectionDiagnostics?(): RendererConnectionDiagnostics | null;
   getAccountClient?(): RendererCodexAccountClient | null;
+  getResourcesClient?(): RendererResourcesClient | null;
   getSessionImportClient?(): RendererSessionImportClient | null;
   openImportedThread?: RendererImportedThreadOpener;
   onLocaleChange?(locale: RendererSettingsLocale): void;
@@ -74,6 +76,7 @@ export function installRendererSettingsLifecycle(
         await options.openImportedThread(threadId, signal);
         if (!disposed && !signal.aborted) shell?.close();
       },
+      options.getResourcesClient ?? (() => null),
     );
     const nextShell = installRendererSettingsShell(definitions, messages, ownerWindow.document);
     const nextTrigger = installRendererSettingsHeaderTrigger({

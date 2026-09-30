@@ -1,4 +1,9 @@
 import { openWithin } from "./bounded-open.js";
+import {
+  LOADED_SESSIONS_METHOD,
+  loadedSessionsParamsSchema,
+  loadedSessionsResultSchema,
+} from "@codexhost/shared-contracts";
 import { DesktopRequestDispatcher } from "./desktop-request-dispatcher.js";
 import { AccountRateLimits } from "./codex-runtime/account-rate-limits.js";
 import { inspectHarnessAccounts } from "./harness-accounts.js";
@@ -7,6 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 import os from "node:os";
 import path from "node:path";
 import type { Readable, Writable } from "node:stream";
+import { setTimeout as delay } from "node:timers/promises";
 
 import type {
   HarnessAdapter,
@@ -33,6 +39,7 @@ import {
   type HarnessPluginDescriptor,
   externalThreadForkParamsSchema,
   harnessCommandCatalogSchema,
+  mergeHarnessCommandCatalogs,
   harnessCommandsInspectParamsSchema,
   type HarnessId,
   harnessIdSchema,
@@ -66,6 +73,7 @@ import {
   type HarnessThinkingOptionId,
   type HostInteractionId,
   type HostTurnId,
+  type HarnessCommandCatalog,
 } from "@codexhost/shared-contracts";
 import { executeExternalThreadFork } from "./external-thread-fork.js";
 import { validateOpenedHarnessSession } from "./harness-session-validation.js";
@@ -149,8 +157,33 @@ import {
 } from "./codex-account-requests.js";
 import { requestObject, rpcEnvelope, rpcError } from "./json-rpc-response.js";
 import type { HostUpdateCoordinator } from "./update-coordinator.js";
+import { WorkspaceCommandCatalogs } from "./workspace-command-catalog.js";
+import { decodeExternalComposerText, matchExternalCommand } from "./external-command-routing.js";
+import {
+  rewriteDelegationMentionInput,
+  rewriteDelegationMentionText,
+} from "./delegation-mention-rewrite.js";
+import { resolveInstalledDelegationSkill } from "./delegation-skill.js";
+import { awaitWithSignal } from "./abortable-read.js";
 
 const SUBAGENT_TERMINAL_REFRESH_DELAYS_MS = [0, 50, 100, 150] as const;
+
+type SubagentThreadStatus = "active" | "idle";
+
+function beginSubagentStatusTransition(
+  statuses: Map<string, SubagentThreadStatus>,
+  tokens: Map<string, symbol>,
+  threadId: string,
+  status: SubagentThreadStatus,
+): { previousStatus: SubagentThreadStatus | undefined; isCurrent: () => boolean } {
+  const previousStatus = statuses.get(threadId);
+  if (previousStatus !== status) {
+    statuses.set(threadId, status);
+    tokens.set(threadId, Symbol());
+  }
+  const token = tokens.get(threadId);
+  return { previousStatus, isCurrent: () => tokens.get(threadId) === token };
+}
 const THREAD_USAGE_UPDATED_METHOD = "codexhost/thread/usage/updated";
 /**
  * How long closing every Harness Session and adapter may take when the Host
@@ -174,9 +207,6 @@ async function settleBefore(deadline: number, work: readonly Promise<unknown>[])
 // Native Codex account quota is still pulled through its official API; keep
 // that reading briefly cached so concurrent Composer inspections coalesce.
 
-function delay(milliseconds: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
-}
 import {
   classifyThreadPurpose,
   RequestRouteObservationTracker,
@@ -495,8 +525,10 @@ class OrderedWriter {
     return this.#enqueue(() => writeFrame(this.stream, frame));
   }
 
-  json(value: JsonValue): Promise<void> {
-    return this.#enqueue(() => writeJsonFrame(this.stream, value));
+  json(value: JsonValue, isCurrent?: () => boolean): Promise<void> {
+    return this.#enqueue(() =>
+      !isCurrent || isCurrent() ? writeJsonFrame(this.stream, value) : Promise.resolve(),
+    );
   }
 
   #enqueue(operation: () => Promise<void>): Promise<void> {
@@ -521,6 +553,8 @@ export class AppServerHost {
   readonly #pluginLoadAbort = new AbortController();
   #accountInspection: Promise<HarnessAccountListResult> | null = null;
   #externalRuntime: ExternalThreadRuntime;
+  #commandCatalogs: WorkspaceCommandCatalogs;
+  #commandAdmissions = new Map<string, { controller: AbortController; turnId?: HostTurnId }>();
   readonly #externalSteering = new ExternalTurnSteering();
   #repository: ExternalThreadRepository;
   #pendingDesktopApprovals = new Map<HostApprovalRequestId, PendingDesktopApproval>();
@@ -552,6 +586,10 @@ export class AppServerHost {
   #officialLoginSessions = new Map<string, CodexLoginSession>();
   #writer: OrderedWriter;
   #subagentThreadStatuses = new Map<string, "active" | "idle">();
+  #subagentStatusTokens = new Map<string, symbol>();
+  readonly #subagentRefreshAbort = new AbortController();
+  readonly #subagentRefreshControllers = new Map<string, AbortController>();
+  readonly #subagentRefreshTasks = new Set<Promise<void>>();
   #runningSubagentsByParent = new Map<string, Set<string>>();
   #pendingExternalCommandRequests = new Set<string>();
   #closeRequested = false;
@@ -620,6 +658,7 @@ export class AppServerHost {
       repository: this.#repository,
       consumeOutputs: (thread) => this.#consumeHarnessOutputs(thread),
       diagnose: (error) => this.#diagnose(error),
+      subagentRunning: (threadId) => this.#subagentThreadStatuses.get(threadId) === "active",
       canSuspend: (thread) =>
         !thread.running &&
         thread.activeTurnId === null &&
@@ -631,6 +670,9 @@ export class AppServerHost {
           ({ projector }) => projector.pendingInteractionCount === 0,
         ),
       ...(options.runtimeEpoch ? { epoch: options.runtimeEpoch } : {}),
+    });
+    this.#commandCatalogs = new WorkspaceCommandCatalogs({
+      adapter: (harnessId) => this.#externalAdapters.get(harnessId as ExternalHarnessId),
     });
     this.#delegationCoordinator = new HarnessDelegationCoordinator({
       adapters: this.#externalAdapters,
@@ -677,7 +719,10 @@ export class AppServerHost {
     if (this.#closeRequested) return;
     this.#closeRequested = true;
     this.#pluginLoadAbort.abort();
+    this.#subagentRefreshAbort.abort();
     this.#externalSteering.close();
+    this.#commandCatalogs.close();
+    for (const admission of this.#commandAdmissions.values()) admission.controller.abort();
     this.#signalActiveWorkChanged();
     this.#options.desktopInput.destroy();
     void this.#codexRuntimePool.close();
@@ -687,6 +732,8 @@ export class AppServerHost {
     if (this.#closeRequested || this.#desktopInputEnded || this.#drainActiveWorkOnInputEnd) return;
     this.#drainActiveWorkOnInputEnd = true;
     this.#externalSteering.close();
+    this.#commandCatalogs.close();
+    for (const admission of this.#commandAdmissions.values()) admission.controller.abort();
     const desktopInput = this.#options.desktopInput as Readable & { end?: () => void };
     if (typeof desktopInput.end === "function") desktopInput.end();
     else desktopInput.destroy();
@@ -763,7 +810,10 @@ export class AppServerHost {
       await this.#codexRuntimePool.close();
       return this.#closeRequested ? 0 : 1;
     } finally {
+      this.#subagentRefreshAbort.abort();
       this.#externalSteering.close();
+      this.#commandCatalogs.close();
+      for (const admission of this.#commandAdmissions.values()) admission.controller.abort();
       const deadline = Date.now() + (this.#options.shutdownBudgetMs ?? DEFAULT_SHUTDOWN_BUDGET_MS);
       const within = async (what: string, work: readonly Promise<unknown>[]) => {
         if (!(await settleBefore(deadline, work))) {
@@ -771,6 +821,7 @@ export class AppServerHost {
         }
       };
       const threads = this.#externalRuntime.values();
+      await within("draining Subagent refresh tasks", [...this.#subagentRefreshTasks]);
       await within(
         "closing Harness Sessions",
         threads.map(({ session }) => session.close()),
@@ -810,6 +861,7 @@ export class AppServerHost {
   #hasActiveWork(): boolean {
     return (
       this.#externalSteering.hasPending() ||
+      this.#subagentRefreshTasks.size > 0 ||
       this.#pendingOfficialTurnStarts.size > 0 ||
       this.#activeOfficialTurns.size > 0 ||
       this.#runningSubagentsByParent.size > 0 ||
@@ -903,6 +955,18 @@ export class AppServerHost {
     request: JsonRpcRequest,
     frame: Buffer<ArrayBufferLike>,
   ): Promise<void> {
+    if (request.method === LOADED_SESSIONS_METHOD) {
+      if (
+        !loadedSessionsParamsSchema.safeParse(request.params === undefined ? {} : request.params)
+          .success
+      ) {
+        await this.#writer.json(rpcError(request, -32602, "Resource list params must be empty"));
+        return;
+      }
+      const result = loadedSessionsResultSchema.parse(this.#externalRuntime.loadedSessions());
+      await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(result) }));
+      return;
+    }
     if (
       request.method === "codexhost/update/check" ||
       request.method === "codexhost/update/start" ||
@@ -1002,7 +1066,12 @@ export class AppServerHost {
           rpcError(request, -32602, "Invalid Harness command inspection params"),
         );
       } else {
-        await this.#writeHarnessCommandCatalog(request, params.data.harnessId);
+        await this.#writeHarnessCommandCatalog(
+          request,
+          params.data.harnessId,
+          params.data.cwd,
+          params.data.refresh,
+        );
       }
       return;
     }
@@ -1201,6 +1270,8 @@ export class AppServerHost {
       if (typeof threadId === "string") {
         this.#pendingOfficialTurnStarts.set(request.id, threadId);
       }
+      await this.#forwardOfficialComposerTurn(request, frame);
+      return;
     }
     if (request.method === "turn/steer") {
       const params = requestObject(request);
@@ -1213,6 +1284,8 @@ export class AppServerHost {
         this.#dispatchDesktopRequest(() => this.#steerExternalTurn(request, resolution.thread));
         return;
       }
+      await this.#forwardOfficialComposerTurn(request, frame);
+      return;
     }
     if (request.method === "turn/interrupt") {
       const params = requestObject(request);
@@ -1377,9 +1450,50 @@ export class AppServerHost {
     await (await this.#codexRuntimePool.active()).sendFrame(frame);
   }
 
+  async #forwardOfficialComposerTurn(
+    request: JsonRpcRequest,
+    frame: Buffer<ArrayBufferLike>,
+  ): Promise<void> {
+    try {
+      const params = requestObject(request);
+      if (!Array.isArray(params.input)) {
+        await this.#forwardOfficialRequest(request, frame);
+        return;
+      }
+      const input = params.input as JsonValue[];
+      const available = (id: string) =>
+        id === "codex" || this.#externalAdapters.has(id as ExternalHarnessId);
+      const candidate = rewriteDelegationMentionInput(input, available);
+      if (!candidate) {
+        await this.#forwardOfficialRequest(request, frame);
+        return;
+      }
+      const skill = await resolveInstalledDelegationSkill(
+        this.#options.environment?.HOME ?? os.homedir(),
+      );
+      const rewritten = rewriteDelegationMentionInput(input, available, skill);
+      if (!rewritten) throw new Error("Delegation chip vanished during rewrite");
+      await this.#forwardOfficialRequest(
+        jsonRpcRequestSchema.parse({ ...request, params: { ...params, input: rewritten } }),
+        frame,
+        true,
+      );
+    } catch (error) {
+      this.#pendingOfficialTurnStarts.delete(request.id);
+      await this.#writer.json(
+        rpcError(
+          request,
+          error instanceof UnknownCodexThreadAccountError ? -32084 : -32602,
+          errorMessage(error),
+        ),
+      );
+    }
+  }
+
   async #forwardOfficialRequest(
     request: JsonRpcRequest,
     frame: Buffer<ArrayBufferLike>,
+    reencode = false,
   ): Promise<void> {
     try {
       const params = isRecord(request.params) ? request.params : null;
@@ -1417,6 +1531,8 @@ export class AppServerHost {
           const officialParams = { ...params };
           delete officialParams.__codexhostAccountId;
           await runtime.send({ id: request.id, method: request.method, params: officialParams });
+        } else if (reencode) {
+          await runtime.send({ id: request.id, method: request.method, params: params ?? {} });
         } else {
           await runtime.sendFrame(frame);
         }
@@ -2584,20 +2700,36 @@ export class AppServerHost {
       await this.#writer.json(rpcEnvelope(request, { result: { commands: [] } }));
       return;
     }
-    await this.#writeHarnessCommandCatalog(request, location.record.harnessId);
+    await this.#writeHarnessCommandCatalog(
+      request,
+      location.record.harnessId,
+      location.record.cwd,
+      params.data.refresh,
+    );
   }
 
-  async #writeHarnessCommandCatalog(request: JsonRpcRequest, harnessId: HarnessId): Promise<void> {
+  async #writeHarnessCommandCatalog(
+    request: JsonRpcRequest,
+    harnessId: HarnessId,
+    cwd?: string,
+    refresh?: boolean,
+  ): Promise<void> {
     const adapter = this.#externalAdapters.get(harnessId);
     if (!adapter) {
       await this.#writer.json(rpcError(request, -32077, `Harness '${harnessId}' is unavailable`));
       return;
     }
     try {
-      const catalog = harnessCommandCatalogSchema.parse(adapter.commandCatalog ?? { commands: [] });
+      const catalog = await this.#commandCatalogs.inspect(
+        harnessId,
+        cwd,
+        refresh === undefined ? {} : { refresh },
+      );
       await this.#writer.json(rpcEnvelope(request, { result: jsonValueSchema.parse(catalog) }));
-    } catch {
-      await this.#writer.json(rpcError(request, -32078, "Harness command catalog is invalid"));
+    } catch (error) {
+      await this.#writer.json(
+        rpcError(request, -32078, `Harness command inspection failed: ${errorMessage(error)}`),
+      );
     }
   }
 
@@ -2614,8 +2746,20 @@ export class AppServerHost {
       );
       return;
     }
+    const admission = new AbortController();
+    this.#commandAdmissions.set(threadId, {
+      controller: admission,
+      ...(params.data.turnId ? { turnId: params.data.turnId } : {}),
+    });
+    const signal = AbortSignal.any([admission.signal, AbortSignal.timeout(10_000)]);
     try {
-      const resolution = await this.#resolveExternalThread(threadId);
+      let resolution: ExternalThreadResolution;
+      try {
+        resolution = await awaitWithSignal(this.#resolveExternalThread(threadId), signal);
+      } catch (error) {
+        await this.#writer.json(rpcError(request, -32078, errorMessage(error)));
+        return;
+      }
       if (await this.#writeResolutionError(request, resolution)) return;
       if (resolution.kind !== "external") {
         await this.#writer.json(rpcError(request, -32078, "Thread is not externally owned"));
@@ -2635,12 +2779,22 @@ export class AppServerHost {
         );
         return;
       }
-      const catalog = await commands.list();
-      if (!catalog.ok) {
-        await this.#writer.json(rpcError(request, -32078, catalog.error.message));
+      let catalog: HarnessCommandCatalog;
+      try {
+        catalog = await this.#commandCatalogForAdmission(thread, signal);
+      } catch (error) {
+        await this.#writer.json(rpcError(request, -32078, errorMessage(error)));
         return;
       }
-      const descriptor = catalog.value.commands.find(({ id }) => id === params.data.commandId);
+      if (
+        signal.aborted ||
+        this.#closeRequested ||
+        this.#externalRuntime.get(thread.id) !== thread
+      ) {
+        await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
+        return;
+      }
+      const descriptor = catalog.commands.find(({ id }) => id === params.data.commandId);
       if (!descriptor) {
         await this.#writer.json(
           rpcError(
@@ -2651,6 +2805,13 @@ export class AppServerHost {
         );
         return;
       }
+      // Admission ends here. The command owns the active Turn before its first await,
+      // so interrupts from this point must reach native Turn cancellation.
+      if (signal.aborted) {
+        await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
+        return;
+      }
+      this.#commandAdmissions.delete(threadId);
       try {
         await this.#startExternalCommand(
           request,
@@ -2667,8 +2828,26 @@ export class AppServerHost {
         );
       }
     } finally {
+      this.#commandAdmissions.delete(threadId);
       this.#pendingExternalCommandRequests.delete(threadId);
     }
+  }
+
+  async #commandCatalogForAdmission(
+    thread: ExternalThread,
+    signal: AbortSignal,
+  ): Promise<HarnessCommandCatalog> {
+    const adapter = this.#externalAdapters.get(thread.harnessId);
+    if (adapter?.liveCommandCatalog) {
+      return this.#commandCatalogs.inspect(thread.harnessId, thread.cwd, { refresh: true, signal });
+    }
+    const commands = thread.session.commands;
+    if (!commands) throw new Error("External Harness does not expose commands");
+    const result = await awaitWithSignal(commands.list(), signal);
+    if (!result.ok) throw new Error(result.error.message);
+    const native = harnessCommandCatalogSchema.parse(result.value);
+    const builtin = harnessCommandCatalogSchema.parse(adapter?.commandCatalog ?? { commands: [] });
+    return harnessCommandCatalogSchema.parse(mergeHarnessCommandCatalogs(builtin, native));
   }
 
   async #startExternalCommand(
@@ -3022,8 +3201,11 @@ export class AppServerHost {
     return true;
   }
 
-  #refreshExternalThread(thread: ExternalThread): Promise<ExternalThreadRpcError | null> {
-    return this.#externalRuntime.refresh(thread);
+  #refreshExternalThread(
+    thread: ExternalThread,
+    signal?: AbortSignal,
+  ): Promise<ExternalThreadRpcError | null> {
+    return this.#externalRuntime.refresh(thread, signal);
   }
 
   #markExternalThreadIdle(thread: ExternalThread): void {
@@ -3523,38 +3705,72 @@ export class AppServerHost {
       }
     }
     let text: string;
+    let explicitCommand = false;
     try {
       text = requestText(params);
+      const decoded = decodeExternalComposerText(text, thread.harnessId);
+      text = rewriteDelegationMentionText(
+        decoded.text,
+        (id) => id === "codex" || this.#externalAdapters.has(id as ExternalHarnessId),
+      );
+      explicitCommand = decoded.explicitCommand;
     } catch (error) {
       await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
       return;
     }
     const commandCandidate = text.trimStart();
-    if (thread.session.commands && /^\/[^\s/]+(?:\s|$)/u.test(commandCandidate)) {
-      const commandText = commandCandidate.trimEnd();
-      this.#pendingExternalCommandRequests.add(thread.id);
+    if (explicitCommand || /^\/[^\s/]+(?:\s|$)/u.test(commandCandidate)) {
+      if (!thread.session.commands) {
+        await this.#writer.json(
+          rpcError(request, -32078, "External Harness does not expose commands"),
+        );
+        return;
+      }
+      if (!this.#reserveExternalOperation(thread.id)) {
+        await this.#writer.json(
+          rpcError(request, -32072, "External Thread already has an active operation"),
+        );
+        return;
+      }
+      const admission = new AbortController();
+      this.#commandAdmissions.set(thread.id, { controller: admission });
+      const signal = AbortSignal.any([admission.signal, AbortSignal.timeout(10_000)]);
       try {
-        const catalog = await thread.session.commands.list();
-        if (!catalog.ok) {
-          await this.#writer.json(rpcError(request, -32073, catalog.error.message));
+        let catalog: HarnessCommandCatalog;
+        try {
+          catalog = await this.#commandCatalogForAdmission(thread, signal);
+        } catch (error) {
+          await this.#writer.json(rpcError(request, -32078, errorMessage(error)));
           return;
         }
-        const matched = catalog.value.commands
-          .toSorted((left, right) => right.invocation.length - left.invocation.length)
-          .find((command) => {
-            if (commandText === command.invocation) return true;
-            return (
-              command.argumentMode === "text" && commandText.startsWith(`${command.invocation} `)
-            );
-          });
+        if (
+          signal.aborted ||
+          this.#closeRequested ||
+          this.#externalRuntime.get(thread.id) !== thread
+        ) {
+          await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
+          return;
+        }
+        let matched: ReturnType<typeof matchExternalCommand>;
+        try {
+          matched = matchExternalCommand(text, catalog);
+        } catch (error) {
+          await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
+          return;
+        }
         if (matched) {
-          const argumentText = commandText.slice(matched.invocation.length).trimStart();
+          if (signal.aborted) {
+            await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
+            return;
+          }
+          // The native command now owns interruption; no await separates handoff and start.
+          this.#commandAdmissions.delete(thread.id);
           try {
             await this.#startExternalCommand(
               request,
               thread,
-              matched.id,
-              argumentText.length > 0 ? { text: argumentText } : undefined,
+              matched.descriptor.id,
+              matched.arguments,
               undefined,
               "turn",
             );
@@ -3571,6 +3787,7 @@ export class AppServerHost {
         );
         return;
       } finally {
+        this.#commandAdmissions.delete(thread.id);
         this.#pendingExternalCommandRequests.delete(thread.id);
       }
     }
@@ -3597,9 +3814,30 @@ export class AppServerHost {
   }
 
   async #steerExternalTurn(request: JsonRpcRequest, thread: ExternalThread): Promise<void> {
+    let steerParams: JsonObject;
+    try {
+      steerParams = requestObject(request);
+      if (
+        Array.isArray(steerParams.input) &&
+        steerParams.input.every((item) => isRecord(item) && item.type === "text")
+      ) {
+        const original = requestText(steerParams);
+        const decoded = decodeExternalComposerText(original, thread.harnessId);
+        if (decoded.explicitCommand) throw new Error("Command chips cannot steer an active Turn");
+        const rewritten = rewriteDelegationMentionText(
+          original,
+          (id) => id === "codex" || this.#externalAdapters.has(id as ExternalHarnessId),
+        );
+        if (rewritten !== original)
+          steerParams = { ...steerParams, input: [{ type: "text", text: rewritten }] };
+      }
+    } catch (error) {
+      await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
+      return;
+    }
     if (thread.session.steering) {
       try {
-        const params = requestObject(request);
+        const params = steerParams;
         const expectedTurnId =
           typeof params.expectedTurnId === "string" ? params.expectedTurnId : "";
         if (
@@ -3641,7 +3879,7 @@ export class AppServerHost {
       return;
     }
     try {
-      const started = await this.#externalSteering.run(thread, requestObject(request), (text) =>
+      const started = await this.#externalSteering.run(thread, steerParams, (text) =>
         this.#beginExternalTurn(thread, text),
       );
       try {
@@ -3725,6 +3963,12 @@ export class AppServerHost {
     thread: ExternalThread,
     requestedTurnId: JsonValue | undefined,
   ): Promise<void> {
+    const pendingAdmission = this.#commandAdmissions.get(thread.id);
+    if (typeof requestedTurnId === "string" && pendingAdmission?.turnId === requestedTurnId) {
+      pendingAdmission.controller.abort(new Error("Command admission was cancelled"));
+      await this.#writer.json(rpcEnvelope(request, { result: {} }));
+      return;
+    }
     if (typeof requestedTurnId === "string")
       this.#externalSteering.interrupt(thread.id, requestedTurnId);
     if (
@@ -4156,7 +4400,12 @@ export class AppServerHost {
     return { ...subagent, subagentId: record.hostThreadId };
   }
 
-  async #refreshOpenSubagentThread(threadId: string, terminal = true): Promise<void> {
+  async #refreshOpenSubagentThread(
+    threadId: string,
+    terminal = true,
+    isCurrent: () => boolean = () => true,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const child = this.#externalRuntime.get(threadId);
     if (!child) return;
     const previousItems = new Map(
@@ -4170,13 +4419,15 @@ export class AppServerHost {
           : [],
       ),
     );
-    const refreshed = await this.#refreshExternalThread(child);
+    const refreshed = await this.#refreshExternalThread(child, signal);
+    if (!isCurrent()) return;
     if (refreshed) {
       this.#diagnose(refreshed.message);
       return;
     }
     const emittedAtMs = Date.now();
     for (const turn of child.turns) {
+      if (!isCurrent()) return;
       if (typeof turn.id !== "string" || !Array.isArray(turn.items)) continue;
       const changedItems = turn.items.filter(
         (item): item is JsonObject =>
@@ -4185,48 +4436,62 @@ export class AppServerHost {
           previousItems.get(item.id) !== JSON.stringify(item),
       );
       if (changedItems.length > 0) {
-        await this.#writer.json({
-          method: "turn/started",
-          emittedAtMs,
-          params: {
-            threadId,
-            turn: {
-              ...turn,
-              status: "inProgress",
-              completedAt: null,
-              durationMs: null,
+        await this.#writer.json(
+          {
+            method: "turn/started",
+            emittedAtMs,
+            params: {
+              threadId,
+              turn: {
+                ...turn,
+                status: "inProgress",
+                completedAt: null,
+                durationMs: null,
+              },
             },
           },
-        });
+          isCurrent,
+        );
       }
       for (const item of changedItems) {
-        await this.#writer.json({
-          method: "item/started",
-          emittedAtMs,
-          params: {
-            threadId,
-            turnId: turn.id,
-            startedAtMs: emittedAtMs,
-            item,
+        if (!isCurrent()) return;
+        await this.#writer.json(
+          {
+            method: "item/started",
+            emittedAtMs,
+            params: {
+              threadId,
+              turnId: turn.id,
+              startedAtMs: emittedAtMs,
+              item,
+            },
           },
-        });
-        await this.#writer.json({
-          method: "item/completed",
-          emittedAtMs,
-          params: {
-            threadId,
-            turnId: turn.id,
-            completedAtMs: emittedAtMs,
-            item,
+          isCurrent,
+        );
+        if (!isCurrent()) return;
+        await this.#writer.json(
+          {
+            method: "item/completed",
+            emittedAtMs,
+            params: {
+              threadId,
+              turnId: turn.id,
+              completedAtMs: emittedAtMs,
+              item,
+            },
           },
-        });
+          isCurrent,
+        );
       }
-      if (terminal) {
-        await this.#writer.json({
-          method: "turn/completed",
-          emittedAtMs,
-          params: { threadId, turn },
-        });
+      if (terminal && isCurrent()) {
+        await this.#writer.json(
+          {
+            method: "turn/completed",
+            emittedAtMs,
+            params: { threadId, turn },
+          },
+          isCurrent,
+        );
       }
     }
   }
@@ -4256,7 +4521,12 @@ export class AppServerHost {
   }
 
   async #setSubagentThreadStatus(threadId: string, status: "active" | "idle"): Promise<void> {
-    const previousStatus = this.#subagentThreadStatuses.get(threadId);
+    const { previousStatus, isCurrent } = beginSubagentStatusTransition(
+      this.#subagentThreadStatuses,
+      this.#subagentStatusTokens,
+      threadId,
+      status,
+    );
     const child = this.#externalRuntime.get(threadId);
     if (child) {
       child.running = status === "active";
@@ -4268,25 +4538,66 @@ export class AppServerHost {
         running: child.running,
       });
     }
+    if (previousStatus === status || this.#subagentRefreshAbort.signal.aborted) return;
+    this.#subagentRefreshControllers.get(threadId)?.abort();
     if (status === "idle" && previousStatus === "active") {
-      for (const [index, waitMs] of SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.entries()) {
-        if (waitMs > 0) await delay(waitMs);
-        await this.#refreshOpenSubagentThread(
-          threadId,
-          index === SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.length - 1,
-        );
-      }
+      const controller = new AbortController();
+      const signal = AbortSignal.any([controller.signal, this.#subagentRefreshAbort.signal]);
+      const current = () => !signal.aborted && isCurrent();
+      this.#subagentRefreshControllers.set(threadId, controller);
+      // Native history may lag terminal state. Do not block the output queue while waiting:
+      // later running events must be able to invalidate this refresh and its native read.
+      const task = Promise.resolve()
+        .then(async () => {
+          for (const [index, waitMs] of SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.entries()) {
+            if (waitMs > 0) await delay(waitMs, undefined, { signal });
+            if (!current()) return;
+            await this.#refreshOpenSubagentThread(
+              threadId,
+              index === SUBAGENT_TERMINAL_REFRESH_DELAYS_MS.length - 1,
+              current,
+              signal,
+            );
+          }
+          if (current()) await this.#writeSubagentThreadStatus(threadId, status, current);
+        })
+        .catch((error: unknown) => {
+          if (!signal.aborted) this.#diagnose(error);
+        })
+        .finally(() => {
+          this.#subagentRefreshTasks.delete(task);
+          if (this.#subagentRefreshControllers.get(threadId) === controller) {
+            this.#subagentRefreshControllers.delete(threadId);
+          }
+          this.#signalActiveWorkChanged();
+        });
+      this.#subagentRefreshTasks.add(task);
+      return;
     }
-    if (previousStatus === status) return;
-    this.#subagentThreadStatuses.set(threadId, status);
-    await this.#writer.json({
-      method: "thread/status/changed",
-      emittedAtMs: Date.now(),
-      params: {
+    if (isCurrent())
+      await this.#writeSubagentThreadStatus(
         threadId,
-        status: status === "active" ? { type: "active", activeFlags: [] } : { type: "idle" },
+        status,
+        () => !this.#subagentRefreshAbort.signal.aborted && isCurrent(),
+      );
+  }
+
+  #writeSubagentThreadStatus(
+    threadId: string,
+    status: SubagentThreadStatus,
+    isCurrent: () => boolean,
+  ): Promise<void> {
+    return this.#writer.json(
+      {
+        method: "thread/status/changed",
+        emittedAtMs: Date.now(),
+        params: {
+          threadId,
+          status: status === "active" ? { type: "active", activeFlags: [] } : { type: "idle" },
+        },
       },
-    });
+      isCurrent,
+    );
   }
 
   async #projectApproval(

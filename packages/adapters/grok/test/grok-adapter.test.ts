@@ -1218,7 +1218,9 @@ describe("Grok Adapter ACP projection", () => {
       status: "in_progress",
       rawInput: { file_path: "/synthetic/sample.txt" },
     });
-    expect((await nextEvent(iterator)).type).toBe("item.started");
+    const startedEdit = await nextEvent(iterator);
+    expect(startedEdit.type).toBe("item.started");
+    if (startedEdit.type !== "item.started") throw new Error("Missing Edit item");
 
     transport.event({
       type: "tool.update",
@@ -1254,6 +1256,7 @@ describe("Grok Adapter ACP projection", () => {
       type: "item.started",
       item: {
         type: "fileChange",
+        sourceItemIds: [startedEdit.item.itemId],
         changes: [
           {
             path: "sample.txt",

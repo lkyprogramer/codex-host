@@ -1,16 +1,3 @@
-export interface RendererDebugger {
-  isAttached(): boolean;
-  attach(version: string): void;
-  detach(): void;
-  sendCommand(method: string, parameters?: Record<string, unknown>): Promise<unknown>;
-}
-
-export interface RendererWebContents {
-  isDestroyed(): boolean;
-  getType(): string;
-  debugger: RendererDebugger;
-}
-
 export interface DraftPrewarmPolicyTarget {
   [key: string]: unknown;
   addEventListener?: (type: string, listener: (event: Event) => void) => void;
@@ -67,12 +54,46 @@ export function installDraftPrewarmPolicyBridge(
   }
   existing?.dispose?.();
 
+  const policy = createDraftPrewarmPolicyBridge(
+    manager,
+    bridge,
+    hostId,
+    target,
+    prewarmedThreadManager,
+  );
+  Object.defineProperty(target, "__codexhostDraftPrewarmPolicyV1", {
+    configurable: true,
+    value: policy,
+  });
+  if (typeof target.dispatchEvent === "function" && typeof CustomEvent === "function") {
+    target.dispatchEvent(new CustomEvent("codexhost:draft-prewarm-policy-changed"));
+  }
+  return { state: "ready", reason: "owned-request-bridge" };
+}
+
+export type RendererDraftBridgePolicy = ReturnType<typeof createDraftPrewarmPolicyBridge>;
+
+/** Own hooks for one native Host connection; publication and Composer choice belong to routing. */
+export function createDraftPrewarmPolicyBridge(
+  manager: RendererHostRequestManager,
+  bridge: RendererHostRequestBridge,
+  hostId: string,
+  target: DraftPrewarmPolicyTarget,
+  prewarmedThreadManager: RendererPrewarmedThreadManager,
+  isCurrent: () => boolean = () => true,
+) {
   const originalSend = bridge.sendRequest;
   const originalPrewarm = bridge.prewarmThreadStart;
   const originalOnNotification = manager.onNotification;
   const originalDispatchAppServerResponse = manager.dispatchAppServerResponse;
+  let disposed = false;
+  const assertCurrent = (): void => {
+    if (disposed || !isCurrent()) throw new Error("Renderer Host connection is no longer current");
+  };
   let selectedModel: string | null = null;
   let selectedCodexAccountId: string | null = null;
+  const draftWorkspaceOwner = Symbol(hostId);
+  let prewarmGeneration = 0;
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
   const isRemoteControlHost = hostId.startsWith("remote-control:");
@@ -512,16 +533,61 @@ export function installDraftPrewarmPolicyBridge(
     selectedCodexAccountId = null;
     return routed;
   };
+  const publishDraftWorkspace = (parameters: unknown): void => {
+    if (!isRecord(parameters) || parameters.ephemeral === true) return;
+    const cwd = parameters.cwd;
+    if (typeof cwd !== "string" || cwd.length === 0) {
+      clearDraftWorkspace();
+      return;
+    }
+    const drafts = isRecord(target.__codexhostDraftWorkspacesV1)
+      ? target.__codexhostDraftWorkspacesV1
+      : {};
+    drafts[hostId] = cwd;
+    Object.defineProperty(target, "__codexhostDraftWorkspacesV1", {
+      configurable: true,
+      value: drafts,
+    });
+    const owners = isRecord(target.__codexhostDraftWorkspaceOwnersV1)
+      ? target.__codexhostDraftWorkspaceOwnersV1
+      : {};
+    owners[hostId] = draftWorkspaceOwner;
+    Object.defineProperty(target, "__codexhostDraftWorkspaceOwnersV1", {
+      configurable: true,
+      value: owners,
+    });
+    if (typeof target.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      target.dispatchEvent(
+        new CustomEvent("codexhost:draft-workspace", { detail: { hostId, cwd } }),
+      );
+    }
+  };
+  const clearDraftWorkspace = (): void => {
+    const owners = target.__codexhostDraftWorkspaceOwnersV1;
+    if (!isRecord(owners) || owners[hostId] !== draftWorkspaceOwner) return;
+    Reflect.deleteProperty(owners, hostId);
+    const drafts = target.__codexhostDraftWorkspacesV1;
+    if (isRecord(drafts)) Reflect.deleteProperty(drafts, hostId);
+    if (typeof target.dispatchEvent === "function" && typeof CustomEvent === "function") {
+      target.dispatchEvent(
+        new CustomEvent("codexhost:draft-workspace", { detail: { hostId, cwd: null } }),
+      );
+    }
+  };
   const routedSend = (method: string, parameters: unknown, options?: unknown): unknown => {
+    assertCurrent();
     const routedParameters = method === "thread/start" ? routeThreadStart(parameters) : parameters;
     const sendBridged = (): Promise<unknown> =>
-      initializeBridge().then(
-        () => enqueueBridgeRequest(method, routedParameters, options) as Promise<unknown>,
-      );
-    const sendDirect = (): unknown =>
-      options === undefined
+      initializeBridge().then(() => {
+        assertCurrent();
+        return enqueueBridgeRequest(method, routedParameters, options) as Promise<unknown>;
+      });
+    const sendDirect = (): unknown => {
+      assertCurrent();
+      return options === undefined
         ? originalSend.call(bridge, method, routedParameters)
         : originalSend.call(bridge, method, routedParameters, options);
+    };
     const unresolvedThreadId = shouldResolveThreadOwnership(method, routedParameters);
     if (unresolvedThreadId) {
       return resolveThreadOwnership(unresolvedThreadId).then((owner) =>
@@ -531,13 +597,28 @@ export function installDraftPrewarmPolicyBridge(
     return shouldUseBridge(method, routedParameters) ? sendBridged() : sendDirect();
   };
   const routedPrewarm = (parameters: unknown, options?: unknown): unknown => {
+    assertCurrent();
     const routedParameters = routeThreadStart(parameters);
-    if (shouldUseBridge("thread/start", routedParameters)) {
-      return routedSend("thread/start", routedParameters, options);
-    }
-    return options === undefined
-      ? originalPrewarm.call(bridge, routedParameters)
-      : originalPrewarm.call(bridge, routedParameters, options);
+    const generation = ++prewarmGeneration;
+    publishDraftWorkspace(routedParameters);
+    const result = shouldUseBridge("thread/start", routedParameters)
+      ? routedSend("thread/start", routedParameters, options)
+      : options === undefined
+        ? originalPrewarm.call(bridge, routedParameters)
+        : originalPrewarm.call(bridge, routedParameters, options);
+    if (
+      (isRecord(parameters) && parameters.ephemeral === true) ||
+      (typeof result !== "object" && typeof result !== "function") ||
+      result === null ||
+      typeof Reflect.get(result, "then") !== "function"
+    )
+      return result;
+    return Promise.resolve(result).then((value) => {
+      if (!disposed && isCurrent() && generation === prewarmGeneration) {
+        publishDraftWorkspace(routedParameters);
+      }
+      return value;
+    });
   };
   bridge.sendRequest = routedSend;
   bridge.prewarmThreadStart = routedPrewarm;
@@ -593,6 +674,7 @@ export function installDraftPrewarmPolicyBridge(
       candidatePrewarmedThreadManager: RendererPrewarmedThreadManager,
     ): boolean {
       return (
+        !disposed &&
         candidateManager === manager &&
         candidate === bridge &&
         candidateHostId === hostId &&
@@ -600,9 +682,11 @@ export function installDraftPrewarmPolicyBridge(
       );
     },
     requestTarget(): RendererHostRequestManager {
+      assertCurrent();
       return manager;
     },
     select(model: string | null): boolean {
+      assertCurrent();
       if (model !== null && (typeof model !== "string" || !model.startsWith("codexhost/"))) {
         throw new Error("Draft route Model must be a codexhost transport carrier");
       }
@@ -611,6 +695,7 @@ export function installDraftPrewarmPolicyBridge(
       return true;
     },
     selectAccount(accountId: string | null): boolean {
+      assertCurrent();
       if (accountId !== null && !/^[A-Za-z0-9._~-]+$/u.test(accountId)) {
         throw new Error("Draft Codex Account ID must be filename-safe");
       }
@@ -619,10 +704,15 @@ export function installDraftPrewarmPolicyBridge(
       return true;
     },
     clear(): Promise<void> {
+      assertCurrent();
       prewarmedThreadManager.discardAllPrewarmedThreads();
       return Promise.resolve();
     },
     dispose(): void {
+      if (disposed) return;
+      disposed = true;
+      prewarmGeneration += 1;
+      clearDraftWorkspace();
       if (bridge.sendRequest === routedSend) bridge.sendRequest = originalSend;
       if (bridge.prewarmThreadStart === routedPrewarm) {
         bridge.prewarmThreadStart = originalPrewarm;
@@ -655,88 +745,5 @@ export function installDraftPrewarmPolicyBridge(
       selectedCodexAccountId = null;
     },
   });
-  Object.defineProperty(target, "__codexhostDraftPrewarmPolicyV1", {
-    configurable: true,
-    value: policy,
-  });
-  if (typeof target.dispatchEvent === "function" && typeof CustomEvent === "function") {
-    target.dispatchEvent(new CustomEvent("codexhost:draft-prewarm-policy-changed"));
-  }
-  return { state: "ready", reason: "owned-request-bridge" };
-}
-
-export async function installDraftPrewarmPolicyInRenderer(
-  contents: RendererWebContents | null,
-  findRequestManagerExpression: string,
-  installRendererPolicyFunction: string,
-): Promise<unknown> {
-  if (contents === null || contents.isDestroyed() || contents.getType() !== "window") {
-    throw new Error("Owned Renderer is unavailable for draft prewarm policy");
-  }
-
-  let attachedHere = false;
-  try {
-    if (!contents.debugger.isAttached()) {
-      contents.debugger.attach("1.3");
-      attachedHere = true;
-    }
-    await contents.debugger.sendCommand("Runtime.enable");
-    const managerResult = (await contents.debugger.sendCommand("Runtime.evaluate", {
-      expression: findRequestManagerExpression,
-    })) as { result?: { objectId?: unknown } };
-    const managerResultId = managerResult.result?.objectId;
-    if (typeof managerResultId !== "string") {
-      throw new Error("Renderer request manager inspection failed");
-    }
-    const managerProperties = (await contents.debugger.sendCommand("Runtime.getProperties", {
-      objectId: managerResultId,
-      ownProperties: true,
-    })) as {
-      result?: Array<{
-        name?: unknown;
-        value?: { objectId?: unknown; value?: unknown };
-      }>;
-    };
-    const candidateCount = managerProperties.result?.find(
-      (property) => property.name === "candidateCount",
-    )?.value?.value;
-    const hostId = managerProperties.result?.find((property) => property.name === "hostId")?.value
-      ?.value;
-    const manager = managerProperties.result?.find(
-      (property) => property.name === "manager",
-    )?.value;
-    const requestClient = managerProperties.result?.find(
-      (property) => property.name === "requestClient",
-    )?.value;
-    const prewarmedThreadManager = managerProperties.result?.find(
-      (property) => property.name === "prewarmedThreadManager",
-    )?.value;
-    if (
-      candidateCount !== 1 ||
-      typeof hostId !== "string" ||
-      hostId.length === 0 ||
-      typeof manager?.objectId !== "string" ||
-      typeof requestClient?.objectId !== "string"
-    ) {
-      throw new Error("Renderer request manager is ambiguous");
-    }
-    if (typeof prewarmedThreadManager?.objectId !== "string") {
-      throw new Error("Renderer prewarmed Thread manager is unavailable");
-    }
-
-    const installed = (await contents.debugger.sendCommand("Runtime.callFunctionOn", {
-      objectId: manager.objectId,
-      functionDeclaration: installRendererPolicyFunction,
-      arguments: [
-        { objectId: requestClient.objectId },
-        { value: hostId },
-        { objectId: prewarmedThreadManager.objectId },
-      ],
-      awaitPromise: true,
-      returnByValue: true,
-    })) as { result?: { value?: unknown } };
-    return installed.result?.value;
-  } finally {
-    if (attachedHere && contents.debugger.isAttached()) contents.debugger.detach();
-  }
+  return policy;
 }

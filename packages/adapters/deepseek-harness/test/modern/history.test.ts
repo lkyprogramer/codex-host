@@ -155,6 +155,47 @@ function completeHistory(): ModernJournalEvent[] {
 }
 
 describe("DeepSeek Harness Modern history projection", () => {
+  const retryData = {
+    retryId: "retry-1",
+    turn: 1,
+    step: 1,
+    provider: "deepseek",
+    mode: "normal",
+    policyKey: "default",
+    retry: 1,
+    maxRetries: 2,
+    delayMs: 0,
+    failure: { message: "retryable failure", code: "TIMEOUT" },
+  };
+
+  it.each([0, 0.25, 12.5])("opens retry history with delayMs %s", (delayMs) => {
+    expect(() =>
+      projectModernHistory({
+        sessionId: SESSION_ID,
+        events: [
+          event(0, "turn/start", { turn: 1 }),
+          event(1, "step/start", { turn: 1, step: 1 }),
+          event(2, "llm/retry", { ...retryData, delayMs }),
+          event(3, "step/end", { turn: 1, step: 1 }),
+          event(4, "turn/end", { turn: 1, reason: { kind: "completed" } }),
+        ],
+      }),
+    ).not.toThrow();
+  });
+
+  it.each([
+    ["negative delay", { ...retryData, delayMs: -0.25 }],
+    ["missing delay", { ...retryData, delayMs: undefined }],
+    ["infinite delay", { ...retryData, delayMs: Infinity }],
+    ["NaN delay", { ...retryData, delayMs: NaN }],
+    ["fractional retry count", { ...retryData, retry: 1.5 }],
+    ["fractional maxRetries", { ...retryData, maxRetries: 2.5 }],
+  ])("rejects retry history with %s", (_label, data) => {
+    expect(() =>
+      projectModernHistory({ sessionId: SESSION_ID, events: [event(0, "llm/retry", data)] }),
+    ).toThrowError(ModernHistoryError);
+  });
+
   it("resolves and verifies the exact fork prefix including its between-Turn tail", () => {
     const source = [
       event(0, "turn/start", { turn: 1 }),

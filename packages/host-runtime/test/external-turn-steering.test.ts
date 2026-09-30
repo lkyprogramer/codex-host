@@ -64,6 +64,38 @@ describe("Host stop-then-start coordination", () => {
     expect(f.coordinator.hasPending()).toBe(false);
   });
 
+  it.each([1_000, 5_000, 25_000])(
+    "keeps replacement admission separate from native settlement at %i ms",
+    async (settlementMs) => {
+      vi.useFakeTimers();
+      const f = fixture();
+      const coordinator = new ExternalTurnSteering();
+      const result = coordinator.run(f.thread, f.params, f.start);
+      const checked =
+        settlementMs > 20_000
+          ? expect(result).rejects.toThrow("replacement was not started")
+          : expect(result).resolves.toBe(f.started);
+      await vi.advanceTimersByTimeAsync(Math.min(settlementMs, 20_000) - 1);
+      expect(f.start).not.toHaveBeenCalled();
+      if (settlementMs > 20_000) {
+        await vi.advanceTimersByTimeAsync(1);
+        await checked;
+        expect(f.thread.running).toBe(true);
+        expect(coordinator.hasPending()).toBe(false);
+        await vi.advanceTimersByTimeAsync(settlementMs - 20_000);
+      } else {
+        await vi.advanceTimersByTimeAsync(1);
+      }
+      f.thread.running = false;
+      f.thread.activeTurnId = null;
+      coordinator.terminal("thread", "old", { status: "cancelled" });
+      await checked;
+      if (settlementMs > 20_000) expect(f.start).not.toHaveBeenCalled();
+      else expect(f.start).toHaveBeenCalledOnce();
+      coordinator.close();
+    },
+  );
+
   it("also waits for acknowledgement when the old terminal arrives first", async () => {
     const f = fixture();
     const ack = Promise.withResolvers<Awaited<ReturnType<Cancel>>>();

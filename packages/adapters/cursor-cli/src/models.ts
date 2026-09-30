@@ -8,6 +8,7 @@ import {
   parseCursorNativeModelVariant,
 } from "./model-parameters.js";
 import type { CursorSessionInfo } from "./transport.js";
+import { cursorForkAvailable } from "./fork-support.js";
 
 export const CURSOR_CAPABILITIES: HarnessSessionCapabilities = {
   configuration: {
@@ -17,7 +18,11 @@ export const CURSOR_CAPABILITIES: HarnessSessionCapabilities = {
     permissionModeScope: "live",
   },
   resources: { idleRelease: true, ownedJobs: false },
-  history: { fork: false, forkAcrossCwd: false, rollbackLastTurn: false },
+  history: {
+    fork: cursorForkAvailable(),
+    forkAcrossCwd: false,
+    rollbackLastTurn: cursorForkAvailable(),
+  },
   subagents: { observe: true, readTranscript: false },
 };
 export const CURSOR_MODES = harnessPermissionModeCatalogSchema.parse({

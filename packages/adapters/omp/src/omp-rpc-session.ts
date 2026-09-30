@@ -1425,8 +1425,12 @@ export class OmpRpcSession {
 
   #updateTool(active: ActiveTurn, value: Record<string, unknown>): void {
     const callId = value.toolCallId;
+    if (typeof callId !== "string" || callId.length === 0) {
+      throw new OmpRpcFaultError("protocolError", "Omp RPC returned an invalid Tool update");
+    }
+    if (!active.tools.has(callId)) return;
     const outputResult = jsonValueSchema.safeParse(value.partialResult);
-    if (typeof callId !== "string" || !active.tools.has(callId) || !outputResult.success) {
+    if (!outputResult.success) {
       throw new OmpRpcFaultError("protocolError", "Omp RPC returned an invalid Tool update");
     }
     active.onEvent({ type: "tool.updated", callId, output: outputResult.data });
@@ -1434,11 +1438,14 @@ export class OmpRpcSession {
 
   #completeTool(active: ActiveTurn, value: Record<string, unknown>): void {
     const callId = value.toolCallId;
+    if (typeof callId !== "string" || callId.length === 0) {
+      throw new OmpRpcFaultError("protocolError", "Omp RPC returned an invalid Tool end");
+    }
+    if (!active.tools.has(callId)) return;
     const toolName = value.toolName;
     const result = jsonValueSchema.safeParse(value.result);
-    const expectedName = typeof callId === "string" ? active.tools.get(callId) : undefined;
+    const expectedName = active.tools.get(callId);
     if (
-      typeof callId !== "string" ||
       typeof toolName !== "string" ||
       expectedName !== toolName ||
       (value.isError !== undefined && typeof value.isError !== "boolean") ||

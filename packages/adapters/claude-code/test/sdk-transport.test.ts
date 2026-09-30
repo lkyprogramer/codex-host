@@ -1,8 +1,10 @@
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import os from "node:os";
 import path from "node:path";
 
-import { describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { PermissionUpdate, Query, SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { processAnchorPath } from "@codexhost/harness-discovery";
 import { harnessThinkingOptionIdSchema } from "@codexhost/shared-contracts";
@@ -13,6 +15,7 @@ import {
   ClaudeSdkTransport,
   type ClaudeSdkTransportOptions,
 } from "../src/sdk-transport.js";
+import { decodeClaudeModelRef, normalizeClaudeModelCatalog } from "../src/model-catalog.js";
 import type {
   ClaudeAutonomousTurn,
   ClaudeTransportTurnResult,
@@ -1021,6 +1024,14 @@ describe("ClaudeSdkTransport root safety", () => {
 });
 
 describe("ClaudeSdkTransport Model control", () => {
+  let configDirectory: string;
+  beforeAll(async () => {
+    configDirectory = await mkdtemp(path.join(os.tmpdir(), "codexhost-claude-inspector-"));
+  });
+  afterAll(async () => {
+    await rm(configDirectory, { recursive: true, force: true });
+  });
+
   it("passes create-time Model and delegates setter without sending input", async () => {
     const value = fixture();
     const selected = new ClaudeSdkTransport({
@@ -1052,6 +1063,7 @@ describe("ClaudeSdkTransport Model control", () => {
     value.fakeQuery.getContextUsage.mockRejectedValueOnce(new Error("must not be called"));
     const inspector = new ClaudeSdkModelInspector({
       command: process.execPath,
+      environment: { CLAUDE_CONFIG_DIR: configDirectory },
       cwd: process.cwd(),
       closeTimeoutMs: 100,
       queryFactory: value.queryFactory,
@@ -1065,7 +1077,10 @@ describe("ClaudeSdkTransport Model control", () => {
     const value = fixture();
     const inspector = new ClaudeSdkModelInspector({
       command: process.execPath,
-      environment: { PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+      environment: {
+        CLAUDE_CONFIG_DIR: configDirectory,
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+      },
       cwd: process.cwd(),
       closeTimeoutMs: 100,
       queryFactory: value.queryFactory,
@@ -1097,12 +1112,81 @@ describe("ClaudeSdkTransport Model control", () => {
     expect(options(value)).not.toHaveProperty("resume");
   });
 
+  it("merges fixture settings during inspection and passes a catalog ref to SDK model selection", async () => {
+    const value = fixture();
+    value.fakeQuery.initializationResult.mockResolvedValueOnce({
+      models: [
+        {
+          value: "default",
+          displayName: "Default",
+          description: "Default",
+          supportsAutoMode: true,
+        },
+        { value: "sonnet", displayName: "Sonnet", description: "Sonnet", supportsAutoMode: true },
+      ],
+    });
+    await writeFile(
+      path.join(configDirectory, "settings.json"),
+      JSON.stringify({
+        modelPicker: {
+          replaceBuiltInOptions: true,
+          options: [{ model: "gateway/model[1m]", label: "Gateway" }],
+        },
+      }),
+    );
+    try {
+      const inspector = new ClaudeSdkModelInspector({
+        command: process.execPath,
+        environment: { CLAUDE_CONFIG_DIR: configDirectory },
+        cwd: process.cwd(),
+        closeTimeoutMs: 100,
+        queryFactory: value.queryFactory,
+      });
+      const inspection = await inspector.inspect();
+      expect(inspection.models).toEqual([
+        {
+          value: "default",
+          displayName: "Default",
+          description: "Default",
+          supportsAutoMode: true,
+        },
+        { value: "gateway/model[1m]", displayName: "Gateway" },
+      ]);
+      const catalog = normalizeClaudeModelCatalog(inspection).catalog;
+      const custom = catalog.models.find(({ label }) => label === "Gateway");
+      if (!custom) throw new Error("Missing custom Model in Claude catalog");
+      const selectedValue = decodeClaudeModelRef(custom.ref);
+      const selected = fixture();
+      const transport = new ClaudeSdkTransport({
+        command: process.execPath,
+        environment: { CLAUDE_CONFIG_DIR: configDirectory },
+        cwd: process.cwd(),
+        sessionId: "00000000-0000-4000-8000-000000000009",
+        openMode: "create",
+        permissionMode: "default",
+        thinkingOptionId: harnessThinkingOptionIdSchema.parse("auto"),
+        closeTimeoutMs: 100,
+        onPermissionModeChanged: selected.onPermissionModeChanged,
+        onFault: selected.onFault,
+        onPlanLimit: selected.onPlanLimit,
+        queryFactory: selected.queryFactory,
+      });
+      await transport.start();
+      await transport.setModel(selectedValue);
+      expect(selected.fakeQuery.setModel).toHaveBeenCalledWith("gateway/model[1m]");
+      await transport.close();
+    } finally {
+      await rm(path.join(configDirectory, "settings.json"), { force: true });
+    }
+  });
+
   it.skipIf(process.platform === "win32")(
     "reclaims the inspector's whole process group, not only its direct child",
     async () => {
       const value = fixture();
       const inspector = new ClaudeSdkModelInspector({
         command: process.execPath,
+        environment: { CLAUDE_CONFIG_DIR: configDirectory },
         cwd: process.cwd(),
         // Close waits this long for a natural exit first, so the fixture can
         // report its grandchild before the group is reclaimed under load.
@@ -1145,6 +1229,7 @@ describe("ClaudeSdkTransport Model control", () => {
       const value = fixture();
       const inspector = new ClaudeSdkModelInspector({
         command: process.execPath,
+        environment: { CLAUDE_CONFIG_DIR: configDirectory },
         cwd: process.cwd(),
         // Close waits this long for a natural exit first, so the fixture can
         // report its grandchild before the group is reclaimed under load.

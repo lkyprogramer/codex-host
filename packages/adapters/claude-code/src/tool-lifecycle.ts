@@ -170,6 +170,7 @@ export class ClaudeToolLifecycle {
           type: "fileChange",
           itemId: this.#newItemId(),
           changes: [change],
+          sourceItemIds: [tool.item.itemId],
         };
         this.#emit({ type: "item.started", turnId, item: fileItem });
         this.#completeItem(turnId, fileItem, { status: "succeeded" });

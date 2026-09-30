@@ -14,6 +14,7 @@ import { loadHarnessPlugins, type HarnessPluginDiagnostic } from "../src/harness
 import { HarnessPluginRegistry } from "../src/harness-plugin-registry.js";
 import { installedHarnessPluginOptions } from "../src/installed-harness-plugins.js";
 import { pluginResourcePath, readPluginIcon } from "../src/plugin-files.js";
+import { WorkspaceCommandCatalogs } from "../src/workspace-command-catalog.js";
 
 const roots: string[] = [];
 const context = {
@@ -71,6 +72,110 @@ afterEach(async () => {
 });
 
 describe("Harness plugin discovery and loading", () => {
+  it.each([1, 2])(
+    "preserves API v%s installed plugin workspace commands and static-only behavior",
+    async (adapterApiVersion) => {
+      const directory = await root(["live-agent", "static-agent"]);
+      const location = await plugin(directory, "live-agent", {
+        manifest: { adapterApiVersion },
+        code: `
+          import { writeFileSync } from "node:fs";
+          import path from "node:path";
+          export function createHarnessAdapter() {
+            return new (class {
+              #identity = "live-agent";
+              harnessId = "live-agent";
+              commandCatalog = { commands: [
+                { id: "help", invocation: "/help", label: "Help", argumentMode: "none" }
+              ] };
+              liveCommandCatalog = true;
+              async inspect() { return { status: "ready" }; }
+              async open() { return { ok: false, error: { code: "unavailable", message: "unused", retryable: false } }; }
+              async inspectCommands({ cwd, signal }) {
+                if (cwd.endsWith("blocked")) {
+                  return new Promise((resolve) => signal.addEventListener("abort", () => {
+                    writeFileSync(new URL("aborted", import.meta.url), "yes");
+                    resolve({ ok: false, error: { code: "cancelled", message: "cancelled", retryable: false } });
+                  }, { once: true }));
+                }
+                return { ok: true, value: { source: "live", commands: [
+                  { id: this.#identity + "." + path.basename(cwd),
+                    invocation: "/workspace", label: cwd, argumentMode: "none" }
+                ] } };
+              }
+              async close() { writeFileSync(new URL("closed", import.meta.url), this.#identity); }
+            })();
+          }
+        `,
+      });
+      await plugin(directory, "static-agent", {
+        manifest: { adapterApiVersion },
+        code: `
+          export function createHarnessAdapter() {
+            return { harnessId: "static-agent", commandCatalog: { commands: [
+              { id: "help", invocation: "/help", label: "Help", argumentMode: "none" }
+            ] }, inspect: async () => ({ status: "ready" }),
+              open: async () => ({ ok: false, error: { code: "unavailable", message: "unused", retryable: false } }),
+              close: async () => {} };
+          }
+        `,
+      });
+      const registry = await loadHarnessPlugins({ roots: [directory], context, warmup: false });
+      const catalogs = new WorkspaceCommandCatalogs({
+        adapter: (id) =>
+          [...registry.adapters.values()].find((adapter) => adapter.harnessId === id),
+      });
+      try {
+        const builtin = { id: "help", invocation: "/help", label: "Help", argumentMode: "none" };
+        const firstCwd = path.resolve("/first");
+        const secondCwd = path.resolve("/second");
+        expect(await catalogs.inspect("live-agent")).toEqual({
+          commands: [builtin],
+          source: "static",
+        });
+        expect(await catalogs.inspect("static-agent", "/first")).toEqual({
+          commands: [builtin],
+          source: "static",
+        });
+        expect(await catalogs.inspect("live-agent", firstCwd)).toEqual({
+          commands: [
+            builtin,
+            {
+              id: "live-agent.first",
+              invocation: "/workspace",
+              label: firstCwd,
+              argumentMode: "none",
+            },
+          ],
+          source: "live",
+        });
+        expect(await catalogs.inspect("live-agent", secondCwd)).toEqual({
+          commands: [
+            builtin,
+            {
+              id: "live-agent.second",
+              invocation: "/workspace",
+              label: secondCwd,
+              argumentMode: "none",
+            },
+          ],
+          source: "live",
+        });
+        const controller = new AbortController();
+        const pending = catalogs.inspect("live-agent", "/blocked", { signal: controller.signal });
+        controller.abort();
+        await expect(pending).rejects.toBeDefined();
+        await vi.waitFor(async () =>
+          expect(await readFile(path.join(location, "aborted"), "utf8")).toBe("yes"),
+        );
+      } finally {
+        catalogs.close();
+        await registry.close();
+      }
+      expect(await readFile(path.join(location, "closed"), "utf8")).toBe("live-agent");
+    },
+  );
+
   it("rejects a malformed JavaScript Session before registration and closes its resources", async () => {
     const directory = await root(["bad-session"]);
     const location = await plugin(directory, "bad-session", {

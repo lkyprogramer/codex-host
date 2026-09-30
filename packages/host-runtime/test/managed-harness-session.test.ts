@@ -1,3 +1,4 @@
+import type { HarnessSession } from "@codexhost/harness-adapter";
 import { FakeHarnessSession } from "@codexhost/harness-adapter/testing";
 import {
   harnessIdSchema,

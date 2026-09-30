@@ -27,6 +27,7 @@ import type { RendererAgent } from "./agent-selection-state.js";
 import { installRendererForkControl } from "./renderer-fork-control.js";
 import { installRendererExternalSteering } from "./renderer-external-steering.js";
 import { installRendererExternalQueue } from "./renderer-external-queue.js";
+import { createRendererHostClients, type RendererHostRoute } from "./renderer-host-clients.js";
 import {
   createRendererModelClient,
   createThreadUsageSubscriptionRelay,
@@ -652,10 +653,30 @@ function findComposerFiber(composer?: Element): {
     : null;
 }
 
+export function hostIdForComposer(composer?: Element): string | null | undefined {
+  return typeof window === "undefined"
+    ? undefined
+    : window.__codexhostHostRoutingV1?.hostIdForComposer(composer);
+}
+
+function composerAncestors(
+  fiber: { return?: unknown; updateQueue?: unknown; memoizedProps?: unknown } | null,
+): readonly Record<string, unknown>[] {
+  if (!fiber) return [];
+  const routing = typeof window === "undefined" ? undefined : window.__codexhostHostRoutingV1;
+  if (routing) return routing.committedAncestors(fiber as Record<string, unknown>);
+  const ancestors: Record<string, unknown>[] = [];
+  let current: unknown = fiber;
+  for (let depth = 0; depth < 120 && isRecord(current); depth += 1) {
+    ancestors.push(current);
+    current = current.return;
+  }
+  return ancestors;
+}
+
 function findComposerConversationThreadId(composer?: Element): HostThreadId | null | undefined {
   let threadId: HostThreadId | undefined;
-  let fiber = findComposerFiber(composer);
-  for (let depth = 0; fiber && depth < 120; depth += 1) {
+  for (const fiber of composerAncestors(findComposerFiber(composer))) {
     const props = fiber.memoizedProps;
     if (isRecord(props) && "conversationId" in props && props.conversationId != null) {
       const candidate = hostThreadIdSchema.safeParse(props.conversationId);
@@ -664,11 +685,6 @@ function findComposerConversationThreadId(composer?: Element): HostThreadId | nu
       }
       threadId = candidate.data;
     }
-    const parent = fiber.return;
-    fiber =
-      (typeof parent === "object" || typeof parent === "function") && parent !== null
-        ? (parent as typeof fiber)
-        : null;
   }
   return threadId;
 }
@@ -742,8 +758,7 @@ function findComposerDomIdentity(composer: Element): ComposerDomIdentity {
 
 function findComposerDraftIds(composer: Element): Set<string> {
   const draftIds = new Set<string>();
-  let fiber = findComposerFiber(composer);
-  for (let depth = 0; fiber && depth < 120; depth += 1) {
+  for (const fiber of composerAncestors(findComposerFiber(composer))) {
     const updateQueue = fiber.updateQueue;
     const memoCache = isRecord(updateQueue) ? updateQueue.memoCache : null;
     const data = isRecord(memoCache) && Array.isArray(memoCache.data) ? memoCache.data : [];
@@ -751,11 +766,6 @@ function findComposerDraftIds(composer: Element): Set<string> {
       const draftId = draftIdFromMemoValue(value);
       if (draftId) draftIds.add(draftId);
     }
-    const parent = fiber.return;
-    fiber =
-      (typeof parent === "object" || typeof parent === "function") && parent !== null
-        ? (parent as typeof fiber)
-        : null;
   }
   return draftIds;
 }
@@ -986,6 +996,7 @@ export function installCurrentRendererAdapter(): {
   };
 
   const usageSubscription = createThreadUsageSubscriptionRelay();
+  const hostClients = createRendererHostClients(() => window.__codexhostHostRoutingV1);
   const requestRouteResolver = createRendererRequestRouteResolver(
     () => window.__codexhostDraftPrewarmPolicyV1,
     () => findActivePrewarmTargets(document),
@@ -1024,17 +1035,25 @@ export function installCurrentRendererAdapter(): {
   };
   let activeRoutePolicy: RendererDraftPrewarmPolicy | null = null;
   let activeRouteClient: RendererModelClient | null = null;
-  const syncActiveRoute = (route: RendererRequestRoute | null): RendererModelClient | null => {
+  const syncActiveRoute = (
+    route: RendererRequestRoute | RendererHostRoute | null,
+  ): RendererModelClient | null => {
     const policy = route?.policy ?? null;
-    const client = route ? modelClientForTargets(route.targets, route.policy) : null;
+    const client = route
+      ? "manager" in route
+        ? hostClients.forRoute(route)
+        : modelClientForTargets(route.targets, route.policy)
+      : null;
     if (activeRoutePolicy === policy && activeRouteClient === client) return client;
     activeRoutePolicy = policy;
     activeRouteClient = client;
     if (client) usageSubscription.connect(client);
     return client;
   };
-  const currentRequestRoute = (): RendererRequestRoute | null => {
-    const route = requestRouteResolver.resolve();
+  const currentRequestRoute = (): RendererRequestRoute | RendererHostRoute | null => {
+    const route = window.__codexhostHostRoutingV1
+      ? window.__codexhostHostRoutingV1.forComposer()
+      : requestRouteResolver.resolve();
     syncActiveRoute(route);
     return route;
   };
@@ -1045,10 +1064,14 @@ export function installCurrentRendererAdapter(): {
     return client;
   };
   const modelControl: RendererModelClient = Object.freeze({
-    currentHostId: () => currentRequestRoute()?.policy.hostId ?? null,
+    currentHostId: () =>
+      window.__codexhostHostRoutingV1
+        ? window.__codexhostHostRoutingV1.hostIdForComposer()
+        : (currentRequestRoute()?.policy.hostId ?? null),
     clientForHost(hostId: string): RendererModelClient | null {
+      if (window.__codexhostHostRoutingV1) return hostClients.forHost(hostId);
       const route = currentRequestRoute();
-      if (route?.policy.hostId === hostId)
+      if (route && "targets" in route && route.policy.hostId === hostId)
         return modelClientForTargets(route.targets, route.policy);
       const policy = window.__codexhostDraftPrewarmPolicyV1;
       if (isDraftPrewarmPolicyReady(policy) && hasPolicyRequestTarget(policy)) return null;
@@ -1149,6 +1172,7 @@ export function installCurrentRendererAdapter(): {
   let selectedRoutingPolicy: RendererDraftPrewarmPolicy | null = null;
   let selectedCarrier: string | null = null;
   let desiredCarrier: string | null = null;
+  const selectedHostPolicies = new Set<RendererDraftPrewarmPolicy>();
   const stopPolicyCapture = (): void => {
     if (policyTimer === null) return;
     window.clearInterval(policyTimer);
@@ -1159,11 +1183,27 @@ export function installCurrentRendererAdapter(): {
     policyRecaptureObserver = null;
   };
   const captureRoutingPolicy = (): boolean => {
-    const route = currentRequestRoute();
-    if (!route) return false;
+    const route =
+      currentRequestRoute() ??
+      (window.__codexhostHostRoutingV1
+        ? ([...document.querySelectorAll<Element>("[data-codex-composer-root]")]
+            .map((composer) => window.__codexhostHostRoutingV1?.forComposer(composer) ?? null)
+            .find((candidate) => candidate !== null) ?? null)
+        : null);
+    if (!route) {
+      if (!window.__codexhostHostRoutingV1 || !hostClients.forHost("local")) return false;
+      stopPolicyRecapture();
+      hasCapturedRoutingPolicy = true;
+      stopPolicyCapture();
+      updateStatus("ready", "ready", "request-bridge");
+      return true;
+    }
     routingPolicy = route.policy;
     stopPolicyRecapture();
-    if (selectedRoutingPolicy !== routingPolicy || selectedCarrier !== desiredCarrier) {
+    if (
+      !window.__codexhostHostRoutingV1 &&
+      (selectedRoutingPolicy !== routingPolicy || selectedCarrier !== desiredCarrier)
+    ) {
       try {
         routingPolicy.select(desiredCarrier);
       } catch {
@@ -1198,7 +1238,11 @@ export function installCurrentRendererAdapter(): {
   if (!captureRoutingPolicy()) {
     updateStatus("installing", "draft-routing-policy-unavailable", null);
     const policy = window.__codexhostDraftPrewarmPolicyV1;
-    if (!isDraftPrewarmPolicyReady(policy) || !hasPolicyRequestTarget(policy)) {
+    if (
+      window.__codexhostHostRoutingV1 ||
+      !isDraftPrewarmPolicyReady(policy) ||
+      !hasPolicyRequestTarget(policy)
+    ) {
       startPolicyCapture();
     }
   }
@@ -1206,12 +1250,19 @@ export function installCurrentRendererAdapter(): {
     stopPolicyRecapture();
     if (captureRoutingPolicy()) return;
     const policy = window.__codexhostDraftPrewarmPolicyV1;
-    if (isDraftPrewarmPolicyReady(policy) && hasPolicyRequestTarget(policy)) {
+    if (
+      !window.__codexhostHostRoutingV1 &&
+      isDraftPrewarmPolicyReady(policy) &&
+      hasPolicyRequestTarget(policy)
+    ) {
       stopPolicyCapture();
     }
     if (!hasCapturedRoutingPolicy) return;
     updateStatus("installing", "draft-routing-policy-unavailable", null);
-    if (isDraftPrewarmPolicyReady(policy) && !hasPolicyRequestTarget(policy)) {
+    if (
+      window.__codexhostHostRoutingV1 ||
+      (isDraftPrewarmPolicyReady(policy) && !hasPolicyRequestTarget(policy))
+    ) {
       startPolicyRecapture();
     }
   };
@@ -1222,6 +1273,7 @@ export function installCurrentRendererAdapter(): {
     model?: HarnessModelRef,
     thinkingOptionId?: HarnessThinkingOptionId,
     permissionModeId?: HarnessPermissionModeId,
+    composer?: Element,
   ): boolean => {
     if (disposed) return false;
     const selection = modelSelectionForAgent(
@@ -1235,7 +1287,9 @@ export function installCurrentRendererAdapter(): {
     const carrier = selection?.model;
     if (carrier !== null && carrier !== undefined && typeof carrier !== "string") return false;
     desiredCarrier = carrier ?? null;
-    const route = currentRequestRoute();
+    const route = window.__codexhostHostRoutingV1
+      ? window.__codexhostHostRoutingV1.forComposer(composer)
+      : currentRequestRoute();
     if (!route) return false;
     routingPolicy = route.policy;
     try {
@@ -1245,6 +1299,7 @@ export function installCurrentRendererAdapter(): {
       }
       selectedRoutingPolicy = route.policy;
       selectedCarrier = desiredCarrier;
+      if (window.__codexhostHostRoutingV1) selectedHostPolicies.add(route.policy);
     } catch {
       updateStatus("installing", "draft-routing-policy-unavailable", null);
       return false;
@@ -1268,9 +1323,25 @@ export function installCurrentRendererAdapter(): {
       routingPolicy = null;
       requestRouteResolver.clear();
       const cleanups = [
-        () => activeRoutingPolicy?.select(null),
+        () => {
+          if (!window.__codexhostHostRoutingV1) activeRoutingPolicy?.select(null);
+        },
+        () => {
+          try {
+            for (const policy of selectedHostPolicies) {
+              try {
+                policy.select(null);
+              } catch {
+                // A replaced Host policy may already be retired; keep clearing others.
+              }
+            }
+          } finally {
+            selectedHostPolicies.clear();
+          }
+        },
         () => syncActiveRoute(null),
         () => forkControl.dispose(),
+        () => hostClients.dispose(),
         ...turnControlCleanups,
         () => usageSubscription.dispose(),
       ];

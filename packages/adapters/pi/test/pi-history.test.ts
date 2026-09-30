@@ -88,6 +88,109 @@ const state = {
 };
 
 describe("Pi active-branch history", () => {
+  it("restores persisted native patch after its source Edit without inventing absent patches", () => {
+    const entries: PiSessionHistory = {
+      entries: [
+        {
+          id: "user",
+          parentId: null,
+          type: "message",
+          message: { role: "user", content: [{ type: "text", text: "edit" }] },
+        },
+        {
+          id: "assistant",
+          parentId: "user",
+          type: "message",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "toolCall",
+                id: "edit-1",
+                name: "edit",
+                arguments: { path: "a.txt", old_string: "old\n", new_string: "new\n" },
+              },
+            ],
+          },
+        },
+        {
+          id: "result",
+          parentId: "assistant",
+          type: "message",
+          message: {
+            role: "toolResult",
+            toolCallId: "edit-1",
+            toolName: "edit",
+            isError: false,
+            content: [{ type: "text", text: "edited" }],
+            details: {
+              patch: "--- a/a.txt\n+++ b/a.txt\n@@ -1 +1 @@\n-old\n+new\n",
+            },
+          },
+        },
+      ],
+      leafId: "result",
+    };
+    const items = mapPiSnapshot(entries, { ...state, cwd: "/repo" }).turns[0]?.items ?? [];
+    expect(items).toHaveLength(2);
+    expect(items[1]?.item).toMatchObject({
+      type: "fileChange",
+      sourceItemIds: [items[0]?.item.itemId],
+      changes: [{ path: "a.txt", unifiedDiff: expect.stringContaining("+new") }],
+    });
+    const noPatch = structuredClone(entries);
+    const result = noPatch.entries[2]?.message;
+    if (!result || typeof result !== "object" || Array.isArray(result))
+      throw new Error("Missing result");
+    delete result.details;
+    expect(mapPiSnapshot(noPatch, { ...state, cwd: "/repo" }).turns[0]?.items).toHaveLength(1);
+  });
+
+  it.skipIf(process.platform === "win32")(
+    "preserves a POSIX backslash in a persisted native patch path",
+    () => {
+      const entries: PiSessionHistory = {
+        entries: [
+          {
+            id: "user",
+            parentId: null,
+            type: "message",
+            message: { role: "user", content: [{ type: "text", text: "edit" }] },
+          },
+          {
+            id: "assistant",
+            parentId: "user",
+            type: "message",
+            message: {
+              role: "assistant",
+              content: [
+                { type: "toolCall", id: "edit-1", name: "edit", arguments: { path: "a\\b.txt" } },
+              ],
+            },
+          },
+          {
+            id: "result",
+            parentId: "assistant",
+            type: "message",
+            message: {
+              role: "toolResult",
+              toolCallId: "edit-1",
+              toolName: "edit",
+              isError: false,
+              details: { patch: "--- a/a\\b.txt\n+++ b/a\\b.txt\n@@ -1 +1 @@\n-old\n+new\n" },
+            },
+          },
+        ],
+        leafId: "result",
+      };
+      const items = mapPiSnapshot(entries, { ...state, cwd: "/repo" }).turns[0]?.items ?? [];
+      expect(items[1]?.item).toMatchObject({
+        type: "fileChange",
+        changes: [{ path: "a\\b.txt" }],
+      });
+    },
+  );
+
   it("walks only the parent chain ending at leafId", () => {
     expect(activePiEntries(history).map(({ id }) => id)).toEqual([
       "model-1",

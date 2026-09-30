@@ -1330,7 +1330,9 @@ function validateRetry(data: Record<string, unknown>): void {
   requiredString(data.provider, "llm/retry provider");
   requiredString(data.policyKey, "llm/retry policyKey");
   positiveInteger(data.retry, "llm/retry retry");
-  nonNegativeInteger(data.delayMs, "llm/retry delayMs");
+  if (typeof data.delayMs !== "number" || !Number.isFinite(data.delayMs) || data.delayMs < 0) {
+    fail("Modern history llm/retry delayMs must be a non-negative finite number");
+  }
   if (mode === "normal") positiveInteger(data.maxRetries, "llm/retry maxRetries");
   validateLlmFailure(data.failure, "llm/retry failure");
 }

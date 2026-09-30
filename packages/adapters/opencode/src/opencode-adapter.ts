@@ -22,6 +22,7 @@ import {
   type HarnessCommandInvocation,
   type HarnessError,
   type HarnessInspection,
+  type InspectHarnessCommandsInput,
   type HarnessIdleSuspendSignal,
   type HarnessOutput,
   type HarnessResult,
@@ -61,6 +62,7 @@ import {
 import {
   harnessCommandCatalogSchema,
   harnessIdSchema,
+  mergeHarnessCommandCatalogs,
   harnessPermissionModeIdSchema,
   hostInteractionIdSchema,
   hostItemIdSchema,
@@ -117,7 +119,10 @@ import {
   turnNativePatchFiles,
   type OpenCodeSnapshotProjection,
 } from "./history-projection.js";
+import { coverOpenCodeFileChanges } from "./file-change-coverage.js";
+import { verifiedOpenCodeWorktree } from "./file-change-verification.js";
 import { deriveOpenCodeHistory } from "./history-derivation.js";
+import { openCodeNativeCommandCatalog, openCodeNativeCommandName } from "./native-commands.js";
 
 export interface OpenCodeAdapterOptions extends OpenCodeServerOptions {
   toolOutputLimit?: number;
@@ -133,7 +138,7 @@ export interface OpenCodeAdapterDependencies {
   randomUUID(): string;
 }
 
-type ActiveKind = "prompt" | "compact";
+type ActiveKind = "prompt" | "compact" | "command";
 
 interface LiveItem {
   item: HostItem;
@@ -160,6 +165,8 @@ interface BufferedOutput {
 
 interface ActiveTurn {
   kind: ActiveKind;
+  commandAbort: AbortController | null;
+  nativeCommandDispatched: boolean;
   turnId: TurnStartCommand["turnId"];
   userMessageID: string | null;
   preexistingUserMessageIds: Set<string>;
@@ -370,6 +377,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   #active: ActiveTurn | null = null;
   #closePromise: Promise<void> | null = null;
   #configuring = false;
+  #commandCatalogReads = 0;
   #connectedCount = 0;
   #model: OpenCodeNativeModelRef | undefined;
   #nativeEventEpoch = 0;
@@ -437,7 +445,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       history: { fork: true, forkAcrossCwd: false, rollbackLastTurn: true },
     };
     this.commands = {
-      list: async () => ({ ok: true, value: openCodeCommandCatalog }),
+      list: () => this.#listCommands(),
       execute: (command) => this.#executeHarnessCommand(command),
     };
     this.#kernel = new HarnessSessionKernel({
@@ -615,6 +623,28 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     queueMicrotask(() => this.#fault(error));
   }
 
+  async #listCommands(): Promise<HarnessResult<typeof openCodeCommandCatalog>> {
+    if (!this.#kernel.open)
+      return { ok: false, error: invalidState("OpenCode Session is not open") };
+    this.#commandCatalogReads += 1;
+    try {
+      const native = await this.#transport.commands();
+      if (!this.#kernel.open)
+        return { ok: false, error: invalidState("OpenCode Session is not open") };
+      return {
+        ok: true,
+        value: mergeHarnessCommandCatalogs(
+          openCodeCommandCatalog,
+          openCodeNativeCommandCatalog(native),
+        ),
+      };
+    } catch (error) {
+      return { ok: false, error: normalizeError(error, "unavailable") };
+    } finally {
+      this.#commandCatalogReads -= 1;
+    }
+  }
+
   async #executeHarnessCommand(
     command: HarnessCommandInvocation,
   ): Promise<HarnessResult<HarnessCommandAccepted>> {
@@ -630,6 +660,46 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
           retryable: true,
         },
       };
+    }
+    if (command.commandId.startsWith("opencode.native.")) {
+      const arguments_ = command.arguments;
+      if (arguments_ && Object.keys(arguments_).some((key) => key !== "text")) {
+        return {
+          ok: false,
+          error: {
+            code: "invalidRequest",
+            message: "OpenCode native command has an unknown argument",
+            retryable: false,
+          },
+        };
+      }
+      if (arguments_?.text !== undefined && typeof arguments_.text !== "string") {
+        return {
+          ok: false,
+          error: {
+            code: "invalidRequest",
+            message: "OpenCode native command text must be a string",
+            retryable: false,
+          },
+        };
+      }
+      const active = this.#createActive("command", command.turnId, null);
+      active.commandAbort = new AbortController();
+      this.#active = active;
+      active.admissionBuffer.push({
+        output: { kind: "event", event: { type: "turn.started", turnId: command.turnId } },
+        sequence: active.admissionSequence++,
+      });
+      active.admissionCompleted = true;
+      this.#flushAdmission(active);
+      // The native endpoint returns only after command completion. Acceptance
+      // here means Host owns its event/cancellation lifecycle from this point.
+      void this.#runNativeCommand(
+        active,
+        command.commandId,
+        typeof arguments_?.text === "string" ? arguments_.text : "",
+      );
+      return { ok: true, value: { turnId: command.turnId } };
     }
     if (command.commandId === COMPACT_COMMAND_ID) {
       if (command.arguments && Object.keys(command.arguments).length > 0) {
@@ -675,6 +745,61 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     };
   }
 
+  async #runNativeCommand(
+    active: ActiveTurn,
+    commandId: string,
+    arguments_: string,
+  ): Promise<void> {
+    try {
+      const native = await this.#transport.commands(active.commandAbort?.signal);
+      if (this.#active !== active || active.finished || active.commandAbort?.signal.aborted) return;
+      const name = openCodeNativeCommandName(
+        mergeHarnessCommandCatalogs(openCodeCommandCatalog, openCodeNativeCommandCatalog(native)),
+        commandId,
+      );
+      if (!name)
+        throw new OpenCodeTransportError(
+          "invalidState",
+          `OpenCode native command '${commandId}' is unavailable`,
+        );
+      active.nativeCommandDispatched = true;
+      const response = await this.#transport.executeCommand({
+        sessionID: this.#session.id,
+        command: name,
+        arguments: arguments_,
+        ...(this.#model ? { model: this.#model } : {}),
+        ...(this.#variant ? { variant: this.#variant } : {}),
+        ...(active.commandAbort ? { signal: active.commandAbort.signal } : {}),
+      });
+      if (this.#active !== active || active.finished) return;
+      if (
+        response.info.sessionID !== this.#session.id ||
+        !this.#bindUserMessage(active, response.info.parentID)
+      ) {
+        throw new OpenCodeTransportError(
+          "protocolError",
+          "OpenCode command response did not identify its User Message",
+        );
+      }
+      active.assistantMessageIds.add(response.info.id);
+      active.terminalAssistant = response.info;
+      active.nativeCompleted = true;
+      for (const part of response.parts) this.#projectPart(active, part);
+      await this.#reconcileAndFinish(active);
+    } catch (error) {
+      if (this.#active !== active || active.finished) return;
+      if (active.cancellationState !== "none") {
+        await this.#reconcileAndFinish(active);
+        return;
+      }
+      this.#completeTurn(active, {
+        status: "failed",
+        error: normalizeError(error, "nativeFailure"),
+      });
+      void this.#refreshProjection(active.turnId);
+    }
+  }
+
   async #cancel(command: TurnCancelCommand): Promise<HarnessResult<TurnCancelAccepted>> {
     const active = this.#active;
     if (!active || active.turnId !== command.turnId) {
@@ -694,10 +819,19 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       };
     }
     active.cancellationState = "requesting";
+    if (active.kind === "command") {
+      active.commandAbort?.abort();
+      if (!active.nativeCommandDispatched) {
+        active.cancellationState = "confirmed";
+        this.#completeTurn(active, { status: "cancelled", reason: "Cancelled by user" });
+        return { ok: true, value: { cancellationRequested: true } };
+      }
+    }
     try {
       await this.#transport.abort(this.#session.id);
       if (this.#active === active && active.cancellationState === "requesting") {
         active.cancellationState = "confirmed";
+        if (active.kind === "command") void this.#reconcileAndFinish(active);
       }
       return { ok: true, value: { cancellationRequested: true } };
     } catch (error) {
@@ -1274,7 +1408,10 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       if (this.#active !== active || status.type !== "idle") return;
       this.#resolveUserMessage(active, messages);
       const lifecycleObserved =
-        active.sawBusy || active.reconciledAfterReconnect || active.cancellationState !== "none";
+        active.sawBusy ||
+        active.reconciledAfterReconnect ||
+        active.cancellationState !== "none" ||
+        (active.kind === "command" && active.nativeCompleted);
       if (!lifecycleObserved) return;
       const userIndex = messages.findIndex(({ info }) => info.id === active.userMessageID);
       if (userIndex < 0) {
@@ -1287,6 +1424,15 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
               "OpenCode cancellation outcome is unknown and the authoritative transcript is missing its User Message",
             ),
           );
+        } else if (active.kind === "command" && active.nativeCompleted) {
+          this.#completeTurn(active, {
+            status: "failed",
+            error: {
+              code: "protocolError",
+              message: "OpenCode command completed without an authoritative User Message",
+              retryable: false,
+            },
+          });
         }
         return;
       }
@@ -1329,13 +1475,24 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       }
       active.terminalAssistant = terminal;
       const userMessageID = active.userMessageID as string;
-      const changes = reliableOpenCodeFileChanges(
+      const nativeChanges = reliableOpenCodeFileChanges(
         await readTurnDiff(
           this.#transport,
           this.#session.id,
           userMessageID,
           turnNativePatchFiles(messages, userMessageID),
         ),
+      );
+      const paths =
+        nativeChanges.length > 0
+          ? await this.#transport.getPaths().catch(() => undefined)
+          : undefined;
+      const worktree = paths ? verifiedOpenCodeWorktree(this.#session.directory, paths) : undefined;
+      const changes = coverOpenCodeFileChanges(
+        nativeChanges,
+        [...active.items.values()].map(({ item }) => item),
+        this.#session.directory,
+        worktree,
       );
       if (changes.length > 0) {
         const id = `opencode-live-diff:${active.userMessageID}`;
@@ -1416,6 +1573,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   #completeTurn(active: ActiveTurn, outcome: TurnOutcome, nativeTurnRef?: NativeTurnRef): void {
     if (this.#active !== active || active.finished || !active.admissionCompleted) return;
     active.finished = true;
+    active.commandAbort?.abort();
     this.#active = null;
     for (const interactionId of [...active.interactions.keys()]) {
       this.#closeInteraction(
@@ -1452,6 +1610,8 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     });
     return {
       kind,
+      commandAbort: null,
+      nativeCommandDispatched: false,
       turnId,
       userMessageID,
       preexistingUserMessageIds: new Set(this.#knownUserMessageIds),
@@ -1634,6 +1794,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       this.#active !== null ||
       this.#configuring ||
       this.#snapshotReads > 0 ||
+      this.#commandCatalogReads > 0 ||
       this.#projectionRefreshes > 0
     );
   }
@@ -1642,11 +1803,16 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     const active = this.#active;
     if (active) {
       active.cancellationState = "confirmed";
-      await this.#transport.abort(this.#session.id).catch(() => undefined);
-      await Promise.race([
-        active.completion,
-        new Promise<void>((resolve) => setTimeout(resolve, this.#closeTimeoutMs)),
-      ]);
+      active.commandAbort?.abort();
+      if (active.kind === "command" && !active.nativeCommandDispatched) {
+        this.#completeTurn(active, { status: "cancelled", reason: "Session closed" });
+      } else {
+        await this.#transport.abort(this.#session.id).catch(() => undefined);
+        await Promise.race([
+          active.completion,
+          new Promise<void>((resolve) => setTimeout(resolve, this.#closeTimeoutMs)),
+        ]);
+      }
     }
     let cleanupFailure: unknown;
     try {
@@ -1716,6 +1882,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
 
 export class OpenCodeAdapter implements HarnessAdapter {
   readonly commandCatalog = openCodeCommandCatalog;
+  readonly liveCommandCatalog = true;
   readonly harnessId: HarnessId = openCodeHarnessId;
   readonly #closeTimeoutMs: number;
   readonly #createConnection: OpenCodeAdapterDependencies["createConnection"];
@@ -1773,6 +1940,63 @@ export class OpenCodeAdapter implements HarnessAdapter {
     return inspection.finally(() => {
       if (this.#inspectionInFlight.get(cwd) === inspection) this.#inspectionInFlight.delete(cwd);
     });
+  }
+
+  async inspectCommands(
+    input: InspectHarnessCommandsInput,
+  ): Promise<HarnessResult<typeof openCodeCommandCatalog>> {
+    if (this.#closing || this.#closePromise)
+      return { ok: false, error: invalidState("OpenCode Adapter is closed") };
+    if (input.signal.aborted)
+      return { ok: false, error: invalidState("OpenCode command inspection was cancelled") };
+    let connection: OpenCodeServerConnectionLike;
+    try {
+      connection = this.#createConnection(this.#options);
+    } catch (error) {
+      return { ok: false, error: normalizeError(error, "unavailable") };
+    }
+    const resources = this.#registerUnclaimedResources(connection);
+    let failure: unknown;
+    let result: HarnessResult<typeof openCodeCommandCatalog> | undefined;
+    let rejectAbort: (error: Error) => void = () => undefined;
+    const aborted = new Promise<never>((_resolve, reject) => {
+      rejectAbort = reject;
+    });
+    const requestAbort = new AbortController();
+    const onAbort = (): void => {
+      requestAbort.abort();
+      rejectAbort(new Error("OpenCode command inspection was cancelled"));
+    };
+    input.signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      if (input.signal.aborted) throw new Error("OpenCode command inspection was cancelled");
+      const transport = this.#createTransport(connection, input.cwd, this.#options);
+      resources.transport = transport;
+      this.#assertOpen();
+      const native = await Promise.race([transport.commands(requestAbort.signal), aborted]);
+      if (input.signal.aborted) throw new Error("OpenCode command inspection was cancelled");
+      result = { ok: true, value: openCodeNativeCommandCatalog(native) };
+    } catch (error) {
+      failure = error;
+    } finally {
+      input.signal.removeEventListener("abort", onAbort);
+      requestAbort.abort();
+      try {
+        await this.#closeUnclaimedResources(resources);
+      } catch (error) {
+        failure = failure
+          ? new AggregateError([failure, error], "OpenCode command inspection and cleanup failed")
+          : error;
+      }
+    }
+    if (failure) return { ok: false, error: normalizeError(failure, "unavailable") };
+    if (this.#closing || this.#closePromise)
+      return { ok: false, error: invalidState("OpenCode Adapter is closed") };
+    if (input.signal.aborted)
+      return { ok: false, error: invalidState("OpenCode command inspection was cancelled") };
+    return (
+      result ?? { ok: false, error: invalidState("OpenCode command inspection returned no result") }
+    );
   }
 
   async #inspectCwd(cwd: string): Promise<HarnessInspection> {

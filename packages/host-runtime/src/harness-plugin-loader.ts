@@ -93,6 +93,8 @@ function validatePluginAdapter(
   return {
     harnessId: adapter.harnessId,
     ...(adapter.commandCatalog ? { commandCatalog: adapter.commandCatalog } : {}),
+    ...(adapter.liveCommandCatalog ? { liveCommandCatalog: adapter.liveCommandCatalog } : {}),
+    ...(adapter.inspectCommands ? { inspectCommands: adapter.inspectCommands.bind(adapter) } : {}),
     ...(adapter.sessionImport ? { sessionImport: adapter.sessionImport } : {}),
     ...(adapter.subagents ? { subagents: adapter.subagents } : {}),
     ...(adapter.webUi ? { webUi: adapter.webUi } : {}),

@@ -2,7 +2,7 @@
 
 use std::env;
 use std::error::Error;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
@@ -37,6 +37,8 @@ const LAUNCHER_PID_ENV: &str = "CODEXHOST_LAUNCHER_PID";
 const NPM_NODE_PATH_ENV: &str = "CODEXHOST_NPM_NODE_PATH";
 const NPM_PACKAGE_ROOT_ENV: &str = "CODEXHOST_NPM_PACKAGE_ROOT";
 const REMOTE_LISTENER_CHILD_ENV: &str = "CODEXHOST_REMOTE_LISTENER_CHILD";
+const INTERNAL_ORIGINATOR_OVERRIDE_ENV: &str = "CODEX_INTERNAL_ORIGINATOR_OVERRIDE";
+const DESKTOP_ORIGINATOR: &str = "Codex Desktop";
 
 /// Optional lifecycle hooks for diagnostics around the byte-transparent proxy core.
 pub trait ProxyObserver {
@@ -367,6 +369,34 @@ pub fn app_server_subcommand_index(arguments: &[OsString]) -> Option<usize> {
     None
 }
 
+/// Recognizes the dedicated provider selected by official memory summarization.
+/// Routing exception adapted from BytePioneer-AI/codex-host@66bedaed
+/// (`crates/shim/src/lib.rs`), published under MIT at that commit.
+fn selects_memory_provider(arguments: &[OsString]) -> bool {
+    let mut index = 0;
+    let mut selected = false;
+    while index < arguments.len() {
+        let Some(argument) = arguments[index].to_str() else {
+            return false;
+        };
+        let value = if argument == "-c" || argument == "--config" {
+            index += 1;
+            arguments.get(index).and_then(|value| value.to_str())
+        } else {
+            argument
+                .strip_prefix("-c=")
+                .or_else(|| argument.strip_prefix("--config="))
+        };
+        if let Some((key, configured)) = value.and_then(|value| value.split_once('='))
+            && key.trim() == "model_provider"
+        {
+            selected = configured.trim().trim_matches(['\'', '"']) == "openai-memgen";
+        }
+        index += 1;
+    }
+    selected
+}
+
 /// Returns whether this invocation starts an app-server instance owned by the Host Runtime.
 ///
 /// App-server management commands such as `proxy` and `daemon` must stay on the stock Codex CLI.
@@ -375,6 +405,16 @@ pub fn app_server_subcommand_index(arguments: &[OsString]) -> Option<usize> {
 /// would corrupt the WebSocket transport.
 #[must_use]
 pub fn should_start_host_runtime(arguments: &[OsString]) -> bool {
+    should_start_host_runtime_for_originator(
+        arguments,
+        env::var_os(INTERNAL_ORIGINATOR_OVERRIDE_ENV).as_deref(),
+    )
+}
+
+fn should_start_host_runtime_for_originator(
+    arguments: &[OsString],
+    internal_originator: Option<&OsStr>,
+) -> bool {
     const VALUE_OPTIONS: &[&str] = &[
         "-c",
         "--config",
@@ -394,6 +434,12 @@ pub fn should_start_host_runtime(arguments: &[OsString]) -> bool {
     let Some(mut index) = app_server_subcommand_index(arguments).map(|index| index + 1) else {
         return false;
     };
+    if internal_originator.is_some_and(|originator| {
+        !originator.is_empty() && originator != OsStr::new(DESKTOP_ORIGINATOR)
+    }) || selects_memory_provider(arguments)
+    {
+        return false;
+    }
     while let Some(argument) = arguments.get(index).and_then(|value| value.to_str()) {
         if VALUE_OPTIONS.contains(&argument) {
             if arguments.get(index + 1).is_none() {
@@ -1016,7 +1062,7 @@ mod tests {
     use super::{PROCESS_TREE_REFRESH_INTERVAL, ShutdownSignals, process_tree_refresh_due};
     use super::{
         app_server_subcommand_index, is_default_remote_unix_listener, select_host_paths,
-        should_start_host_runtime,
+        should_start_host_runtime, should_start_host_runtime_for_originator,
     };
 
     fn arguments(values: &[&str]) -> Vec<OsString> {
@@ -1098,6 +1144,94 @@ mod tests {
             "app-server",
             "generate-json-schema",
         ])));
+    }
+
+    #[test]
+    fn routes_only_selected_memory_provider_to_stock_codex() {
+        for invocation in [
+            vec![
+                "-c",
+                "model_provider=\"openai-memgen\"",
+                "app-server",
+                "--stdio",
+            ],
+            vec![
+                "--config=model_provider=openai-memgen",
+                "app-server",
+                "--stdio",
+            ],
+            vec![
+                "app-server",
+                "--stdio",
+                "--config=model_provider='openai-memgen'",
+            ],
+            vec![
+                "app-server",
+                "-c",
+                "model_provider = openai-memgen",
+                "--stdio",
+            ],
+            vec![
+                "-c",
+                "model_provider=openai",
+                "app-server",
+                "--stdio",
+                "--config=model_provider=openai-memgen",
+            ],
+        ] {
+            assert!(!should_start_host_runtime_for_originator(
+                &arguments(&invocation),
+                None
+            ));
+        }
+        for invocation in [
+            vec![
+                "-c",
+                "model_providers.openai-memgen.name=OpenAI",
+                "app-server",
+                "--stdio",
+            ],
+            vec!["-c", "model_provider=openai", "app-server", "--stdio"],
+            vec!["app-server", "--stdio", "--config=other=openai-memgen"],
+            vec![
+                "-c",
+                "model_provider=openai-memgen",
+                "app-server",
+                "--stdio",
+                "--config=model_provider=openai",
+            ],
+        ] {
+            assert!(should_start_host_runtime_for_originator(
+                &arguments(&invocation),
+                None
+            ));
+        }
+    }
+
+    #[test]
+    fn routes_internal_auxiliary_originators_to_stock_codex() {
+        let app_server = arguments(&["app-server", "--stdio"]);
+        for originator in ["skysight", "Computer Use"] {
+            assert!(!should_start_host_runtime_for_originator(
+                &app_server,
+                Some(std::ffi::OsStr::new(originator)),
+            ));
+        }
+        for originator in [None, Some(""), Some("Codex Desktop")] {
+            assert!(should_start_host_runtime_for_originator(
+                &app_server,
+                originator.map(std::ffi::OsStr::new),
+            ));
+        }
+        for command in [
+            arguments(&["app-server", "proxy"]),
+            arguments(&["app-server", "daemon", "start"]),
+        ] {
+            assert!(!should_start_host_runtime_for_originator(
+                &command,
+                Some(std::ffi::OsStr::new("Codex Desktop")),
+            ));
+        }
     }
 
     #[test]

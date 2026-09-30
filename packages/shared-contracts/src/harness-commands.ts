@@ -22,6 +22,7 @@ export const harnessCommandDescriptorSchema = z
     label: commandLabelSchema,
     description: commandDescriptionSchema.optional(),
     argumentMode: z.enum(["none", "text"]),
+    kind: z.enum(["command", "skill"]).optional(),
   })
   .strict();
 
@@ -30,6 +31,7 @@ export type HarnessCommandDescriptor = z.infer<typeof harnessCommandDescriptorSc
 export const harnessCommandCatalogSchema = z
   .object({
     commands: z.array(harnessCommandDescriptorSchema),
+    source: z.enum(["static", "live"]).optional(),
   })
   .strict()
   .superRefine((catalog, context) => {
@@ -48,13 +50,20 @@ export const harnessCommandCatalogSchema = z
 
 export type HarnessCommandCatalog = z.infer<typeof harnessCommandCatalogSchema>;
 
-export const harnessCommandsInspectParamsSchema = z.object({ harnessId: harnessIdSchema }).strict();
+export const harnessCommandsInspectParamsSchema = z
+  .object({
+    harnessId: harnessIdSchema,
+    cwd: z.string().min(1).optional(),
+    refresh: z.boolean().optional(),
+  })
+  .strict();
 
 export type HarnessCommandsInspectParams = z.infer<typeof harnessCommandsInspectParamsSchema>;
 
 export const threadCommandsInspectParamsSchema = z
   .object({
     threadId: hostThreadIdSchema,
+    refresh: z.boolean().optional(),
   })
   .strict();
 
@@ -79,3 +88,20 @@ export const threadCommandExecuteResultSchema = z
   .strict();
 
 export type ThreadCommandExecuteResult = z.infer<typeof threadCommandExecuteResultSchema>;
+
+/** Builtins own collisions by ID or invocation; unrelated native skills remain visible. */
+export function mergeHarnessCommandCatalogs(
+  builtin: HarnessCommandCatalog,
+  native: HarnessCommandCatalog,
+): HarnessCommandCatalog {
+  const commands = [...builtin.commands];
+  const ids = new Set(commands.map((command) => command.id));
+  const invocations = new Set(commands.map((command) => command.invocation));
+  for (const command of native.commands) {
+    if (ids.has(command.id) || invocations.has(command.invocation)) continue;
+    ids.add(command.id);
+    invocations.add(command.invocation);
+    commands.push(command);
+  }
+  return { commands, source: native.source ?? "live" };
+}

@@ -43,6 +43,7 @@ export async function rollbackOmpLastTurn(
   const sourceSnapshot = mapOmpSnapshot(copiedHistory, {
     sessionId: startupSessionId,
     model: currentModel,
+    cwd,
   });
   let state = await transport.fork(boundary.lastUserEntryId);
   if (state.sessionId === sourceSessionId || state.sessionId === startupSessionId) {
@@ -67,6 +68,7 @@ export async function rollbackOmpLastTurn(
   const snapshot = mapOmpSnapshot(await transport.getEntries(), {
     sessionId: state.sessionId,
     model: modelFromState(state),
+    cwd,
   });
   const expectedTurnKeys = sourceSnapshot.turns
     .slice(0, -1)
