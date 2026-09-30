@@ -5,7 +5,13 @@ import type { HarnessWorkLevel } from "../src/text-session.js";
 
 const active = { aborted: false };
 
-function kernel(overrides: Partial<HarnessSessionKernelHooks> = {}) {
+type KernelOverrides = Partial<Omit<HarnessSessionKernelHooks, "releaseFailure">> &
+  (
+    | { releaseFailure?: "retry" }
+    | { releaseFailure: "fault"; publishReleaseFault(error: unknown): void }
+  );
+
+function kernel(overrides: KernelOverrides = {}) {
   let work: HarnessWorkLevel = { level: "idle" };
   const releaseNative = vi.fn(async (): Promise<void> => undefined);
   const released = vi.fn();
@@ -103,6 +109,62 @@ describe("HarnessSessionKernel release", () => {
     expect(value.phase).toBe("open");
     expect(await ended(value)).toBe(false);
     await expect(value.release(active)).resolves.toMatchObject({ status: "suspended" });
+  });
+
+  it("faults a Session whose release cannot be partly undone", async () => {
+    const published: unknown[] = [];
+    const releaseNative = vi.fn(async () => {
+      throw new Error("server stopped, transport still open");
+    });
+    const { value } = kernel({
+      releaseNative,
+      releaseFailure: "fault",
+      publishReleaseFault: (error) => {
+        published.push(error);
+        value.channel.emit({
+          kind: "event",
+          event: {
+            type: "session.faulted",
+            error: { code: "internalError", message: "cleanup failed", retryable: false },
+          },
+        });
+      },
+    });
+    await expect(value.release(active)).resolves.toEqual({
+      status: "releaseFailed",
+      reason: "Test Session release failed: server stopped, transport still open",
+    });
+    expect(published).toHaveLength(1);
+    expect(value.phase).toBe("faulted");
+    const iterator = value.channel.outputs[Symbol.asyncIterator]();
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: { event: { type: "session.faulted" } },
+    });
+    await expect(iterator.next()).resolves.toMatchObject({ done: true });
+    // A faulted Session is not released again.
+    await expect(value.release(active)).resolves.toMatchObject({ status: "unknown" });
+    expect(releaseNative).toHaveBeenCalledOnce();
+  });
+
+  it("leaves a failed release that a close raced to the close, even when it would fault", async () => {
+    let fail!: (error: Error) => void;
+    const publishReleaseFault = vi.fn();
+    const { value } = kernel({
+      releaseNative: () =>
+        new Promise<void>((_resolve, reject) => {
+          fail = reject;
+        }),
+      releaseFailure: "fault",
+      publishReleaseFault,
+    });
+    const attempt = value.release(active);
+    const closed = value.close(async () => undefined);
+    fail(new Error("release failed"));
+    await expect(attempt).resolves.toMatchObject({ status: "releaseFailed" });
+    await closed;
+    expect(publishReleaseFault).not.toHaveBeenCalled();
+    expect(value.phase).toBe("closed");
   });
 
   it("re-admits after an asynchronous idle confirmation", async () => {

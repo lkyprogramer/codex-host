@@ -13,7 +13,7 @@ import type {
 } from "@opencode-ai/sdk/v2";
 
 import {
-  HarnessOutputChannel,
+  HarnessSessionKernel,
   validateHostApprovalResponse,
   validateHostQuestionResponse,
   type HarnessAdapter,
@@ -22,7 +22,6 @@ import {
   type HarnessCommandInvocation,
   type HarnessError,
   type HarnessInspection,
-  type HarnessIdleSuspendResult,
   type HarnessIdleSuspendSignal,
   type HarnessOutput,
   type HarnessResult,
@@ -134,7 +133,6 @@ export interface OpenCodeAdapterDependencies {
   randomUUID(): string;
 }
 
-type SessionPhase = "open" | "closing" | "closed" | "faulted";
 type ActiveKind = "prompt" | "compact";
 
 interface LiveItem {
@@ -358,7 +356,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   readonly initialUsage: HostUsage | null;
   readonly outputs: AsyncIterable<HarnessOutput>;
   readonly resourceLifecycle: HarnessResourceLifecycle;
-  readonly #channel = new HarnessOutputChannel<HarnessOutput>();
+  readonly #kernel: HarnessSessionKernel;
   readonly #closeTimeoutMs: number;
   readonly #modelCatalog: ReturnType<typeof normalizeOpenCodeModelCatalog>;
   readonly #onClosed: () => void;
@@ -370,21 +368,17 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   readonly #uuid: () => string;
   readonly #knownUserMessageIds = new Set<string>();
   #active: ActiveTurn | null = null;
-  #closedNotified = false;
   #closePromise: Promise<void> | null = null;
   #configuring = false;
   #connectedCount = 0;
   #model: OpenCodeNativeModelRef | undefined;
   #nativeEventEpoch = 0;
   #permissionMode: OpenCodePermissionMode;
-  #phase: SessionPhase = "open";
   #projectionRefreshes = 0;
   #session: Session;
   #snapshotReads = 0;
   #snapshot: HostThreadSnapshot;
   #state: HarnessSessionState;
-  #suspendPromise: Promise<HarnessIdleSuspendResult> | null = null;
-  #suspending = false;
   #usage: HostUsage | null;
   #variant: string | undefined;
 
@@ -446,8 +440,30 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       list: async () => ({ ok: true, value: openCodeCommandCatalog }),
       execute: (command) => this.#executeHarnessCommand(command),
     };
-    this.resourceLifecycle = { suspend: (signal) => this.#suspend(signal) };
-    this.outputs = this.#channel.outputs;
+    this.#kernel = new HarnessSessionKernel({
+      label: "OpenCode Session",
+      scope: "native-session-and-managed-process-group",
+      workLevel: () =>
+        this.#hasLocalNativeWork()
+          ? { level: "busy", reason: "OpenCode Session has a local operation in flight" }
+          : { level: "idle" },
+      confirmIdle: (signal) => this.#confirmNativeIdle(signal),
+      releaseNative: () => closeOpenCodeResources(this.#transport, this.#connection),
+      // The Transport and the Server connection close together: once either
+      // closed, the Session cannot be used again, so a failed release faults.
+      releaseFailure: "fault",
+      publishReleaseFault: (error) => {
+        this.#event({ type: "session.faulted", error: normalizeError(error, "internalError") });
+        // The Host closes a faulted Session; this close retries the cleanup.
+        queueMicrotask(() => void this.close().catch(() => undefined));
+      },
+      released: () => this.#onClosed(),
+      // A rejected cleanup keeps this Session in the Adapter ownership ledger:
+      // the process group may still exist.
+      closeFailure: "final",
+    });
+    this.resourceLifecycle = this.#kernel.resourceLifecycle;
+    this.outputs = this.#kernel.channel.outputs;
   }
 
   async start(): Promise<void> {
@@ -462,18 +478,8 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   }
 
   async readSnapshot(): Promise<HarnessResult<HostThreadSnapshot>> {
-    if (this.#phase !== "open") {
+    if (!this.#kernel.open) {
       return { ok: false, error: invalidState("OpenCode Session is not open") };
-    }
-    if (this.#suspending) {
-      return {
-        ok: false,
-        error: {
-          code: "sessionBusy",
-          message: "OpenCode Session is being checked for idle suspension",
-          retryable: true,
-        },
-      };
     }
     if (this.#active || this.#configuring) {
       return {
@@ -522,18 +528,8 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       | PermissionModeSelectCompleted
     >
   > {
-    if (this.#phase !== "open") {
+    if (!this.#kernel.open) {
       return { ok: false, error: invalidState("OpenCode Session is not open") };
-    }
-    if (this.#suspending) {
-      return {
-        ok: false,
-        error: {
-          code: "sessionBusy",
-          message: "OpenCode Session is being checked for idle suspension",
-          retryable: true,
-        },
-      };
     }
     if (command.type === "turn.cancel") return this.#cancel(command);
     if (command.type === "interaction.respond") return this.#respond(command);
@@ -595,7 +591,11 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     // A rejected native cleanup retains this Session in the Adapter ownership
     // ledger. The process group may still exist, and dropping the last owner
     // would turn an observable fail-closed cleanup into a false success.
-    this.#closePromise ??= this.#close().then(() => this.#notifyClosed());
+    this.#closePromise ??= this.#kernel
+      .close(() => this.#closeNative())
+      .then(() => {
+        this.#onClosed();
+      });
     return this.#closePromise;
   }
 
@@ -618,18 +618,8 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   async #executeHarnessCommand(
     command: HarnessCommandInvocation,
   ): Promise<HarnessResult<HarnessCommandAccepted>> {
-    if (this.#phase !== "open") {
+    if (!this.#kernel.open) {
       return { ok: false, error: invalidState("OpenCode Session is not open") };
-    }
-    if (this.#suspending) {
-      return {
-        ok: false,
-        error: {
-          code: "sessionBusy",
-          message: "OpenCode Session is being checked for idle suspension",
-          retryable: true,
-        },
-      };
     }
     if (this.#active || this.#configuring) {
       return {
@@ -937,7 +927,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   }
 
   #handleEvent(event: Event): void {
-    if (this.#phase !== "open") return;
+    if (!this.#kernel.open) return;
     if (event.type === "server.connected") {
       this.#connectedCount += 1;
       const active = this.#active;
@@ -1491,7 +1481,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   #flushAdmission(active: ActiveTurn): void {
     if (!active.admissionCompleted || this.#active !== active) return;
     active.admissionBuffer.sort((left, right) => left.sequence - right.sequence);
-    for (const { output } of active.admissionBuffer.splice(0)) this.#channel.emit(output);
+    for (const { output } of active.admissionBuffer.splice(0)) this.#kernel.channel.emit(output);
   }
 
   #failAdmission(active: ActiveTurn, error: HarnessError): void {
@@ -1568,49 +1558,31 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   }
 
   #fault(error: unknown): void {
-    if (this.#phase === "faulted" || this.#phase === "closed") return;
     const normalized = normalizeError(error, "internalError");
-    if (this.#active && !this.#active.admissionCompleted) {
-      const active = this.#active;
-      active.admissionBuffer.length = 0;
-      active.admissionFailure = normalized;
-      active.resolveAdmissionFailure(normalized);
-      active.finished = true;
-      active.resolveCompletion();
-      this.#active = null;
-    } else if (this.#active) {
-      this.#completeTurn(this.#active, { status: "failed", error: normalized });
-    }
-    this.#phase = "faulted";
-    this.#event({ type: "session.faulted", error: normalized });
-    this.#channel.end();
-    void this.close().catch(() => undefined);
+    const faulted = this.#kernel.fault(() => {
+      if (this.#active && !this.#active.admissionCompleted) {
+        const active = this.#active;
+        active.admissionBuffer.length = 0;
+        active.admissionFailure = normalized;
+        active.resolveAdmissionFailure(normalized);
+        active.finished = true;
+        active.resolveCompletion();
+        this.#active = null;
+      } else if (this.#active) {
+        this.#completeTurn(this.#active, { status: "failed", error: normalized });
+      }
+      this.#event({ type: "session.faulted", error: normalized });
+    });
+    if (faulted) void this.close().catch(() => undefined);
   }
 
-  #suspend(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
-    if (this.#suspendPromise) return this.#suspendPromise;
-    if (this.#phase !== "open" || this.#closePromise) {
-      return Promise.resolve({ status: "unsupported", reason: "OpenCode Session is closing" });
-    }
-    if (signal.aborted) {
-      return Promise.resolve({ status: "unknown", reason: "Idle suspension was cancelled" });
-    }
-    this.#suspending = true;
-    const attempt = this.#performSuspend(signal);
-    this.#suspendPromise = attempt;
-    void attempt
-      .finally(() => {
-        if (this.#suspendPromise === attempt) this.#suspendPromise = null;
-        this.#suspending = false;
-      })
-      .catch(() => undefined);
-    return attempt;
-  }
-
-  async #performSuspend(signal: HarnessIdleSuspendSignal): Promise<HarnessIdleSuspendResult> {
-    if (this.#hasLocalNativeWork()) {
-      return { status: "busy", reason: "OpenCode Session has a local operation in flight" };
-    }
+  /**
+   * Local state cannot see the native Server: it confirms that the managed
+   * Session is the one it serves and that nothing runs or waits there.
+   */
+  async #confirmNativeIdle(
+    signal: HarnessIdleSuspendSignal,
+  ): Promise<{ status: "busy" | "unknown"; reason: string } | null> {
     const eventEpoch = this.#nativeEventEpoch;
     let nativeSession: Session;
     let statuses: Record<string, { type: string }>;
@@ -1630,15 +1602,6 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       };
     }
     if (signal.aborted) return { status: "unknown", reason: "Idle suspension was cancelled" };
-    if (this.#phase !== "open" || this.#closePromise) {
-      return { status: "unknown", reason: "OpenCode Session closed during idle check" };
-    }
-    if (this.#hasLocalNativeWork()) {
-      return {
-        status: "busy",
-        reason: "OpenCode Session began a local operation during idle check",
-      };
-    }
     if (this.#nativeEventEpoch !== eventEpoch) {
       return { status: "busy", reason: "OpenCode native state changed during idle check" };
     }
@@ -1663,20 +1626,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     if (questions.length > 0 || permissions.length > 0) {
       return { status: "busy", reason: "OpenCode native Server has pending interactions" };
     }
-    if (signal.aborted) return { status: "unknown", reason: "Idle suspension was cancelled" };
-    try {
-      await closeOpenCodeResources(this.#transport, this.#connection);
-    } catch (error) {
-      this.#fault(error);
-      return {
-        status: "releaseFailed",
-        reason: "OpenCode managed resource cleanup could not be confirmed",
-      };
-    }
-    this.#phase = "closed";
-    this.#channel.end();
-    this.#notifyClosed();
-    return { status: "suspended", scope: "native-session-and-managed-process-group" };
+    return null;
   }
 
   #hasLocalNativeWork(): boolean {
@@ -1688,16 +1638,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
     );
   }
 
-  #notifyClosed(): void {
-    if (this.#closedNotified) return;
-    this.#closedNotified = true;
-    this.#onClosed();
-  }
-
-  async #close(): Promise<void> {
-    if (this.#phase === "closed") return;
-    const faulted = this.#phase === "faulted";
-    if (!faulted) this.#phase = "closing";
+  async #closeNative(): Promise<void> {
     const active = this.#active;
     if (active) {
       active.cancellationState = "confirmed";
@@ -1719,10 +1660,6 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
         error: invalidState("OpenCode Session closed before active Turn cancellation settled"),
       });
     }
-    if (!faulted) {
-      this.#phase = "closed";
-      this.#channel.end();
-    }
     if (cleanupFailure) throw cleanupFailure;
   }
 
@@ -1732,7 +1669,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       active.admissionBuffer.push({ output, sequence: active.admissionSequence++ });
       return;
     }
-    this.#channel.emit(output);
+    this.#kernel.channel.emit(output);
   }
 
   #event(event: HostEvent): void {

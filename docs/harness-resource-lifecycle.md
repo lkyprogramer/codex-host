@@ -31,9 +31,20 @@ Session 在 `capabilities.resources` 中声明它能交还的原生资源：`idl
 - 并发的释放请求共享一次尝试；释放成功后结果保持，被拒绝或失败的尝试会被清除，下次可以重来。
 - 准入与阶段切换发生在第一个 await 之前，迟到的原生事件不能在 Host 已被告知释放后发布；需要异步确认空闲时，确认返回后重新检查一遍本地状态。
 - 拒绝统一返回 `busy` 或 `unknown`，原因以 Session 名称开头；释放失败返回 `releaseFailed`，原因前缀为「… release failed」。
-- 关闭失败的去向由 Adapter 明确选择：`retry`（默认）保持 closing、输出不结束，之后的 close 再试；`final` 直接结束 Session 与输出，此后每次 close 都报告同一失败。故障只从 open 状态发生，先发布事件再结束输出。
+- 确认空闲期间 Session 仍是 open，照常接受操作；确认返回后重新准入，期间开始的工作让这次释放以 `busy` 放弃。
+- 释放失败的去向由 Adapter 按原生事实声明：`retry`（默认）表示原生端仍完整，Session 回到 open，由 Host 按退避重试；`fault` 表示释放无法部分回退（例如传输与服务连接已关闭其一），Session 经 `publishReleaseFault` 发布故障后结束输出，由 Host 关闭。与释放竞争的 close 优先，此时不再判故障。
+- 关闭失败的去向由 Adapter 明确选择：`retry`（默认）保持 closing、输出不结束，之后的 close 再试；`final` 直接结束 Session 与输出，此后每次 close 都报告同一失败。故障只从 open 状态发生，先发布事件再结束输出；closing 期间到达的原生故障不再发布。
 
-当前 Grok（`retry`）与 Cursor（`final`，释放即关闭）已迁移到内核。Claude Code 与 Kiro 的结构与内核一致，尚未迁移；OpenCode 有刻意不同的语义（释放失败直接判故障、确认空闲期间拒绝其他操作、关闭中也会报告故障），迁移前需要先决定是否统一这些行为。
+已迁移到内核的 Adapter：
+
+| Adapter | 释放失败 | 关闭失败 | 说明 |
+| --- | --- | --- | --- |
+| Grok | `retry` | `retry` | 释放只结束受管进程，传输仍可用 |
+| Claude Code | `retry` | `final` | 未确认的进程保留为待释放 Transport，下次启动先重试释放 |
+| OpenCode | `fault` | `final` | 原生空闲经 `confirmIdle` 向 Server 确认；关闭失败时 Session 留在 Adapter 所有权台账中 |
+| Cursor | 释放即关闭 | `final` | |
+
+Kiro 的结构与内核一致，尚未迁移。
 
 ## 释放范围与任务静默
 
