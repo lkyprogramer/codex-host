@@ -4228,6 +4228,49 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  it("forwards official requests the Host cannot read to native Codex unchanged", async () => {
+    const fixture = createFixture();
+    const officialRequests = new JsonLineCollector(fixture.official.stdin);
+    // Ownership is decided before validation: none of these names a codexhost method, transport
+    // Model, Host cursor or External Thread, so native Codex judges them.
+    const requests: JsonObject[] = [
+      // A native MCP App Thread starts without a Model.
+      { id: 61, method: "thread/start", params: { cwd: "/synthetic" } },
+      { id: 62, method: "thread/list", params: { archived: "future-value" } },
+      { id: 63, method: "thread/archive", params: {} },
+      { id: 64, method: "thread/metadata/update", params: { futureField: true } },
+      { id: 65, method: "turn/start" },
+      { id: 66, method: "thread/read" },
+    ];
+    for (const request of requests) {
+      writeRequest(fixture.desktopInput, request);
+      await expect(
+        officialRequests.waitFor((message) => message.id === request.id),
+      ).resolves.toEqual(request);
+      fixture.official.stdout.write(`${JSON.stringify({ id: request.id, result: {} })}\n`);
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, request.id as number)),
+      ).resolves.toEqual({ id: request.id, result: {} });
+    }
+    expect(fixture.adapter.sessions).toHaveLength(0);
+    await stopFixture(fixture);
+  });
+
+  it("still rejects a malformed Host Thread list cursor itself", async () => {
+    const fixture = createFixture();
+    const officialRequests = new JsonLineCollector(fixture.official.stdin);
+    writeRequest(fixture.desktopInput, {
+      id: 67,
+      method: "thread/list",
+      params: { cursor: "codexhost:thread-list:v1:not-a-cursor" },
+    });
+    await expect(
+      fixture.collector.waitFor((message) => requestId(message, 67)),
+    ).resolves.toMatchObject({ id: 67, error: { code: -32602 } });
+    expect(officialRequests.messages.some((message) => message.id === 67)).toBe(false);
+    await stopFixture(fixture);
+  });
+
   it("archives and unarchives an active External Thread without closing its Session", async () => {
     const fixture = createFixture();
     const threadId = await startPiThread(fixture);

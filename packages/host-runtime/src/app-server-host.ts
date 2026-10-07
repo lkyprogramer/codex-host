@@ -4,6 +4,7 @@ import {
   loadedSessionsParamsSchema,
   loadedSessionsResultSchema,
 } from "@codexhost/shared-contracts";
+import { DesktopReplyGuards } from "./desktop-reply-guard.js";
 import { DesktopRequestDispatcher } from "./desktop-request-dispatcher.js";
 import { AccountRateLimits } from "./codex-runtime/account-rate-limits.js";
 import { inspectHarnessAccounts } from "./harness-accounts.js";
@@ -220,13 +221,12 @@ import {
 } from "./thread-list-aggregator.js";
 import {
   CodexTurnProjector,
+  carriesHostThreadListCursor,
   decodeCreateRoute,
   decodeExternalTransportSelection,
   encodeExternalTransportSelection,
-  decodeThreadArchiveRequest,
   decodeThreadForkRequest,
   decodeThreadListRequest,
-  decodeThreadMetadataUpdateRequest,
   decodeThreadRevertRequest,
   decodeThreadRollbackRequest,
   mapExternalThreadHarnessError,
@@ -469,6 +469,14 @@ export function classifyCreateRequestRoute(
   };
 }
 
+/**
+ * Reads routing fields before ownership is known. Never throws: a shape the Host does not
+ * recognize belongs to native Codex, which validates its own protocol.
+ */
+function routingParams(request: JsonRpcRequest): JsonObject {
+  return isRecord(request.params) ? (request.params as JsonObject) : {};
+}
+
 function requestText(params: JsonObject): string {
   if (!Array.isArray(params.input)) throw new Error("turn/start input must be an array");
   if (params.input.some((item) => !isRecord(item) || item.type !== "text")) {
@@ -519,13 +527,18 @@ function turnProjectionGate(): TurnProjectionGate {
 class OrderedWriter {
   #tail = Promise.resolve();
 
-  constructor(private readonly stream: Writable) {}
+  constructor(
+    private readonly stream: Writable,
+    /** Sees every JSON message as it is queued, for example to note a request answered. */
+    private readonly observe: (value: JsonValue) => void = () => undefined,
+  ) {}
 
   frame(frame: Buffer<ArrayBufferLike>): Promise<void> {
     return this.#enqueue(() => writeFrame(this.stream, frame));
   }
 
   json(value: JsonValue, isCurrent?: () => boolean): Promise<void> {
+    this.observe(value);
     return this.#enqueue(() =>
       !isCurrent || isCurrent() ? writeJsonFrame(this.stream, value) : Promise.resolve(),
     );
@@ -540,6 +553,13 @@ class OrderedWriter {
 
 export class AppServerHost {
   readonly #desktopRequests = new DesktopRequestDispatcher();
+  readonly #replyGuards = new DesktopReplyGuards(async (request, error, answered) => {
+    this.#diagnose(error);
+    if (answered) return;
+    await this.#writer
+      .json(rpcError(request, -32076, "Host request failed"))
+      .catch((writeError: unknown) => this.#diagnose(writeError));
+  });
   readonly #options: Required<
     Pick<AppServerHostOptions, "desktopInput" | "desktopOutput" | "diagnosticOutput">
   > &
@@ -603,7 +623,9 @@ export class AppServerHost {
       diagnosticOutput: process.stderr,
       ...options,
     };
-    this.#writer = new OrderedWriter(this.#options.desktopOutput);
+    this.#writer = new OrderedWriter(this.#options.desktopOutput, (value) =>
+      this.#replyGuards.noteWritten(value),
+    );
     const environment = this.#options.environment ?? process.env;
     const dataDirectory = path.resolve(
       environment.CODEXHOST_DATA_DIR ?? path.join(os.homedir(), ".codexhost"),
@@ -937,11 +959,8 @@ export class AppServerHost {
       const key = !independent && typeof params.threadId === "string" ? params.threadId : undefined;
       this.#desktopRequests.dispatch(
         key,
-        () => this.#handleDesktopRequest(request, frame),
-        async (error) => {
-          this.#diagnose(error);
-          await this.#writer.json(rpcError(request, -32076, "Host request failed"));
-        },
+        () => this.#replyGuards.run(request, () => this.#handleDesktopRequest(request, frame)),
+        async (error) => this.#diagnose(error),
       );
     }
     await this.#desktopRequests.drain();
@@ -949,6 +968,11 @@ export class AppServerHost {
     this.#externalSteering.close();
     if (this.#drainActiveWorkOnInputEnd) await this.#waitForActiveWorkToDrain();
     await this.#codexRuntimePool.close();
+  }
+
+  /** Detaches work that answers `request`, keeping the failure fallback. */
+  #dispatchDesktopReply(request: JsonRpcRequest, run: () => Promise<void>): void {
+    this.#dispatchDesktopRequest(() => this.#replyGuards.run(request, run));
   }
 
   async #handleDesktopRequest(
@@ -972,7 +996,7 @@ export class AppServerHost {
       request.method === "codexhost/update/start" ||
       request.method === "codexhost/update/status"
     ) {
-      this.#dispatchDesktopRequest(() => this.#handleUpdateRequest(request));
+      this.#dispatchDesktopReply(request, () => this.#handleUpdateRequest(request));
       return;
     }
     if (
@@ -986,13 +1010,13 @@ export class AppServerHost {
       request.method === "codexhost/account/login/start" ||
       request.method === "codexhost/account/login/cancel"
     ) {
-      this.#dispatchDesktopRequest(() =>
+      this.#dispatchDesktopReply(request, () =>
         handleCodexAccountRequest(request, this.#accountRequestContext()),
       );
       return;
     }
     if (request.method === "codexhost/harness/accounts/list") {
-      this.#dispatchDesktopRequest(async () => {
+      this.#dispatchDesktopReply(request, async () => {
         if (!harnessAccountListParamsSchema.safeParse(request.params).success) {
           await this.#writer.json(rpcError(request, -32602, "Invalid Harness account list params"));
           return;
@@ -1009,15 +1033,15 @@ export class AppServerHost {
       return;
     }
     if (request.method === "codexhost/harness/inspect") {
-      this.#dispatchDesktopRequest(() => this.#inspectHarness(request));
+      this.#dispatchDesktopReply(request, () => this.#inspectHarness(request));
       return;
     }
     if (request.method === "codexhost/harness/web-ui/open") {
-      this.#dispatchDesktopRequest(() => this.#openHarnessWebUi(request));
+      this.#dispatchDesktopReply(request, () => this.#openHarnessWebUi(request));
       return;
     }
     if (request.method === "codexhost/harness/plugins/list") {
-      this.#dispatchDesktopRequest(async () => {
+      this.#dispatchDesktopReply(request, async () => {
         if (!harnessPluginListParamsSchema.safeParse(request.params).success) {
           await this.#writer.json(rpcError(request, -32602, "Invalid Harness plugin list params"));
           return;
@@ -1028,7 +1052,7 @@ export class AppServerHost {
       return;
     }
     if (isSessionImportRequest(request.method)) {
-      this.#dispatchDesktopRequest(() => this.#handleSessionImport(request));
+      this.#dispatchDesktopReply(request, () => this.#handleSessionImport(request));
       return;
     }
     if (request.method === "codexhost/thread/fork") {
@@ -1080,7 +1104,7 @@ export class AppServerHost {
       return;
     }
     if (request.method === "codexhost/thread/command/execute") {
-      this.#dispatchDesktopRequest(() => this.#executeThreadCommand(request));
+      this.#dispatchDesktopReply(request, () => this.#executeThreadCommand(request));
       return;
     }
     if (
@@ -1098,27 +1122,23 @@ export class AppServerHost {
         if (!decoded) throw new Error("Expected thread/list request");
         listRequest = decoded;
       } catch (error) {
-        await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
+        // Only a Host cursor makes the list Host-owned. Any other shape is native Codex's to judge.
+        if (carriesHostThreadListCursor(request)) {
+          await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
+        } else {
+          await this.#forwardOfficialRequest(request, frame);
+        }
         return;
       }
       if (!listRequest.supportsExternal) {
         await this.#forwardOfficialRequest(request, frame);
         return;
       }
-      this.#dispatchDesktopRequest(() => this.#listThreads(request, listRequest));
+      this.#dispatchDesktopReply(request, () => this.#listThreads(request, listRequest));
       return;
     }
     if (request.method === "thread/archive" || request.method === "thread/unarchive") {
-      let threadId: string;
-      try {
-        const decoded = decodeThreadArchiveRequest(request);
-        if (!decoded) throw new Error(`Expected ${request.method} request`);
-        threadId = decoded.threadId;
-      } catch (error) {
-        await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
-        return;
-      }
-      const location = await this.#locateExternalThread(threadId);
+      const location = await this.#locateRequestThread(request);
       if (await this.#writeResolutionError(request, location)) return;
       if (location.kind === "official") {
         await this.#forwardOfficialRequest(request, frame);
@@ -1134,16 +1154,7 @@ export class AppServerHost {
       return;
     }
     if (request.method === "thread/metadata/update") {
-      let threadId: string;
-      try {
-        const decoded = decodeThreadMetadataUpdateRequest(request);
-        if (!decoded) throw new Error("Expected thread/metadata/update request");
-        threadId = decoded.threadId;
-      } catch (error) {
-        await this.#writer.json(rpcError(request, -32602, errorMessage(error)));
-        return;
-      }
-      const location = await this.#locateExternalThread(threadId);
+      const location = await this.#locateRequestThread(request);
       if (await this.#writeResolutionError(request, location)) return;
       if (location.kind === "official") {
         await this.#forwardOfficialRequest(request, frame);
@@ -1248,7 +1259,7 @@ export class AppServerHost {
       }
     }
     if (request.method === "turn/start") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const threadId = params.threadId;
       const resolution =
         typeof threadId === "string"
@@ -1264,7 +1275,9 @@ export class AppServerHost {
       }
       if (await this.#writeResolutionError(request, resolution)) return;
       if (resolution.kind === "external") {
-        this.#dispatchDesktopRequest(() => this.#startExternalTurn(request, resolution.thread));
+        this.#dispatchDesktopReply(request, () =>
+          this.#startExternalTurn(request, resolution.thread),
+        );
         return;
       }
       if (typeof threadId === "string") {
@@ -1274,21 +1287,23 @@ export class AppServerHost {
       return;
     }
     if (request.method === "turn/steer") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const resolution =
         typeof params.threadId === "string"
           ? await this.#resolveExternalThread(params.threadId)
           : ({ kind: "official" } as const);
       if (await this.#writeResolutionError(request, resolution)) return;
       if (resolution.kind === "external") {
-        this.#dispatchDesktopRequest(() => this.#steerExternalTurn(request, resolution.thread));
+        this.#dispatchDesktopReply(request, () =>
+          this.#steerExternalTurn(request, resolution.thread),
+        );
         return;
       }
       await this.#forwardOfficialComposerTurn(request, frame);
       return;
     }
     if (request.method === "turn/interrupt") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const resolution =
         typeof params.threadId === "string"
           ? await this.#resolveExternalThread(params.threadId)
@@ -1300,7 +1315,7 @@ export class AppServerHost {
       }
     }
     if (request.method === "thread/unsubscribe") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       if (typeof params.threadId === "string") {
         const location = await this.#locateExternalThread(params.threadId);
         if (await this.#writeResolutionError(request, location)) return;
@@ -1319,7 +1334,7 @@ export class AppServerHost {
       }
     }
     if (request.method === "thread/name/set" || request.method === "thread/delete") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const location =
         typeof params.threadId === "string"
           ? await this.#locateExternalThread(params.threadId)
@@ -1358,7 +1373,7 @@ export class AppServerHost {
     frame: Buffer<ArrayBufferLike>,
   ): Promise<void> {
     if (request.method === "thread/turns/list" || request.method === "thread/items/list") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const resolution =
         typeof params.threadId === "string"
           ? await this.#resolveExternalThread(params.threadId)
@@ -1375,7 +1390,7 @@ export class AppServerHost {
       }
     }
     if (request.method === "thread/read") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const location =
         typeof params.threadId === "string"
           ? await this.#locateExternalThread(params.threadId)
@@ -1400,7 +1415,7 @@ export class AppServerHost {
       }
     }
     if (request.method === "thread/read" || request.method === "thread/resume") {
-      const params = requestObject(request);
+      const params = routingParams(request);
       const resolution =
         typeof params.threadId === "string"
           ? await this.#resolveExternalThread(params.threadId)
@@ -1455,7 +1470,7 @@ export class AppServerHost {
     frame: Buffer<ArrayBufferLike>,
   ): Promise<void> {
     try {
-      const params = requestObject(request);
+      const params = routingParams(request);
       if (!Array.isArray(params.input)) {
         await this.#forwardOfficialRequest(request, frame);
         return;
@@ -1536,6 +1551,8 @@ export class AppServerHost {
         } else {
           await runtime.sendFrame(frame);
         }
+        // Native Codex answers it from here on.
+        this.#replyGuards.markAnswered(request.id);
       } catch (error) {
         const requestKey = this.#officialRequestKey(runtime.account.accountId, request.id);
         this.#pendingOfficialThreadBindings.delete(requestKey);
@@ -3182,6 +3199,14 @@ export class AppServerHost {
     requestedPermissionModeId?: HarnessPermissionModeId;
   }): ExternalThread {
     return this.#externalRuntime.register(input);
+  }
+
+  /** Locates the Thread a request names; a request naming none belongs to native Codex. */
+  #locateRequestThread(request: JsonRpcRequest): Promise<ExternalThreadLocation> {
+    const threadId = routingParams(request).threadId;
+    return typeof threadId === "string"
+      ? this.#locateExternalThread(threadId)
+      : Promise.resolve({ kind: "official" });
   }
 
   #locateExternalThread(threadId: string): Promise<ExternalThreadLocation> {

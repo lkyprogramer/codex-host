@@ -124,6 +124,15 @@ describe("external Harness transport model routing", () => {
     expect(decodeCreateRoute({ id: 4, method: "model/list", params: {} })).toBeNull();
   });
 
+  it("leaves a Thread start without a text Model to native Codex", () => {
+    // For example a native MCP App Thread: only a text Model can carry a codexhost marker.
+    expect(decodeCreateRoute({ id: 14, method: "thread/start", params: {} })).toBeNull();
+    expect(
+      decodeCreateRoute({ id: 15, method: "thread/start", params: { model: null } }),
+    ).toBeNull();
+    expect(decodeCreateRoute({ id: 16, method: "thread/start" })).toBeNull();
+  });
+
   it("round-trips a bounded opaque selected Pi Model Ref", () => {
     const model = harnessModelRefSchema.parse({ id: "pi-model-v1.cHJvdmlkZXItaWQ" });
     const transportModelId = encodePiTransportModel(model);
