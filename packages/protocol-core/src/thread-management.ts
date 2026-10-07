@@ -303,6 +303,11 @@ export function decodeThreadListRequest(request: JsonRpcRequest): DecodedThreadL
   if (sortKey === "section_position" && isHostCursor) {
     throw new Error("thread/list Host cursor cannot be used with section_position sorting");
   }
+  // A Host cursor is the Host's to continue, but the Host cannot serve fields it does not know,
+  // and native Codex cannot decode the cursor: reject it here rather than forward it.
+  if (hasUnknownFields && isHostCursor) {
+    throw new Error("thread/list Host cursor cannot be used with unrecognized params");
+  }
   const supportsExternal =
     sortKey !== "section_position" && !hasUnknownFields && (cursorText === null || isHostCursor);
   const cursor =

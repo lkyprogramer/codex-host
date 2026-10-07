@@ -356,4 +356,10 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 
 | 迭代 | 卡片 | 分支 | 状态 |
 | --- | --- | --- | --- |
-| A | V01、V02 | `fix/official-traffic-ownership` | 已实现，待评审；设计说明见 [官方流量归属](../official-traffic-ownership.md) |
+| A | V01、V02 | `fix/official-traffic-ownership` | 已实现并经独立评审，评审发现已修复；设计说明见 [官方流量归属](../official-traffic-ownership.md) |
+
+迭代 A 与卡片验收的差异：
+
+- V02 验收写的是“外部 Thread 上格式错误的 archive / metadata 仍返回 `-32602`”。实际实现中，外部 Thread 的 metadata 更新不论参数如何都返回 `-32078`（尚不支持，V10 处理）；archive / unarchive 不再单独校验，因为能定位到外部 Thread 已说明 `threadId` 合法，不存在格式错误的情形。
+- V01 的“已转发后抛错”只有单元测试覆盖：Host 中转发成功之后没有可能抛错的代码，无法构造集成用例。
+- 评审另外发现并已修复一个早已存在的问题：带 Host 游标、同时带未知字段的 `thread/list` 会连同 Host 游标一起转发给官方；现在由 Host 以 `-32602` 拒绝。

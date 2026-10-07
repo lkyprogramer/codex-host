@@ -317,6 +317,7 @@ function createFixture(
     updateCoordinator?: HostUpdateCoordinator;
     onDelegationApi?: (api: DelegationControlRegistration) => (() => void) | undefined;
     shutdownBudgetMs?: number;
+    defaultAgent?: "codex" | "pi";
   } = {},
 ) {
   const adapter =
@@ -352,7 +353,7 @@ function createFixture(
   const host = new AppServerHost({
     stockCodexPath: "/synthetic/codex",
     arguments: ["app-server"],
-    defaultAgent: "codex",
+    defaultAgent: options.defaultAgent ?? "codex",
     desktopInput,
     desktopOutput,
     diagnosticOutput,
@@ -4241,6 +4242,10 @@ describe("AppServerHost HarnessAdapter projection", () => {
       { id: 64, method: "thread/metadata/update", params: { futureField: true } },
       { id: 65, method: "turn/start" },
       { id: 66, method: "thread/read" },
+      { id: 68, method: "future/method", params: { anything: [1, 2] } },
+      { id: 69, method: "turn/interrupt", params: "not-an-object" },
+      { id: 70, method: "thread/unarchive" },
+      { id: 71, method: "thread/start", params: { model: { id: "future-model" } } },
     ];
     for (const request of requests) {
       writeRequest(fixture.desktopInput, request);
@@ -4259,15 +4264,68 @@ describe("AppServerHost HarnessAdapter projection", () => {
   it("still rejects a malformed Host Thread list cursor itself", async () => {
     const fixture = createFixture();
     const officialRequests = new JsonLineCollector(fixture.official.stdin);
-    writeRequest(fixture.desktopInput, {
-      id: 67,
-      method: "thread/list",
-      params: { cursor: "codexhost:thread-list:v1:not-a-cursor" },
-    });
-    await expect(
-      fixture.collector.waitFor((message) => requestId(message, 67)),
-    ).resolves.toMatchObject({ id: 67, error: { code: -32602 } });
+    const requests: JsonObject[] = [
+      {
+        id: 67,
+        method: "thread/list",
+        params: { cursor: "codexhost:thread-list:v1:not-a-cursor" },
+      },
+      // Native Codex cannot decode a Host cursor, whatever else the list carries.
+      {
+        id: 72,
+        method: "thread/list",
+        params: { cursor: "codexhost:thread-list:v1:host-page", futureFilter: true },
+      },
+    ];
+    for (const request of requests) {
+      writeRequest(fixture.desktopInput, request);
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, request.id as number)),
+      ).resolves.toMatchObject({ id: request.id, error: { code: -32602 } });
+    }
     expect(officialRequests.messages.some((message) => message.id === 67)).toBe(false);
+    expect(officialRequests.messages.some((message) => message.id === 72)).toBe(false);
+    await stopFixture(fixture);
+  });
+
+  it("answers a request whose detached work fails", async () => {
+    const adapter = new FakeHarnessAdapter(harnessIdSchema.parse("pi"));
+    // Reading the capability throws, so the detached account inspection rejects.
+    Object.defineProperty(adapter, "inspectAccount", {
+      configurable: true,
+      get() {
+        throw new Error("synthetic account capability failure");
+      },
+    });
+    const fixture = createFixture({ externalAdapters: new Map([["pi", adapter]]) });
+    writeRequest(fixture.desktopInput, {
+      id: 73,
+      method: "codexhost/harness/accounts/list",
+      params: {},
+    });
+    await expect(fixture.collector.waitFor((message) => requestId(message, 73))).resolves.toEqual({
+      id: 73,
+      error: { code: -32076, message: "Host request failed" },
+    });
+    await stopFixture(fixture);
+  });
+
+  it("leaves a Model-less Thread start to native Codex even when Pi is the default Agent", async () => {
+    const fixture = createFixture({ defaultAgent: "pi" });
+    const officialRequests = new JsonLineCollector(fixture.official.stdin);
+    // A native MCP App Thread carries no Model: it is not a Composer create the default
+    // Agent setting applies to.
+    const request = { id: 74, method: "thread/start", params: { cwd: "/synthetic" } };
+    writeRequest(fixture.desktopInput, request);
+    await expect(officialRequests.waitFor((message) => message.id === 74)).resolves.toEqual(
+      request,
+    );
+    fixture.official.stdout.write(`${JSON.stringify({ id: 74, result: {} })}\n`);
+    await expect(fixture.collector.waitFor((message) => requestId(message, 74))).resolves.toEqual({
+      id: 74,
+      result: {},
+    });
+    expect(fixture.adapter.sessions).toHaveLength(0);
     await stopFixture(fixture);
   });
 

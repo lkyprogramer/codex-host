@@ -78,6 +78,15 @@ describe("Codex Thread list and management protocol boundary", () => {
         params: { cursor: "official-opaque" },
       })?.supportsExternal,
     ).toBe(false);
+
+    // A Host cursor cannot travel to native Codex, so future filters on it are refused here.
+    expect(() =>
+      decodeThreadListRequest({
+        id: 3,
+        method: "thread/list",
+        params: { cursor: "codexhost:thread-list:v1:host-page", futureFilter: true },
+      }),
+    ).toThrow("unrecognized params");
   });
 
   it("reserves section position sorting and native cursors for official lists", () => {
