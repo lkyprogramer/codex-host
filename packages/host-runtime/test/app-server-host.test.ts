@@ -4310,6 +4310,28 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  it("answers a request whose inline handling fails", async () => {
+    const mappingStore = new MappingStore({
+      directory: mkdtempSync(path.join(tmpdir(), "codexhost-host-test-")),
+    });
+    // Locating an unknown Host Thread ID reads the Delegation store without a fallback, so the
+    // request handler itself throws.
+    vi.spyOn(mappingStore, "getDelegationByChild").mockRejectedValue(
+      new Error("synthetic Delegation store failure"),
+    );
+    const fixture = createFixture({ mappingStore });
+    writeRequest(fixture.desktopInput, {
+      id: 75,
+      method: "thread/archive",
+      params: { threadId: "019a0000-0000-7000-8000-000000000091" },
+    });
+    await expect(fixture.collector.waitFor((message) => requestId(message, 75))).resolves.toEqual({
+      id: 75,
+      error: { code: -32076, message: "Host request failed" },
+    });
+    await stopFixture(fixture);
+  });
+
   it("leaves a Model-less Thread start to native Codex even when Pi is the default Agent", async () => {
     const fixture = createFixture({ defaultAgent: "pi" });
     const officialRequests = new JsonLineCollector(fixture.official.stdin);

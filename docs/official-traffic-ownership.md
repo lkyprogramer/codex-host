@@ -26,7 +26,8 @@ Desktop 发出的每个请求都在 [`DesktopReplyGuards`](../packages/host-runt
 ## 验证
 
 - `packages/host-runtime/test/desktop-reply-guard.test.ts`：兜底回复、已回复或已转发后不重复回复、后台工作的独立保护。
-- `packages/host-runtime/test/app-server-host.test.ts` 的 “answers a request whose detached work fails”：后台工作失败时 Desktop 收到 `-32076`。“已转发给官方后又抛错”在 Host 中没有可触发的路径（转发成功后不再有可能抛错的代码），只由单元测试覆盖。
+- `packages/host-runtime/test/app-server-host.test.ts` 的 “answers a request whose inline handling fails” 与 “answers a request whose detached work fails”：请求处理本身失败、以及后台工作失败时，Desktop 都收到 `-32076`。
+- “已回复后又失败”和“已转发给官方后又抛错”只由单元测试覆盖：Host 中转发成功或写出回复之后，已没有可能抛错的代码；唯一的例外是写回 Desktop 本身失败，此时兜底回复同样写不出去。
 - `packages/host-runtime/test/app-server-host.test.ts`：官方无法由 Host 解读的请求（含未知方法、非对象或缺失的 params、对象形式的 Model）原样转发；默认 Agent 为 Pi 时不带 Model 的 `thread/start` 仍交给官方；格式错误或带未知字段的 Host 游标由 Host 拒绝。
 - `packages/protocol-core/test/model-routing.test.ts`、`thread-management.test.ts`：不带文本 Model 的 `thread/start` 不属于 Host；Host 游标不能与未知字段同时使用。
 
