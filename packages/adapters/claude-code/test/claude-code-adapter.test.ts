@@ -755,6 +755,39 @@ describe("Claude Code HarnessAdapter", () => {
     await adapter.close().catch(() => undefined);
   });
 
+  it("lets a close that races a successful Claude release end the Session once", async () => {
+    const { adapter, dependencies, transports } = fixture();
+    const session = await openSession(adapter);
+    const lifecycle = session.resourceLifecycle;
+    if (!lifecycle) throw new Error("Missing idle lifecycle");
+    await session.execute(textTurn("racing-release"));
+    const transport = transports[0];
+    if (!transport) throw new Error("Fake Claude transport was not created");
+    transport.finish({ status: "succeeded" });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    let finishRelease: () => void = () => undefined;
+    transport.close.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          finishRelease = () => resolve(undefined);
+        }),
+    );
+
+    const suspending = lifecycle.suspend(new AbortController().signal);
+    const closing = session.close();
+    finishRelease();
+    await expect(suspending).resolves.toEqual({
+      status: "suspended",
+      scope: "claude-sdk-session",
+    });
+    await expect(closing).resolves.toBeUndefined();
+    await expect(session.execute(textTurn("after-close"))).resolves.toMatchObject({ ok: false });
+    expect(dependencies.createTransport).toHaveBeenCalledOnce();
+    // Both the release and the close report the Session closed; the Adapter
+    // holds nothing more to stop.
+    await expect(adapter.close()).resolves.toBeUndefined();
+  });
+
   it("refuses Claude idle suspension while native background tasks run", async () => {
     const { adapter, transports } = fixture();
     const session = await openSession(adapter);

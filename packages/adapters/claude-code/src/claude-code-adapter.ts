@@ -1474,7 +1474,13 @@ class ClaudeHarnessSession implements HarnessSession {
       }
       if (this.#unreleasedTransport === unreleased) this.#unreleasedTransport = null;
     }
-    if (this.#openMode === "create" && isPendingClaudeSession(this.#nativeRef)) {
+    // A claim whose release failed after an earlier failed startup is still
+    // this Session's: claiming it again would only fail on its own file.
+    if (
+      this.#openMode === "create" &&
+      isPendingClaudeSession(this.#nativeRef) &&
+      !this.#pendingClaimed
+    ) {
       await this.#pendingSessions.claim(this.#nativeRef, this.#cwd);
       this.#pendingClaimed = true;
     }

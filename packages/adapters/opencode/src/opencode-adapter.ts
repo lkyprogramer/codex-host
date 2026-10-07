@@ -381,6 +381,8 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   #connectedCount = 0;
   #model: OpenCodeNativeModelRef | undefined;
   #nativeEventEpoch = 0;
+  // The native event epoch when the current idle check began.
+  #idleCheckEpoch = 0;
   #permissionMode: OpenCodePermissionMode;
   #projectionRefreshes = 0;
   #session: Session;
@@ -456,6 +458,10 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
           ? { level: "busy", reason: "OpenCode Session has a local operation in flight" }
           : { level: "idle" },
       confirmIdle: (signal) => this.#confirmNativeIdle(signal),
+      stillIdle: () =>
+        this.#nativeEventEpoch === this.#idleCheckEpoch
+          ? null
+          : { status: "busy", reason: "OpenCode native state changed during idle check" },
       releaseNative: () => closeOpenCodeResources(this.#transport, this.#connection),
       // The Transport and the Server connection close together: once either
       // closed, the Session cannot be used again, so a failed release faults.
@@ -1743,7 +1749,7 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
   async #confirmNativeIdle(
     signal: HarnessIdleSuspendSignal,
   ): Promise<{ status: "busy" | "unknown"; reason: string } | null> {
-    const eventEpoch = this.#nativeEventEpoch;
+    this.#idleCheckEpoch = this.#nativeEventEpoch;
     let nativeSession: Session;
     let statuses: Record<string, { type: string }>;
     let questions: QuestionRequest[];
@@ -1762,9 +1768,6 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
       };
     }
     if (signal.aborted) return { status: "unknown", reason: "Idle suspension was cancelled" };
-    if (this.#nativeEventEpoch !== eventEpoch) {
-      return { status: "busy", reason: "OpenCode native state changed during idle check" };
-    }
     if (
       nativeSession.id !== this.#session.id ||
       !sameCwd(nativeSession.directory, this.#session.directory)

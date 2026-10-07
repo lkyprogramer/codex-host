@@ -484,6 +484,80 @@ describe("Claude last-Turn rollback", () => {
     expect(f.transports).toHaveLength(1);
   });
 
+  it("reports a failed release of an unused reservation and retries it on the next idle release", async () => {
+    const f = await fixture();
+    const store = new ClaudePendingSessions(f.environment);
+    const ref = await store.create(f.directory, {});
+    vi.mocked(f.dependencies.createTransport).mockImplementationOnce(() => {
+      throw new Error("cannot spawn");
+    });
+    const release = vi
+      .spyOn(ClaudePendingSessions.prototype, "release")
+      .mockRejectedValueOnce(new Error("reservation is locked"))
+      .mockRejectedValueOnce(new Error("reservation is locked"));
+    try {
+      const session = await unwrap(
+        f.adapter().open({ kind: "resume", cwd: f.directory, nativeRef: ref }),
+      );
+      const lifecycle = session.resourceLifecycle;
+      if (!lifecycle) throw new Error("Missing idle lifecycle");
+      expect(
+        await session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse(randomUUID()),
+          input: [{ type: "text", text: "cannot start" }],
+        }),
+      ).toMatchObject({ ok: false });
+      expect(await store.read(ref, f.directory)).toMatchObject({ started: true });
+
+      // The claim is the only native resource left: its failed release keeps
+      // the Session open, and the Host's next idle tick retries it.
+      await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+        status: "releaseFailed",
+        reason: "Claude Code Session release failed: Claude Code Session could not stop safely",
+      });
+      await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+        status: "suspended",
+        scope: "claude-sdk-session",
+      });
+      expect(release).toHaveBeenCalledTimes(3);
+      expect(await store.read(ref, f.directory)).toMatchObject({ started: false });
+      expect(f.transports).toHaveLength(0);
+    } finally {
+      release.mockRestore();
+    }
+  });
+
+  it("starts on its own reservation when the release after a failed startup failed", async () => {
+    const f = await fixture();
+    const store = new ClaudePendingSessions(f.environment);
+    const ref = await store.create(f.directory, {});
+    vi.mocked(f.dependencies.createTransport).mockImplementationOnce(() => {
+      throw new Error("cannot spawn");
+    });
+    const release = vi
+      .spyOn(ClaudePendingSessions.prototype, "release")
+      .mockRejectedValueOnce(new Error("reservation is locked"));
+    try {
+      const session = await unwrap(
+        f.adapter().open({ kind: "resume", cwd: f.directory, nativeRef: ref }),
+      );
+      const start = (text: string) =>
+        session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse(randomUUID()),
+          input: [{ type: "text", text }],
+        });
+      expect(await start("cannot start")).toMatchObject({ ok: false });
+      expect(await start("retry")).toMatchObject({ ok: true });
+      expect(f.transports).toHaveLength(1);
+      // Another wrapper still cannot take the reservation this Session holds.
+      await expect(store.claim(ref, f.directory)).rejects.toMatchObject({ code: "EEXIST" });
+    } finally {
+      release.mockRestore();
+    }
+  });
+
   it("keeps an interrupted preceding Turn without an assistant checkpoint", async () => {
     const f = await fixture(2);
     const source = f.histories.get(f.sourceRef.nativeSessionId);

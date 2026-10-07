@@ -26,13 +26,14 @@ Session 在 `capabilities.resources` 中声明它能交还的原生资源：`idl
 
 ### SessionKernel
 
-[`HarnessSessionKernel`](../packages/harness-adapter/src/session-kernel.ts) 是 Adapter 可复用的生命周期内核：Session 阶段（open / releasing / closing / closed / faulted）、输出通道，以及一套统一语义的空闲释放。Adapter 只提供钩子：`workLevel()`（原生工作）、`undecided()`（暂时无法判断，例如尚未落盘）、可选的异步 `confirmIdle()`（需要向原生端确认空闲时）和 `releaseNative()`。
+[`HarnessSessionKernel`](../packages/harness-adapter/src/session-kernel.ts) 是 Adapter 可复用的生命周期内核：Session 阶段（open / releasing / closing / closed / faulted）、输出通道，以及一套统一语义的空闲释放。Adapter 只提供钩子：`workLevel()`（原生工作）、`undecided()`（暂时无法判断，例如尚未落盘）、可选的异步 `confirmIdle()`（需要向原生端确认空闲时）、可选的 `stillIdle()`（确认期间原生端是否有变化）和 `releaseNative()`。
 
 - 并发的释放请求共享一次尝试；释放成功后结果保持，被拒绝或失败的尝试会被清除，下次可以重来。
-- 准入与阶段切换发生在第一个 await 之前，迟到的原生事件不能在 Host 已被告知释放后发布；需要异步确认空闲时，确认返回后重新检查一遍本地状态。
+- 准入与阶段切换发生在第一个 await 之前，迟到的原生事件不能在 Host 已被告知释放后发布；需要异步确认空闲时，确认返回后重新检查一遍本地状态，并调用 `stillIdle()`。这两项检查与阶段切换在同一个同步步骤里完成，所以确认期间到达的原生事件（例如 OpenCode 的事件计数变化）不会落在检查之后、释放之前的空隙里。
 - 拒绝统一返回 `busy` 或 `unknown`，原因以 Session 名称开头；释放失败返回 `releaseFailed`，原因前缀为「… release failed」。
-- 确认空闲期间 Session 仍是 open，照常接受操作；确认返回后重新准入，期间开始的工作让这次释放以 `busy` 放弃。
-- 释放失败的去向由 Adapter 按原生事实声明：`retry`（默认）表示原生端仍完整，Session 回到 open，由 Host 按退避重试；`fault` 表示释放无法部分回退（例如传输与服务连接已关闭其一），Session 经 `publishReleaseFault` 发布故障后结束输出，由 Host 关闭。与释放竞争的 close 优先，此时不再判故障。
+- 确认空闲期间 Session 仍是 open，照常接受操作；确认返回后重新准入。到那时仍未结束的操作，以及确认期间产生了原生事件的操作，会让这次释放以 `busy` 放弃；已经结束且没有产生原生事件的操作不影响释放。
+- 钩子自身抛出异常时，这次释放以异常结束（Host 将 Session 判为故障），尝试被清除，下次释放按当时的阶段重新准入。
+- 释放失败的去向由 Adapter 按原生事实声明：`retry`（默认）表示原生端仍完整，Session 回到 open，由 Host 按退避重试；`fault` 表示释放无法部分回退（例如传输与服务连接已关闭其一），Session 经 `publishReleaseFault` 发布故障后结束输出，由 Host 关闭；只有声明 `fault` 时才能提供 `publishReleaseFault`，类型上强制。与释放竞争的 close 优先，此时不再判故障。
 - 关闭失败的去向由 Adapter 明确选择：`retry`（默认）保持 closing、输出不结束，之后的 close 再试；`final` 直接结束 Session 与输出，此后每次 close 都报告同一失败。故障只从 open 状态发生，先发布事件再结束输出；closing 期间到达的原生故障不再发布。
 
 已迁移到内核的 Adapter：
@@ -40,8 +41,8 @@ Session 在 `capabilities.resources` 中声明它能交还的原生资源：`idl
 | Adapter | 释放失败 | 关闭失败 | 说明 |
 | --- | --- | --- | --- |
 | Grok | `retry` | `retry` | 释放只结束受管进程，传输仍可用 |
-| Claude Code | `retry` | `final` | 未确认的进程保留为待释放 Transport，下次启动先重试释放 |
-| OpenCode | `fault` | `final` | 原生空闲经 `confirmIdle` 向 Server 确认；关闭失败时 Session 留在 Adapter 所有权台账中 |
+| Claude Code | `retry` | `final` | 未确认的进程保留为待释放 Transport，下次启动先重试释放；未用的 pending 预留释放失败时同样回到 open，由下次释放重试，期间启动沿用本 Session 持有的预留 |
+| OpenCode | `fault` | `final` | 原生空闲经 `confirmIdle` 向 Server 确认，确认期间的原生事件由 `stillIdle` 拒绝；关闭失败时 Session 留在 Adapter 所有权台账中 |
 | Cursor | 释放即关闭 | `final` | |
 
 Kiro 的结构与内核一致，尚未迁移。

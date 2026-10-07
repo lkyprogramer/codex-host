@@ -33,6 +33,13 @@ interface HarnessSessionKernelBaseHooks {
    * tell. Null means idle; anything else declines the release untouched.
    */
   confirmIdle?(signal: HarnessIdleSuspendSignal): Promise<Declined | null>;
+  /**
+   * Re-checks, after `confirmIdle`, what the native side changed while it was
+   * asked (for example a native event arrived). Runs synchronously with the
+   * re-admission, so nothing arrives between this check and the phase change.
+   * Null keeps the release; anything else declines it untouched.
+   */
+  stillIdle?(): Declined | null;
   /** Gives the native resources back. Throwing reports `releaseFailed`, then follows `releaseFailure`. */
   releaseNative(): Promise<void>;
   /** After a confirmed release, once outputs ended. */
@@ -52,7 +59,7 @@ interface HarnessSessionKernelBaseHooks {
  * `publishReleaseFault` reports it while outputs are still open.
  */
 type HarnessSessionReleaseFailureHooks =
-  | { readonly releaseFailure?: "retry" }
+  | { readonly releaseFailure?: "retry"; readonly publishReleaseFault?: never }
   | { readonly releaseFailure: "fault"; publishReleaseFault(error: unknown): void };
 
 export type HarnessSessionKernelHooks = HarnessSessionKernelBaseHooks &
@@ -96,9 +103,15 @@ export class HarnessSessionKernel {
     if (declined) return Promise.resolve(declined);
     const attempt = this.#attemptRelease(signal);
     this.#release = attempt;
-    void attempt.then((result) => {
-      if (result.status !== "suspended" && this.#release === attempt) this.#release = null;
-    });
+    const settle = (released: boolean) => {
+      if (!released && this.#release === attempt) this.#release = null;
+    };
+    // A hook that threw rejects the attempt: its caller sees that rejection,
+    // and the next release is admitted from the current phase.
+    void attempt.then(
+      (result) => settle(result.status === "suspended"),
+      () => settle(false),
+    );
     return attempt;
   }
 
@@ -168,7 +181,7 @@ export class HarnessSessionKernel {
       const declined = await this.#hooks.confirmIdle(signal);
       if (declined) return declined;
       // The native check awaited: everything local may have moved meanwhile.
-      const moved = this.#admission(signal);
+      const moved = this.#admission(signal) ?? this.#hooks.stillIdle?.();
       if (moved) return moved;
     }
     this.#phase = "releasing";

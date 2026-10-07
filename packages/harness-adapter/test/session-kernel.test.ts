@@ -7,7 +7,7 @@ const active = { aborted: false };
 
 type KernelOverrides = Partial<Omit<HarnessSessionKernelHooks, "releaseFailure">> &
   (
-    | { releaseFailure?: "retry" }
+    | { releaseFailure?: "retry"; publishReleaseFault?: never }
     | { releaseFailure: "fault"; publishReleaseFault(error: unknown): void }
   );
 
@@ -186,6 +186,71 @@ describe("HarnessSessionKernel release", () => {
     });
     expect(handle.releaseNative).not.toHaveBeenCalled();
     expect(handle.value.phase).toBe("open");
+  });
+
+  it("re-checks native changes in the same step that leaves open", async () => {
+    let confirm!: () => void;
+    let moved = false;
+    const phases: string[] = [];
+    const handle = kernel({
+      confirmIdle: () =>
+        new Promise((resolve) => {
+          confirm = () => resolve(null);
+        }),
+      stillIdle: () => {
+        phases.push(handle.value.phase);
+        return moved ? { status: "busy", reason: "a native event arrived" } : null;
+      },
+    });
+    handle.releaseNative.mockImplementation(async () => {
+      phases.push(handle.value.phase);
+    });
+
+    const declined = handle.value.release(active);
+    moved = true;
+    confirm();
+    await expect(declined).resolves.toEqual({ status: "busy", reason: "a native event arrived" });
+    expect(handle.releaseNative).not.toHaveBeenCalled();
+    expect(handle.value.phase).toBe("open");
+
+    moved = false;
+    const released = handle.value.release(active);
+    confirm();
+    await expect(released).resolves.toMatchObject({ status: "suspended" });
+    // Checked while open, and the release started with nothing in between.
+    expect(phases).toEqual(["open", "open", "releasing"]);
+  });
+
+  it("forgets an attempt whose hook threw, and admits the next one from its phase", async () => {
+    const { value } = kernel({
+      releaseNative: async () => {
+        throw new Error("release failed");
+      },
+      releaseFailure: "fault",
+      publishReleaseFault: () => {
+        throw new Error("fault report failed");
+      },
+    });
+    await expect(value.release(active)).rejects.toThrow("fault report failed");
+    expect(value.phase).toBe("faulted");
+    expect(await ended(value)).toBe(true);
+    await expect(value.release(active)).resolves.toEqual({
+      status: "unknown",
+      reason: "Test Session is faulted",
+    });
+  });
+
+  it("takes publishReleaseFault only from a Session whose failed release faults", () => {
+    const hooks = {
+      label: "Test Session",
+      scope: "test-scope",
+      workLevel: (): HarnessWorkLevel => ({ level: "idle" }),
+      releaseNative: async () => undefined,
+    };
+    // @ts-expect-error A retried release never publishes a release fault.
+    expect(new HarnessSessionKernel({ ...hooks, publishReleaseFault: () => undefined }).open).toBe(
+      true,
+    );
   });
 
   it("lets a close that races a release own the end of outputs", async () => {
