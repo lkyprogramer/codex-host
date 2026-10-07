@@ -1,6 +1,16 @@
 // Adapted from upstream 49fbe920 (BytePioneer-AI/codex-host).
 import { EventEmitter } from "node:events";
-import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 
@@ -86,6 +96,7 @@ describe("Host Runtime log", () => {
       CODEXHOST_RUNTIME_TOKEN: "runtime-token-value",
       OPENAI_API_KEY: "sk-synthetic-key-value",
       ANTHROPIC_AUTH_TOKEN: "runtime-token-value-and-more",
+      CODEXHOST_CONTROL_NONCE: "control-nonce-value",
       SHORT_TOKEN: "abc",
       PATH: "/usr/bin:/bin",
     });
@@ -94,17 +105,28 @@ describe("Host Runtime log", () => {
       "runtime-token-value-and-more",
       "sk-synthetic-key-value",
       "runtime-token-value",
+      "control-nonce-value",
     ]);
     const stream = fakeStream();
     const stop = installRuntimeLog({ filePath, stream, process: fakeProcess(), secrets });
     stream.write("auth header Bearer runtime-token-value-and-more\n");
     stream.write("key sk-synthetic-key-value and token runtime-token-value in /usr/bin\n");
+    stream.write("control control-nonce-value\n");
     stop();
 
     const text = await readFile(filePath, "utf8");
     for (const secret of secrets) expect(text).not.toContain(secret);
-    expect(text).toContain("auth header Bearer [redacted]");
-    expect(text).toContain("key [redacted] and token [redacted] in /usr/bin");
+    // Whole lines: a value contained in a longer one must not leave the longer one's tail.
+    const lines = text
+      .trimEnd()
+      .split("\n")
+      .map((line) => line.replace(/^\S+ \[4242\] /u, ""));
+    expect(lines).toEqual([
+      "Host Runtime started",
+      "auth header Bearer [redacted]",
+      "key [redacted] and token [redacted] in /usr/bin",
+      "control [redacted]",
+    ]);
     // Desktop still receives the original stderr unchanged.
     expect(stream.written[0]).toContain("runtime-token-value-and-more");
   });
@@ -192,6 +214,31 @@ describe("Host Runtime log", () => {
     );
     expect(runtimeLogs).toHaveLength(3);
     expect(runtimeLogs).toContain(path.basename(currentPath));
+  });
+
+  it("never prunes this process's current file, even as the oldest one", async () => {
+    const logs = path.join(directory, "logs");
+    await mkdir(logs);
+    const currentPath = path.join(logs, "host-runtime-4242.log");
+    await writeFile(currentPath, "earlier output of this process\n");
+    const old = new Date(Date.now() - 60_000);
+    await utimes(currentPath, old, old);
+    for (let pid = 7200; pid < 7203; pid += 1) {
+      await writeFile(path.join(logs, `host-runtime-${pid}.log`), "newer\n");
+    }
+
+    const stop = installRuntimeLog({
+      filePath: currentPath,
+      stream: fakeStream(),
+      process: fakeProcess(),
+      maxFiles: 2,
+      isProcessActive: () => false,
+    });
+    stop();
+
+    const names = await readdir(logs);
+    expect(names).toContain("host-runtime-4242.log");
+    expect(names.filter((name) => name.startsWith("host-runtime-"))).toHaveLength(2);
   });
 
   it("never lets a logging failure reach the Runtime", async () => {

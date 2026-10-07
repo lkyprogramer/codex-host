@@ -23,7 +23,7 @@ const DEFAULT_MAX_DIRECTORY_BYTES = 50 * 1024 * 1024;
 const DEFAULT_MAX_FILES = 20;
 const RUNTIME_LOG_FILE = /^host-runtime-(\d+)\.log(\.1)?$/u;
 /** Environment names whose values are credentials. */
-const SECRET_NAME = /token|secret|password|passwd|api_?key|credential|cookie|auth/iu;
+const SECRET_NAME = /token|secret|password|passwd|api_?key|credential|cookie|auth|nonce/iu;
 /** Shorter values are too likely to occur in ordinary text to be redacted safely. */
 const MIN_SECRET_LENGTH = 8;
 const REDACTED = "[redacted]";
@@ -113,7 +113,10 @@ function pruneRuntimeLogs(input: {
   }
 }
 
-/** Credential values in `environment`, longest first so an overlapping shorter one never leaks a tail. */
+/**
+ * Credential values in `environment`, longest first, so a value that contains a shorter one is
+ * replaced whole. Only values present when the log is installed are known.
+ */
 export function runtimeLogSecrets(environment: NodeJS.ProcessEnv): string[] {
   const values = new Set<string>();
   for (const [name, value] of Object.entries(environment)) {

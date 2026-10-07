@@ -137,6 +137,7 @@
   - 端口被占用时有明确错误或重试；
   - 原有 OpenCode 测试全部通过。
 - **风险**：v2 行为不同，要按版本分支处理（与 V21 协调）。
+- **实施取舍**：与上游一致，所有版本都传入 Host 分配的显式端口，不按版本分支；v2 本身就能选择临时端口，显式端口对它同样适用，但未用 v2 CLI 实测。
 
 ### V04 · Claude transcript 按 uuid 去重
 
@@ -149,8 +150,9 @@
 
 - **来源**：上游 `2784f643`（#403）。
 - **fork 现状（更正：已实现，卡片关闭）**：初稿依据 `native-message.ts` 中的文本匹配判为“已核实”，有误。fork 的 `814ddd45`（2026-09-18）已让认证判断只在原生结果失败时进行（`!nativeSuccess`），且只在 `is_error` 为真时读取 `result` 文本；`native-message.test.ts` 的 “never reads authentication out of a successful answer text” 覆盖上游 #403 的场景。fork 对失败结果仍识别 “Please run /login” 等认证提示，比上游完全不看文本更能给出准确原因，保留不改。
-- **改动**：`includesAuthenticationFailure` 只检查 `AUTHENTICATION_ERRORS` 中的原生错误码（`authentication_failed`、`oauth_org_not_allowed`）。
-- **验收**：正文含 “OAuth” 的成功回复不再判为认证失败；带原生认证错误码的结果仍判为认证失败。
+- **上游方案（未采纳）**：`includesAuthenticationFailure` 只检查 `AUTHENTICATION_ERRORS` 中的原生错误码（`authentication_failed`、`oauth_org_not_allowed`）。
+- **原验收（已由 fork 现有实现满足）**：正文含 “OAuth” 的成功回复不判为认证失败；带原生认证错误码的结果仍判为认证失败。
+- **遗留取舍**：失败结果中若出现 “oauth” 等词（例如 MCP 服务的 OAuth 报错），仍会被归为认证失败；属于既有行为，风险低，未处理。
 
 ### V06 · Host 运行日志写入有界文件
 
@@ -357,7 +359,7 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 | 迭代 | 卡片 | 分支 | 状态 |
 | --- | --- | --- | --- |
 | A | V01、V02 | `fix/official-traffic-ownership` | 已实现；首轮评审结论“修后可合”，发现已修复；复审结论“修后可合”，剩余的测试缺口与文档措辞已补齐。设计说明见 [官方流量归属](../official-traffic-ownership.md) |
-| B | V03、V04、V06（V05 关闭） | `fix/official-traffic-ownership` | 已实现，待评审；V06 说明见 [Host Runtime 运行日志](../host-runtime-log.md) |
+| B | V03、V04、V06（V05 关闭） | `fix/official-traffic-ownership` | 已实现；评审结论“修后可合”，发现已修复（见下）；V06 说明见 [Host Runtime 运行日志](../host-runtime-log.md) |
 
 迭代 A 与卡片验收的差异：
 
@@ -367,6 +369,7 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 
 迭代 B 的实现说明与验证边界：
 
-- V03：每个受管 Server 由 Host 分配回环端口。端口在 Server 绑定前被占用表现为启动前退出，此时换新端口重试，最多 3 次；但只有在已退出 Server 的进程组确认清理后才重试，清理失败的启动不重试，避免同时存在两个 Server 所有者（上游对任何 `processExited` 都重试）。本机 OpenCode 1.18.30（v1）的隔离真实测试中，先后 3 个 Server 都用分配端口正常启动；该测试在恢复 Session 后读到的权限模式为 `allow` 而非期望的 `ask`，在 `main` 上同样失败，属于既有问题，与端口无关，未在本迭代处理。连接复用问题本身是偶发的，由单元测试与反向验证覆盖。
+- V03：每个受管 Server 由 Host 分配回环端口。端口在 Server 绑定前被占用表现为启动前退出（评审已用本机 opencode 1.18.30 实测：退出码 1，不输出监听行），此时换新端口重试，最多 3 次；但只有在已退出 Server 的进程组确认清理后才重试，清理失败的启动不重试（上游对任何 `processExited` 都重试）。每次尝试各有完整的启动时限（默认 20 秒），最坏约 60 秒，只在每次都临近超时才退出时出现。评审发现：启动期间 Server 退出时，子进程的 `exit` 处理器会清空连接，使并发调用方另起一个 Server，后者覆盖所有权句柄而泄漏；已改为只有启动完成后的退出才清空连接，启动中的连接仍由进行中的启动持有，并补了回归测试。本机 OpenCode 1.18.30（v1）的隔离真实测试中，先后 3 个 Server 都用分配端口正常启动；该测试在恢复 Session 后读到的权限模式为 `allow` 而非期望的 `ask`，在 `main` 上同样失败，属于既有问题，与端口无关，未在本迭代处理。连接复用问题本身是偶发的，由单元测试与反向验证覆盖。
 - V04：同一 uuid 取最后一条记录、保留首次出现的位置，与原生 SDK 一致。
-- V06：不移植上游对 `uncaughtExceptionMonitor` 的监听，致命堆栈由 fork 的进程守卫写入 stderr 后进入日志，避免重复；新增环境变量凭据脱敏。
+- V06：不移植上游对 `uncaughtExceptionMonitor` 的监听，致命堆栈由 fork 的进程守卫写入 stderr 后进入日志，避免重复；新增环境变量凭据脱敏，名称规则含 `nonce`（覆盖 launcher 控制端口的 `CODEXHOST_CONTROL_NONCE`）。日志也收录官方 app-server 与插件写到 stderr 的内容；原生崩溃不进入日志。均已写入 [运行日志说明](../host-runtime-log.md)。
+- 评审补齐的测试：重试期间的并发调用方、端口分配期间关闭、清理失败尝试期间关闭、端口分配失败、整行脱敏断言、当前进程文件不被清理。

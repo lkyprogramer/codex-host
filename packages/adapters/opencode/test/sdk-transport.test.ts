@@ -265,6 +265,161 @@ describe("OpenCode SDK transport", () => {
     expect(failedSpawns).toBe(3);
   });
 
+  it("keeps one Server owner when a caller arrives while a startup retries", async () => {
+    const children: FakeChild[] = [];
+    const closedTrees: number[] = [];
+    let releaseFirstCleanup!: () => void;
+    const firstCleanup = new Promise<void>((resolve) => {
+      releaseFirstCleanup = resolve;
+    });
+    let port = 44_000;
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        createClient: () => clientWith(),
+        randomPassword: () => "synthetic-password",
+        spawn: (_command, _args, options) => {
+          const child = new FakeChild();
+          const index = children.length;
+          children.push(child);
+          queueMicrotask(() => {
+            if (index === 0) {
+              // The first Server loses its port and exits before startup.
+              child.exitCode = 1;
+              child.emit("exit", 1, null);
+            } else {
+              child.stdout.write(`opencode server listening on http://127.0.0.1:${port}\n`);
+            }
+          });
+          return owned(child, {
+            close: async () => {
+              // The first exited Server's group takes a while to be confirmed gone.
+              if (index === 0) await firstCleanup;
+              closedTrees.push(index);
+              rmSync(options.cwd, { recursive: true, force: true });
+            },
+          });
+        },
+        sleep: async () => undefined,
+        assignPort: async () => (port += 1),
+      },
+    );
+
+    const first = connection.client("/first");
+    await vi.waitFor(() => expect(children).toHaveLength(1));
+    await vi.waitFor(() => expect(children[0]?.exitCode).toBe(1));
+    // A second caller during the retry joins the pending startup instead of starting a Server.
+    const second = connection.client("/second");
+    releaseFirstCleanup();
+    await Promise.all([first, second]);
+    expect(children).toHaveLength(2);
+
+    const started = children[1];
+    if (!started) throw new Error("The retried Server did not start");
+    started.exitCode = 0;
+    await connection.close();
+    // Every Server this connection spawned was stopped by it.
+    expect(closedTrees.sort()).toEqual([0, 1]);
+  });
+
+  it("starts no Server once closed while its port is being assigned", async () => {
+    let spawns = 0;
+    let releasePort!: (port: number) => void;
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        createClient: () => clientWith(),
+        randomPassword: () => "synthetic-password",
+        spawn: () => {
+          spawns += 1;
+          return owned(new FakeChild());
+        },
+        sleep: async () => undefined,
+        assignPort: () =>
+          new Promise<number>((resolve) => {
+            releasePort = resolve;
+          }),
+      },
+    );
+
+    const starting = connection.client("/project");
+    await vi.waitFor(() => expect(releasePort).toBeDefined());
+    await connection.close();
+    releasePort(45_001);
+    await expect(starting).rejects.toMatchObject({ code: "unavailable" });
+    expect(spawns).toBe(0);
+  });
+
+  it("stops retrying once closed while an exited Server is cleaned up", async () => {
+    let spawns = 0;
+    let ports = 0;
+    let releaseCleanup!: () => void;
+    const cleanup = new Promise<void>((resolve) => {
+      releaseCleanup = resolve;
+    });
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        createClient: () => clientWith(),
+        randomPassword: () => "synthetic-password",
+        spawn: (_command, _args, options) => {
+          spawns += 1;
+          const child = new FakeChild();
+          queueMicrotask(() => {
+            child.exitCode = 1;
+            child.emit("exit", 1, null);
+          });
+          return owned(child, {
+            close: async () => {
+              await cleanup;
+              rmSync(options.cwd, { recursive: true, force: true });
+            },
+          });
+        },
+        sleep: async () => undefined,
+        assignPort: async () => {
+          ports += 1;
+          return 46_000 + ports;
+        },
+      },
+    );
+
+    const starting = connection.client("/project");
+    await vi.waitFor(() => expect(spawns).toBe(1));
+    const closing = connection.close();
+    releaseCleanup();
+    await closing;
+    await expect(starting).rejects.toMatchObject({ code: "unavailable" });
+    // The closed connection asks for no further port, let alone another Server.
+    expect(ports).toBe(1);
+    expect(spawns).toBe(1);
+  });
+
+  it("reports a loopback port that cannot be assigned as unavailable", async () => {
+    let spawns = 0;
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        createClient: () => clientWith(),
+        randomPassword: () => "synthetic-password",
+        spawn: () => {
+          spawns += 1;
+          return owned(new FakeChild());
+        },
+        sleep: async () => undefined,
+        assignPort: async () => {
+          throw new Error("no loopback port");
+        },
+      },
+    );
+
+    await expect(connection.client("/project")).rejects.toMatchObject({
+      code: "unavailable",
+      message: "OpenCode Server could not get a loopback port",
+    });
+    expect(spawns).toBe(0);
+  });
+
   it("never retries a Server whose exited process group could not be confirmed gone", async () => {
     let spawns = 0;
     const connection = new OpenCodeServerConnection(

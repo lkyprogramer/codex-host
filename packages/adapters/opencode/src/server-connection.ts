@@ -361,9 +361,13 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
     this.#child = child;
     this.#childCwd = serverCwd;
     this.#ownedProcessTree = owned.tree;
+    let started = false;
     child.once("exit", () => {
       if (this.#child !== child) return;
-      this.#connection = null;
+      // Only a Server that started gives up the connection here. While it is still starting,
+      // the pending startup owns the connection: it retries or fails, and `#connect` resets it
+      // on failure. Clearing it now would let a concurrent caller start a second Server.
+      if (started) this.#connection = null;
       // The tracker starts cleanup at the exit boundary. Keep the child and
       // its owned tree until that shared close has verified the group is gone.
       void this.#stopChild(child).catch((error: unknown) => {
@@ -441,6 +445,7 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
           "OpenCode Server returned an invalid health response",
         );
       }
+      started = true;
       return { baseUrl, authorization };
     } catch (error) {
       try {
