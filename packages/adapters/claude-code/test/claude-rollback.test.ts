@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -378,7 +378,7 @@ describe("Claude last-Turn rollback", () => {
     const f = await fixture();
     const store = new ClaudePendingSessions(f.environment);
     const ref = await store.create(f.directory, {});
-    await store.claim(ref, f.directory);
+    await store.claim(ref, f.directory, "other-wrapper");
     const session = await unwrap(
       f.adapter().open({ kind: "resume", cwd: f.directory, nativeRef: ref }),
     );
@@ -386,7 +386,9 @@ describe("Claude last-Turn rollback", () => {
       ok: false,
       error: { code: "sessionNotFound" },
     });
-    await expect(store.claim(ref, f.directory)).rejects.toMatchObject({ code: "EEXIST" });
+    await expect(store.claim(ref, f.directory, "third-wrapper")).rejects.toMatchObject({
+      code: "EEXIST",
+    });
     await expect(store.read(ref, path.join(f.directory, "other"))).rejects.toThrow();
   });
 
@@ -552,7 +554,121 @@ describe("Claude last-Turn rollback", () => {
       expect(await start("retry")).toMatchObject({ ok: true });
       expect(f.transports).toHaveLength(1);
       // Another wrapper still cannot take the reservation this Session holds.
-      await expect(store.claim(ref, f.directory)).rejects.toMatchObject({ code: "EEXIST" });
+      await expect(store.claim(ref, f.directory, "other-wrapper")).rejects.toMatchObject({
+        code: "EEXIST",
+      });
+    } finally {
+      release.mockRestore();
+    }
+  });
+
+  it("keeps each reservation claim with the owner that took it", async () => {
+    const f = await fixture();
+    const store = new ClaudePendingSessions(f.environment);
+    const ref = await store.create(f.directory, {});
+    await store.claim(ref, f.directory, "owner");
+    // A retry by the owner confirms its claim; anyone else is still refused.
+    await store.claim(ref, f.directory, "owner");
+    await expect(store.claim(ref, f.directory, "other")).rejects.toMatchObject({ code: "EEXIST" });
+    // Releasing a claim that is not yours removes nothing.
+    await store.release(ref, f.directory, "other");
+    expect(await store.read(ref, f.directory)).toMatchObject({ started: true });
+    await store.release(ref, f.directory, "owner");
+    expect(await store.read(ref, f.directory)).toMatchObject({ started: false });
+    // A claim that is already gone is released.
+    await store.release(ref, f.directory, "owner");
+    // A claim written before owner tokens belongs to no current owner.
+    const claimFile = path.join(
+      f.directory,
+      "codexhost",
+      "pending-sessions",
+      ref.nativeSessionId,
+      "started",
+    );
+    await writeFile(claimFile, "");
+    await expect(store.claim(ref, f.directory, "owner")).rejects.toMatchObject({ code: "EEXIST" });
+    await store.release(ref, f.directory, "owner");
+    expect(await store.read(ref, f.directory)).toMatchObject({ started: true });
+  });
+
+  it("claims again when a failed release had already removed the claim", async () => {
+    const f = await fixture();
+    const store = new ClaudePendingSessions(f.environment);
+    const ref = await store.create(f.directory, {});
+    vi.mocked(f.dependencies.createTransport).mockImplementationOnce(() => {
+      throw new Error("cannot spawn");
+    });
+    const original = ClaudePendingSessions.prototype.release;
+    // The unlink lands, then the directory sync fails.
+    const release = vi
+      .spyOn(ClaudePendingSessions.prototype, "release")
+      .mockImplementationOnce(async function (this: ClaudePendingSessions, ...input) {
+        await original.apply(this, input);
+        throw new Error("directory sync failed");
+      });
+    try {
+      const session = await unwrap(
+        f.adapter().open({ kind: "resume", cwd: f.directory, nativeRef: ref }),
+      );
+      const start = (text: string) =>
+        session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse(randomUUID()),
+          input: [{ type: "text", text }],
+        });
+      expect(await start("cannot start")).toMatchObject({ ok: false });
+      expect(await store.read(ref, f.directory)).toMatchObject({ started: false });
+
+      // The native input is submitted only under a claim this Session took again.
+      expect(await start("retry")).toMatchObject({ ok: true });
+      expect(await store.read(ref, f.directory)).toMatchObject({ started: true });
+      await expect(store.claim(ref, f.directory, "other-wrapper")).rejects.toMatchObject({
+        code: "EEXIST",
+      });
+      expect(f.transports).toHaveLength(1);
+    } finally {
+      release.mockRestore();
+    }
+  });
+
+  it("loses a reservation another wrapper claimed after a failed release removed it", async () => {
+    const f = await fixture();
+    const store = new ClaudePendingSessions(f.environment);
+    const ref = await store.create(f.directory, {});
+    vi.mocked(f.dependencies.createTransport).mockImplementationOnce(() => {
+      throw new Error("cannot spawn");
+    });
+    const original = ClaudePendingSessions.prototype.release;
+    const release = vi
+      .spyOn(ClaudePendingSessions.prototype, "release")
+      .mockImplementationOnce(async function (this: ClaudePendingSessions, ...input) {
+        await original.apply(this, input);
+        throw new Error("directory sync failed");
+      });
+    try {
+      const session = await unwrap(
+        f.adapter().open({ kind: "resume", cwd: f.directory, nativeRef: ref }),
+      );
+      const lifecycle = session.resourceLifecycle;
+      if (!lifecycle) throw new Error("Missing idle lifecycle");
+      const start = (text: string) =>
+        session.execute({
+          type: "turn.start",
+          turnId: hostTurnIdSchema.parse(randomUUID()),
+          input: [{ type: "text", text }],
+        });
+      expect(await start("cannot start")).toMatchObject({ ok: false });
+      await store.claim(ref, f.directory, "other-wrapper");
+
+      // Only one writer: this Session cannot start on the other wrapper's claim.
+      expect(await start("contended")).toMatchObject({ ok: false });
+      expect(f.transports).toHaveLength(0);
+      // Its release leaves the other wrapper's claim in place.
+      await expect(lifecycle.suspend(new AbortController().signal)).resolves.toEqual({
+        status: "suspended",
+        scope: "claude-sdk-session",
+      });
+      expect(await store.read(ref, f.directory)).toMatchObject({ started: true });
     } finally {
       release.mockRestore();
     }

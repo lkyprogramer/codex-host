@@ -199,6 +199,8 @@ describe("HarnessSessionKernel release", () => {
         }),
       stillIdle: () => {
         phases.push(handle.value.phase);
+        // Anything a native event could run next sees the decided phase.
+        queueMicrotask(() => phases.push(`next:${handle.value.phase}`));
         return moved ? { status: "busy", reason: "a native event arrived" } : null;
       },
     });
@@ -212,13 +214,15 @@ describe("HarnessSessionKernel release", () => {
     await expect(declined).resolves.toEqual({ status: "busy", reason: "a native event arrived" });
     expect(handle.releaseNative).not.toHaveBeenCalled();
     expect(handle.value.phase).toBe("open");
+    expect(phases).toEqual(["open", "next:open"]);
+    phases.length = 0;
 
     moved = false;
     const released = handle.value.release(active);
     confirm();
     await expect(released).resolves.toMatchObject({ status: "suspended" });
-    // Checked while open, and the release started with nothing in between.
-    expect(phases).toEqual(["open", "open", "releasing"]);
+    // Checked while open, and the phase left open before anything else ran.
+    expect(phases).toEqual(["open", "releasing", "next:releasing"]);
   });
 
   it("forgets an attempt whose hook threw, and admits the next one from its phase", async () => {

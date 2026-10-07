@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, open, readFile, rename, rm, stat, unlink } from "node:fs/promises";
+import { mkdir, open, readFile, rename, rm, stat, unlink, type FileHandle } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { z } from "zod";
@@ -146,22 +146,63 @@ export class ClaudePendingSessions {
     }
   }
 
-  async claim(ref: NativeSessionRef, cwd: string): Promise<void> {
+  /**
+   * Claims the reservation for `owner` before the native CLI starts. The
+   * claim file holds the owner's token, so a claim is idempotent for its
+   * owner (a retry after a failed sync confirms it) and still exclusive
+   * against every other wrapper or process.
+   */
+  async claim(ref: NativeSessionRef, cwd: string, owner: string): Promise<void> {
     await this.read(ref, cwd);
-    // wx arbitrates competing wrappers/processes before either can start the native CLI.
-    const claim = await open(path.join(this.#path(ref, cwd), "started"), "wx", 0o600);
+    const directory = this.#path(ref, cwd);
+    const claimPath = path.join(directory, "started");
+    let claim: FileHandle;
     try {
+      // wx arbitrates competing wrappers/processes before either can start the native CLI.
+      claim = await open(claimPath, "wx", 0o600);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      if ((await this.#claimOwner(claimPath)) !== owner) throw error;
+      claim = await open(claimPath, "r");
+      try {
+        await claim.sync();
+      } finally {
+        await claim.close();
+      }
+      await this.#sync(directory);
+      return;
+    }
+    try {
+      await claim.writeFile(owner);
       await claim.sync();
     } finally {
       await claim.close();
     }
-    await this.#sync(this.#path(ref, cwd));
+    await this.#sync(directory);
   }
 
-  /** Only the claim owner may release, after proven close and before submitting any native input. */
-  async release(ref: NativeSessionRef, cwd: string): Promise<void> {
-    await unlink(path.join(this.#path(ref, cwd), "started"));
-    await this.#sync(this.#path(ref, cwd));
+  /**
+   * Gives up `owner`'s claim, after proven close and before submitting any
+   * native input. A claim that is gone, or that another owner took after it
+   * was gone, is no longer `owner`'s: nothing is removed then.
+   */
+  async release(ref: NativeSessionRef, cwd: string, owner: string): Promise<void> {
+    const directory = this.#path(ref, cwd);
+    const claimPath = path.join(directory, "started");
+    // Only the owner removes its claim, so the claim cannot change between
+    // this read and the unlink.
+    if ((await this.#claimOwner(claimPath)) === owner) await unlink(claimPath);
+    await this.#sync(directory);
+  }
+
+  /** The owner token in a claim file (empty in one written before tokens), or null when none exists. */
+  async #claimOwner(claimPath: string): Promise<string | null> {
+    try {
+      return await readFile(claimPath, "utf8");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return null;
+      throw error;
+    }
   }
 
   async discard(ref: NativeSessionRef, cwd: string): Promise<void> {

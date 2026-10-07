@@ -525,6 +525,9 @@ class ClaudeHarnessSession implements HarnessSession {
   #openMode: "create" | "resume";
   readonly #pendingSessions: ClaudePendingSessions;
   #pendingClaimed = false;
+  // Identifies this Session's pending-reservation claim to the store, so a
+  // retried claim or release never mistakes another owner's claim for its own.
+  readonly #claimToken = randomUUID();
   #submittedInput = false;
   #startupTask: Promise<ClaudeTurnTransport> | null = null;
   #recycleTask: Promise<void> | null = null;
@@ -1474,14 +1477,10 @@ class ClaudeHarnessSession implements HarnessSession {
       }
       if (this.#unreleasedTransport === unreleased) this.#unreleasedTransport = null;
     }
-    // A claim whose release failed after an earlier failed startup is still
-    // this Session's: claiming it again would only fail on its own file.
-    if (
-      this.#openMode === "create" &&
-      isPendingClaudeSession(this.#nativeRef) &&
-      !this.#pendingClaimed
-    ) {
-      await this.#pendingSessions.claim(this.#nativeRef, this.#cwd);
+    if (this.#openMode === "create" && isPendingClaudeSession(this.#nativeRef)) {
+      // Idempotent for this Session: a claim kept by a failed release is
+      // confirmed, and one that release removed is taken again or lost.
+      await this.#pendingSessions.claim(this.#nativeRef, this.#cwd, this.#claimToken);
       this.#pendingClaimed = true;
     }
     if (this.#kernel.phase !== "open") {
@@ -1563,7 +1562,7 @@ class ClaudeHarnessSession implements HarnessSession {
 
   async #releaseUnusedClaim(): Promise<void> {
     if (!this.#pendingClaimed || this.#submittedInput) return;
-    await this.#pendingSessions.release(this.#nativeRef, this.#cwd);
+    await this.#pendingSessions.release(this.#nativeRef, this.#cwd, this.#claimToken);
     this.#pendingClaimed = false;
     this.#openMode = "create";
   }
