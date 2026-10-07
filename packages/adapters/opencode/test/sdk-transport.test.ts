@@ -422,13 +422,15 @@ describe("OpenCode SDK transport", () => {
 
   it("never retries a Server whose exited process group could not be confirmed gone", async () => {
     let spawns = 0;
+    let serverCwd: string | undefined;
     const connection = new OpenCodeServerConnection(
       { command: process.execPath, environment: { PATH: process.env.PATH } },
       {
         createClient: () => clientWith(),
         randomPassword: () => "synthetic-password",
-        spawn: () => {
+        spawn: (_command, _args, options) => {
           spawns += 1;
+          serverCwd = options.cwd;
           const child = new FakeChild();
           queueMicrotask(() => {
             child.exitCode = 1;
@@ -451,6 +453,68 @@ describe("OpenCode SDK transport", () => {
     });
     // Starting another Server while this one may still run would leave two owners.
     expect(spawns).toBe(1);
+    // The unconfirmed cleanup keeps the startup directory; the test removes it.
+    if (serverCwd) rmSync(serverCwd, { recursive: true, force: true });
+  });
+
+  it("restarts a Server that exited while its health check was answered", async () => {
+    const children: FakeChild[] = [];
+    let answerFirstHealth!: () => void;
+    const firstHealth = new Promise<void>((resolve) => {
+      answerFirstHealth = resolve;
+    });
+    const baseUrls: string[] = [];
+    let port = 47_000;
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        createClient: (options) => {
+          baseUrls.push(options.baseUrl);
+          const first = baseUrls.length === 1;
+          return clientWith({
+            global: {
+              health: async () => {
+                // The first Server answers its health check, then is already gone.
+                if (first) await firstHealth;
+                return { data: { healthy: true, version: "1.18.25" }, error: undefined };
+              },
+            },
+          });
+        },
+        randomPassword: () => "synthetic-password",
+        spawn: (_command, _args, options) => {
+          const child = new FakeChild();
+          children.push(child);
+          queueMicrotask(() =>
+            child.stdout.write(`opencode server listening on http://127.0.0.1:${port}\n`),
+          );
+          return owned(child, {
+            close: async () => {
+              rmSync(options.cwd, { recursive: true, force: true });
+            },
+          });
+        },
+        sleep: async () => undefined,
+        assignPort: async () => (port += 1),
+      },
+    );
+
+    const client = connection.client("/project");
+    await vi.waitFor(() => expect(baseUrls).toHaveLength(1));
+    const first = children[0];
+    if (!first) throw new Error("The first Server did not start");
+    first.exitCode = 1;
+    first.emit("exit", 1, null);
+    answerFirstHealth();
+    await client;
+    // The dead Server was not handed out: the startup retried on a fresh Server.
+    expect(children).toHaveLength(2);
+    await connection.client("/project");
+    expect(children).toHaveLength(2);
+    const started = children[1];
+    if (!started) throw new Error("The retried Server did not start");
+    started.exitCode = 0;
+    await connection.close();
   });
 
   it("starts outside a read-only project and forwards even a missing project directory", async () => {

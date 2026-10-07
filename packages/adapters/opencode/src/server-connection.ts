@@ -445,6 +445,14 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
           "OpenCode Server returned an invalid health response",
         );
       }
+      // A Server that exited while its health check was answered is not started: its exit
+      // handler left the connection to this startup, which must not hand out a dead origin.
+      if (child.exitCode !== null || child.signalCode !== null) {
+        throw new OpenCodeServerEarlyExit(
+          "processExited",
+          `OpenCode Server exited during startup (${child.signalCode ?? child.exitCode})`,
+        );
+      }
       started = true;
       return { baseUrl, authorization };
     } catch (error) {
