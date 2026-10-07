@@ -38,7 +38,7 @@
 | 2 | V02 | 官方流量先判归属，未识别请求原样转发 | 已核实 | M | 高 |
 | 3 | V03 | OpenCode v1 每个受管 Server 独立端口 | 已核实 | S | 低 |
 | 4 | V04 | Claude transcript 按 uuid 去重 | 已核实 | S | 低 |
-| 5 | V05 | Claude 认证失败只按原生错误码判断 | 已核实 | S | 低 |
+| 5 | V05 | Claude 认证失败只按原生错误码判断 | 已在 fork 中实现（关闭） | — | — |
 | 6 | V06 | Host 运行日志写入有界文件 | 已核实缺失 | S–M | 低 |
 | 7 | V07 | 预热 Session 的释放与历史隔离 | 已核实缺失 | M | 中 |
 | 8 | V08 | Desktop Fork 识别修复 | 已核实 | S | 中 |
@@ -148,7 +148,7 @@
 ### V05 · Claude 认证失败只按原生错误码判断
 
 - **来源**：上游 `2784f643`（#403）。
-- **fork 现状（已核实）**：`packages/adapters/claude-code/src/native-message.ts:136-138` 除错误码外还按文本匹配 `"not logged in"`、`"invalid api key"`、`"oauth"`。成功回复正文里只要提到这些词，就会被判为认证失败。
+- **fork 现状（更正：已实现，卡片关闭）**：初稿依据 `native-message.ts` 中的文本匹配判为“已核实”，有误。fork 的 `814ddd45`（2026-09-18）已让认证判断只在原生结果失败时进行（`!nativeSuccess`），且只在 `is_error` 为真时读取 `result` 文本；`native-message.test.ts` 的 “never reads authentication out of a successful answer text” 覆盖上游 #403 的场景。fork 对失败结果仍识别 “Please run /login” 等认证提示，比上游完全不看文本更能给出准确原因，保留不改。
 - **改动**：`includesAuthenticationFailure` 只检查 `AUTHENTICATION_ERRORS` 中的原生错误码（`authentication_failed`、`oauth_org_not_allowed`）。
 - **验收**：正文含 “OAuth” 的成功回复不再判为认证失败；带原生认证错误码的结果仍判为认证失败。
 
@@ -357,9 +357,16 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 | 迭代 | 卡片 | 分支 | 状态 |
 | --- | --- | --- | --- |
 | A | V01、V02 | `fix/official-traffic-ownership` | 已实现；首轮评审结论“修后可合”，发现已修复；复审结论“修后可合”，剩余的测试缺口与文档措辞已补齐。设计说明见 [官方流量归属](../official-traffic-ownership.md) |
+| B | V03、V04、V06（V05 关闭） | `fix/official-traffic-ownership` | 已实现，待评审；V06 说明见 [Host Runtime 运行日志](../host-runtime-log.md) |
 
 迭代 A 与卡片验收的差异：
 
 - V02 验收写的是“外部 Thread 上格式错误的 archive / metadata 仍返回 `-32602`”。实际实现中，外部 Thread 的 metadata 更新不论参数如何都返回 `-32078`（尚不支持，V10 处理）；archive / unarchive 不再单独校验，因为能定位到外部 Thread 已说明 `threadId` 合法，不存在格式错误的情形。
 - V01 的“已回复后又失败”和“已转发后抛错”只有单元测试覆盖：Host 中写出回复或转发成功之后没有可能抛错的代码，无法构造集成用例。请求处理本身失败、后台工作失败两种情况有 Host 级测试。
 - 评审另外发现并已修复一个早已存在的问题：带 Host 游标、同时带未知字段的 `thread/list` 会连同 Host 游标一起转发给官方；现在由 Host 以 `-32602` 拒绝。
+
+迭代 B 的实现说明与验证边界：
+
+- V03：每个受管 Server 由 Host 分配回环端口。端口在 Server 绑定前被占用表现为启动前退出，此时换新端口重试，最多 3 次；但只有在已退出 Server 的进程组确认清理后才重试，清理失败的启动不重试，避免同时存在两个 Server 所有者（上游对任何 `processExited` 都重试）。本机 OpenCode 1.18.30（v1）的隔离真实测试中，先后 3 个 Server 都用分配端口正常启动；该测试在恢复 Session 后读到的权限模式为 `allow` 而非期望的 `ask`，在 `main` 上同样失败，属于既有问题，与端口无关，未在本迭代处理。连接复用问题本身是偶发的，由单元测试与反向验证覆盖。
+- V04：同一 uuid 取最后一条记录、保留首次出现的位置，与原生 SDK 一致。
+- V06：不移植上游对 `uncaughtExceptionMonitor` 的监听，致命堆栈由 fork 的进程守卫写入 stderr 后进入日志，避免重复；新增环境变量凭据脱敏。
