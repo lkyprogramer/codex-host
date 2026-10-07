@@ -35,6 +35,10 @@ describe("OpenCode executable resolution", () => {
       command: executable,
       arguments: ["serve", "--hostname=127.0.0.1", "--port=0"],
     });
+    // opencode v1 treats port 0 as its fixed default, so the Host assigns one.
+    expect(openCodeServerInvocation(resolved, {}, "darwin", 41_234)).toMatchObject({
+      arguments: ["serve", "--hostname=127.0.0.1", "--port=41234"],
+    });
   });
 
   it("resolves OpenCode from PATH", () => {

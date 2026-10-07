@@ -144,6 +144,7 @@ describe("OpenCode SDK transport", () => {
         return owned(child);
       },
       sleep: async () => undefined,
+      assignPort: async () => 41_000 + spawnCalls.length + 1,
     };
     const connection = new OpenCodeServerConnection(
       { command: process.execPath, environment: { PATH: process.env.PATH } },
@@ -156,7 +157,7 @@ describe("OpenCode SDK transport", () => {
     if (!firstSpawn) throw new Error("Managed Server did not spawn");
     expect(firstSpawn).toMatchObject({
       command: process.execPath,
-      args: ["serve", "--hostname=127.0.0.1", "--port=0"],
+      args: ["serve", "--hostname=127.0.0.1", "--port=41001"],
       env: {
         OPENCODE_SERVER_USERNAME: "codexhost",
         OPENCODE_SERVER_PASSWORD: "synthetic-password",
@@ -186,6 +187,8 @@ describe("OpenCode SDK transport", () => {
     if (!secondSpawn) throw new Error("Managed Server did not restart");
     expect(existsSync(requiredCwd(firstSpawn.cwd))).toBe(false);
     expect(requiredCwd(secondSpawn.cwd)).not.toBe(requiredCwd(firstSpawn.cwd));
+    // A restarted Server gets its own loopback origin, never the previous one.
+    expect(secondSpawn.args).toEqual(["serve", "--hostname=127.0.0.1", "--port=41002"]);
     expect(clientOptions.at(-1)).toMatchObject({
       baseUrl: "http://127.0.0.1:4002",
       directory: "/second",
@@ -195,6 +198,104 @@ describe("OpenCode SDK transport", () => {
     second.exitCode = 0;
     await connection.close();
     expect(existsSync(requiredCwd(secondSpawn.cwd))).toBe(false);
+  });
+
+  it("retries a Server that exited before startup on a fresh port, at most three times", async () => {
+    const ports: string[] = [];
+    let nextPort = 42_000;
+    const children: FakeChild[] = [];
+    const exitEarly = (child: FakeChild): void => {
+      child.exitCode = 1;
+      child.emit("exit", 1, null);
+    };
+    const dependencies: OpenCodeServerDependencies = {
+      createClient: () => clientWith(),
+      randomPassword: () => "synthetic-password",
+      spawn: (_command, args, options) => {
+        ports.push(args.at(-1) ?? "");
+        const child = new FakeChild();
+        children.push(child);
+        const attempt = children.length;
+        // The first two Servers lose their assigned port before binding it.
+        queueMicrotask(() =>
+          attempt < 3
+            ? exitEarly(child)
+            : child.stdout.write(`opencode server listening on http://127.0.0.1:${nextPort}\n`),
+        );
+        return owned(child, {
+          close: async () => {
+            rmSync(options.cwd, { recursive: true, force: true });
+          },
+        });
+      },
+      sleep: async () => undefined,
+      assignPort: async () => (nextPort += 1),
+    };
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      dependencies,
+    );
+
+    await connection.client("/project");
+    expect(ports).toEqual(["--port=42001", "--port=42002", "--port=42003"]);
+    const started = children[2];
+    if (!started) throw new Error("The third Server did not start");
+    started.exitCode = 0;
+    await connection.close();
+
+    // A Server that never stays up fails after the third attempt.
+    let failedSpawns = 0;
+    const failing = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        ...dependencies,
+        spawn: (_command, _args, options) => {
+          failedSpawns += 1;
+          const child = new FakeChild();
+          queueMicrotask(() => exitEarly(child));
+          return owned(child, {
+            close: async () => {
+              rmSync(options.cwd, { recursive: true, force: true });
+            },
+          });
+        },
+      },
+    );
+    await expect(failing.client("/project")).rejects.toMatchObject({ code: "processExited" });
+    expect(failedSpawns).toBe(3);
+  });
+
+  it("never retries a Server whose exited process group could not be confirmed gone", async () => {
+    let spawns = 0;
+    const connection = new OpenCodeServerConnection(
+      { command: process.execPath, environment: { PATH: process.env.PATH } },
+      {
+        createClient: () => clientWith(),
+        randomPassword: () => "synthetic-password",
+        spawn: () => {
+          spawns += 1;
+          const child = new FakeChild();
+          queueMicrotask(() => {
+            child.exitCode = 1;
+            child.emit("exit", 1, null);
+          });
+          return owned(child, {
+            close: async () => {
+              throw new Error("process group is still alive");
+            },
+          });
+        },
+        sleep: async () => undefined,
+        assignPort: async () => 43_001,
+      },
+    );
+
+    await expect(connection.client("/project")).rejects.toMatchObject({
+      code: "processExited",
+      message: expect.stringContaining("process cleanup also failed"),
+    });
+    // Starting another Server while this one may still run would leave two owners.
+    expect(spawns).toBe(1);
   });
 
   it("starts outside a read-only project and forwards even a missing project directory", async () => {

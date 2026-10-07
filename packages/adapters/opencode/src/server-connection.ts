@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -51,11 +52,37 @@ export interface OpenCodeServerDependencies {
     options: SpawnOptions,
   ): OwnedProcess<ChildProcessWithoutNullStreams>;
   sleep(milliseconds: number): Promise<void>;
+  /** A free loopback port for the next Server; defaults to one the OS assigns. */
+  assignPort?(): Promise<number>;
 }
 
 const DEFAULT_STARTUP_TIMEOUT_MS = 20_000;
 const DEFAULT_CLOSE_TIMEOUT_MS = 3_000;
+const STARTUP_ATTEMPTS = 3;
 const SERVER_USERNAME = "codexhost";
+
+function freeLoopbackPort(): Promise<number> {
+  return new Promise<number>((resolve, reject) => {
+    const probe = createServer();
+    probe.unref();
+    probe.once("error", reject);
+    probe.listen({ host: "127.0.0.1", port: 0 }, () => {
+      const address = probe.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      probe.close(() => {
+        if (port) resolve(port);
+        else reject(new Error("Failed to assign an OpenCode Server loopback port"));
+      });
+    });
+  });
+}
+
+/**
+ * The Server exited before it reported its address. With an assigned port this is how a port
+ * another process claimed first shows up, so a startup may retry it once the exited Server's
+ * process group was confirmed gone.
+ */
+class OpenCodeServerEarlyExit extends OpenCodeTransportError {}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -242,7 +269,6 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
   }
 
   async #start(): Promise<{ baseUrl: string; authorization: string }> {
-    const startedAt = Date.now();
     const staleChild = this.#child;
     if (staleChild) await this.#stopChild(staleChild);
     this.#assertOpen();
@@ -264,7 +290,40 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
       OPENCODE_SERVER_USERNAME: SERVER_USERNAME,
       OPENCODE_SERVER_PASSWORD: password,
     };
-    const invocation = openCodeServerInvocation(executable, environment);
+    // opencode v1 resolves `--port=0` to its fixed default port instead of an ephemeral one.
+    // Every managed Server must own a distinct loopback origin: the shared global fetch pool
+    // otherwise reuses a keep-alive socket a previous Server left behind, and the next request
+    // fails with `fetch failed`.
+    let attempt = 0;
+    for (;;) {
+      attempt += 1;
+      try {
+        return await this.#startAttempt(executable, environment, password);
+      } catch (error) {
+        if (!(error instanceof OpenCodeServerEarlyExit) || attempt >= STARTUP_ATTEMPTS) throw error;
+        this.#assertOpen();
+      }
+    }
+  }
+
+  async #startAttempt(
+    executable: string,
+    environment: NodeJS.ProcessEnv,
+    password: string,
+  ): Promise<{ baseUrl: string; authorization: string }> {
+    const startedAt = Date.now();
+    let port: number;
+    try {
+      port = await (this.#dependencies.assignPort ?? freeLoopbackPort)();
+    } catch (error) {
+      throw new OpenCodeTransportError(
+        "unavailable",
+        "OpenCode Server could not get a loopback port",
+        { cause: error },
+      );
+    }
+    this.#assertOpen();
+    const invocation = openCodeServerInvocation(executable, environment, process.platform, port);
     let serverCwd: string;
     try {
       serverCwd = mkdtempSync(path.join(tmpdir(), "codexhost-opencode-server-"));
@@ -352,7 +411,7 @@ export class OpenCodeServerConnection implements OpenCodeServerConnectionLike {
       child.once("exit", (code, signal) =>
         finish(() =>
           reject(
-            new OpenCodeTransportError(
+            new OpenCodeServerEarlyExit(
               "processExited",
               `OpenCode Server exited before startup completed (${signal ?? code ?? "unknown"})`,
             ),
