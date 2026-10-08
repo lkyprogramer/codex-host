@@ -71,15 +71,17 @@ describe.runIf(Boolean(command))("OpenCode Adapter real Server", () => {
           value: { state: { effectiveModel: model }, turns: [] },
         });
       }
+      // Unattended execution stays allow: a stricter selection is refused, not silently undone
+      // on the next resume.
       await expect(
         opened.value.execute({
           type: "permissionMode.select",
           permissionModeId: "ask" as never,
         }),
-      ).resolves.toEqual({ ok: true, value: { completed: true } });
+      ).resolves.toMatchObject({ ok: false, error: { code: "unsupported" } });
       await expect(opened.value.readSnapshot()).resolves.toMatchObject({
         ok: true,
-        value: { state: { effectivePermissionModeId: "ask" }, turns: [] },
+        value: { state: { effectivePermissionModeId: "allow" }, turns: [] },
       });
       if (!opened.value.commands) throw new Error("OpenCode Session did not expose commands");
       await expect(opened.value.commands.list()).resolves.toMatchObject({ ok: true });
@@ -93,7 +95,7 @@ describe.runIf(Boolean(command))("OpenCode Adapter real Server", () => {
         value: {
           state: {
             ...(model ? { effectiveModel: model } : {}),
-            effectivePermissionModeId: "ask",
+            effectivePermissionModeId: "allow",
           },
           turns: [],
         },

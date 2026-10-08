@@ -1504,7 +1504,7 @@ describe("OpenCode HarnessAdapter", () => {
     await adapter.close();
   });
 
-  it("requires Allow permission for unattended create", async () => {
+  it("requires Allow permission for unattended create and live selection", async () => {
     const transport = new FakeOpenCodeTransport();
     const adapter = adapterFor(transport);
 
@@ -1526,6 +1526,30 @@ describe("OpenCode HarnessAdapter", () => {
     expect(transport.createSessionCalls.at(-1)?.permission).toEqual([
       { permission: "*", pattern: "*", action: "allow" },
     ]);
+    // A live selection obeys the same rule as open: every resume would reapply allow.
+    for (const permissionModeId of ["ask", "default"]) {
+      await expect(
+        opened.value.execute({
+          type: "permissionMode.select",
+          permissionModeId: permissionModeId as never,
+        }),
+      ).resolves.toEqual({
+        ok: false,
+        error: {
+          code: "unsupported",
+          message: "OpenCode unattended execution requires the allow Permission Mode",
+          retryable: false,
+        },
+      });
+    }
+    expect(transport.permissionUpdates).toEqual([]);
+    await expect(opened.value.readSnapshot()).resolves.toMatchObject({
+      ok: true,
+      value: { state: { effectivePermissionModeId: "allow" } },
+    });
+    await expect(
+      opened.value.execute({ type: "permissionMode.select", permissionModeId: "allow" as never }),
+    ).resolves.toEqual({ ok: true, value: { completed: true } });
     await opened.value.close();
     await adapter.close();
   });

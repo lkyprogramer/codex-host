@@ -61,7 +61,7 @@ OpenCodeAdapter
 
 - OpenCode `executionPolicy=default` 保留原生 Question 和 Approval once/deny；
 - 提供 `default`、`ask`、`allow` 三种 Permission Mode；`ask`/`allow` 使用 Session 原生 PermissionRuleset 并跨 Resume 保留，`allow` 标记为危险模式；
-- `executionPolicy=unattended-full-access` 要求 `allow` Permission Mode，并继续在每个受管 Server 的进程环境中注入 OpenCode 原生 `permission: "allow"`；不使用共享 `always` 规则；
+- `executionPolicy=unattended-full-access` 要求 `allow` Permission Mode（创建、每次恢复都重新套用 `allow`，运行中切换到 `ask` 或 `default` 也会被拒绝，避免一个更严的选择在下次恢复时被静默撤销），并继续在每个受管 Server 的进程环境中注入 OpenCode 原生 `permission: "allow"`；不使用共享 `always` 规则；
 - `build`/`plan` 是 Agent，不会冒充 Permission Mode；
 - cross-cwd Fork、Subagent identity/transcript；
 - V2 durable replay、queue/steer、幂等 admission 和 staged revert；

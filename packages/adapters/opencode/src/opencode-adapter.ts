@@ -1035,6 +1035,14 @@ class OpenCodeHarnessSession implements HarnessSession, OpenCodeTransportListene
         },
       };
     }
+    // Unattended execution is allow by contract: open and every resume reapply it, so a stricter
+    // live selection would be silently undone (or refused) the next time the Session opens.
+    if (this.#executionPolicy === "unattended-full-access" && permissionMode !== "allow") {
+      return {
+        ok: false,
+        error: unsupported("OpenCode unattended execution requires the allow Permission Mode"),
+      };
+    }
     if (permissionMode === this.#permissionMode) {
       return { ok: true, value: { completed: true } };
     }
