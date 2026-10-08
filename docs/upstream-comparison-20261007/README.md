@@ -360,7 +360,7 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 | --- | --- | --- | --- |
 | A | V01、V02 | `fix/official-traffic-ownership` | 已实现；首轮评审结论“修后可合”，发现已修复；复审结论“修后可合”，剩余的测试缺口与文档措辞已补齐。设计说明见 [官方流量归属](../official-traffic-ownership.md) |
 | B | V03、V04、V06（V05 关闭） | `fix/official-traffic-ownership` | 已实现；评审结论“修后可合”，发现已修复（见下）；V06 说明见 [Host Runtime 运行日志](../host-runtime-log.md) |
-| C | V07 | `fix/official-traffic-ownership` | 已实现，待评审；说明见 [外部 Harness 草稿预热](../external-draft-prewarm.md) |
+| C | V07 | `fix/official-traffic-ownership` | 已实现；评审结论“修后可合”，发现已修复（见下）；说明见 [外部 Harness 草稿预热](../external-draft-prewarm.md) |
 
 迭代 A 与卡片验收的差异：
 
@@ -380,3 +380,4 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 - V07：Desktop Control 给外部预热加标记，并在换 Model、清空草稿、销毁时请求释放；Host 让未提交的预热只在内存中保留原生身份、不发布、不进列表，用户首次提交工作时才提交并发布，释放只关闭未接管且空闲的预热。所有外部 Thread 现在都只在身份提交后才发出 `thread/started`（上游 `aeae5642` 的做法），身份晚到的在提交时发布。
 - 与上游的差异：后台工作改用 Session 资源生命周期的 `workLevel` 判断；未提交的预热不参与空闲释放（否则身份未提交、释放后无法为首条消息恢复），代价是 Desktop 异常退出时预热保留到 Host 退出。fork 的 `codexhost/thread/command/execute` 不排在同一 Thread 的请求队列中，它与释放请求并发时，命令可能落在正在关闭的 Session 上并失败，不会出现两个写入者。
 - “关闭未确认后拒绝用户工作”只有单元测试：`ManagedHarnessSession` 的关闭重试（1、5、30 秒）使 Host 级测试需要三十多秒。未在真实 Desktop 上验证。
+- 迭代 C 评审发现并已修复：连接被替换或销毁时，释放请求被“当前连接”检查拦下而从未发出（改为经旧连接发出）；草稿变化时进行中的官方预热被改为报错（恢复为照常返回）；身份提交插在“检查空闲”与“占用 Thread”之间，原生命令可能与 Turn 同时占用 Session（提交移到检查之前，命令则在准入阶段内提交）；释放关闭 Session 期间到达的原生命令（改为拒绝接管）；身份晚到的委派子 Thread 收到两次 `thread/started`（发布按 Thread 去重）。被接管却未提交工作的预热会保持打开到 Host 退出，作为已知限制写入说明。

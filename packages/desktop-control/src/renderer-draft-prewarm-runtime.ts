@@ -610,21 +610,33 @@ export function createDraftPrewarmPolicyBridge(
     }
     return shouldUseBridge(method, routedParameters) ? sendBridged() : sendDirect();
   };
-  const discardExternalPrewarm = (threadId: string): void => {
+  /**
+   * The Host refuses the discard once user work adopted the Thread. A failed cleanup must not turn
+   * a configuration change into a failed submission: never replay user work to recover it.
+   *
+   * `retired`: this connection was replaced or disposed, so the current-connection guard would
+   * refuse it, yet it is still the only transport that reaches the Host owning these prewarms.
+   * A Remote Control bridge is stopped right after, so that cleanup is best effort.
+   */
+  const discardExternalPrewarm = (threadId: string, retired = false): void => {
     externalPrewarms.delete(threadId);
-    // The Host refuses the discard once user work adopted the Thread. A failed cleanup must not
-    // turn a configuration change into a failed submission, and a retired transport cannot clean
-    // up at all: never replay user work to recover it.
+    const method = "codexhost/thread/prewarm/discard";
+    const parameters = { threadId };
     try {
-      void Promise.resolve(routedSend("codexhost/thread/prewarm/discard", { threadId })).catch(
-        () => undefined,
-      );
+      const sent = !retired
+        ? routedSend(method, parameters)
+        : !isRemoteControlHost
+          ? originalSend.call(bridge, method, parameters)
+          : bridgeState === "ready"
+            ? enqueueBridgeRequest(method, parameters)
+            : undefined;
+      void Promise.resolve(sent).catch(() => undefined);
     } catch {
       // Ignored by design.
     }
   };
-  const discardExternalPrewarms = (): void => {
-    for (const threadId of [...externalPrewarms]) discardExternalPrewarm(threadId);
+  const discardExternalPrewarms = (retired = false): void => {
+    for (const threadId of [...externalPrewarms]) discardExternalPrewarm(threadId, retired);
   };
   const routedPrewarm = (parameters: unknown, options?: unknown): unknown => {
     assertCurrent();
@@ -652,17 +664,20 @@ export function createDraftPrewarmPolicyBridge(
     )
       return result;
     return Promise.resolve(result).then((value) => {
-      const threadId =
-        external && isRecord(value) && isRecord(value.thread) && typeof value.thread.id === "string"
-          ? value.thread.id
-          : null;
-      if (disposed || epoch !== prewarmEpoch) {
-        // The draft changed while this prewarm opened: release it rather than hand it out.
-        if (threadId) discardExternalPrewarm(threadId);
-        throw new Error("Renderer draft prewarm was invalidated by a configuration change");
+      if (external) {
+        const threadId =
+          isRecord(value) && isRecord(value.thread) && typeof value.thread.id === "string"
+            ? value.thread.id
+            : null;
+        if (disposed || epoch !== prewarmEpoch) {
+          // The draft changed while this prewarm opened: release it rather than hand it out.
+          if (threadId) discardExternalPrewarm(threadId, disposed);
+          throw new Error("Renderer draft prewarm was invalidated by a configuration change");
+        }
+        if (threadId) externalPrewarms.add(threadId);
       }
-      if (threadId) externalPrewarms.add(threadId);
-      if (isCurrent() && generation === prewarmGeneration) {
+      // A native Codex prewarm is never invalidated: it only stops publishing a stale workspace.
+      if (!disposed && isCurrent() && generation === prewarmGeneration) {
         publishDraftWorkspace(routedParameters);
       }
       return value;
@@ -762,8 +777,8 @@ export function createDraftPrewarmPolicyBridge(
     },
     dispose(): void {
       if (disposed) return;
-      // Before disposal, while the transport may still carry the discard requests.
-      discardExternalPrewarms();
+      // Before the bridge is stopped, while this transport may still carry the discards.
+      discardExternalPrewarms(true);
       disposed = true;
       prewarmEpoch += 1;
       prewarmGeneration += 1;

@@ -23,19 +23,22 @@ const ADOPTING_METHODS = new Set([
 ]);
 
 /**
- * Draft prewarms the Host opened for Desktop and no user work has adopted yet. Adoption and
- * discard of one Thread run on its request queue, so a discard never closes adopted work.
+ * Draft prewarms the Host opened for Desktop and no user work has adopted yet. An adopting request
+ * is observed as it arrives, so a later discard leaves its Thread alone. Most adopting requests
+ * also share the Thread's request queue with a discard; a native command does not, so a discard
+ * in progress refuses adoption instead.
  */
 export class ExternalThreadPrewarms {
   readonly #threads = new Map<string, ExternalThread>();
+  readonly #discarding = new Set<string>();
 
   register(thread: ExternalThread): void {
     this.#threads.set(thread.id, thread);
   }
 
   /**
-   * Notes a request that adopts a prewarm. Returns the error that refuses it when an earlier
-   * discard could not confirm the prewarm's Session closed.
+   * Notes a request that adopts a prewarm. Returns the error that refuses it while a discard is
+   * closing the prewarm, or after a discard could not confirm the prewarm's Session closed.
    */
   observe(request: JsonRpcRequest): Error | null {
     if (!ADOPTING_METHODS.has(request.method)) return null;
@@ -46,8 +49,15 @@ export class ExternalThreadPrewarms {
       !Array.isArray(params) &&
       typeof params.threadId === "string"
     ) {
+      if (this.#discarding.has(params.threadId)) {
+        return new Error("External prewarm is being released");
+      }
       const thread = this.#threads.get(params.threadId);
-      if (thread?.persistenceError) return thread.persistenceError;
+      if (thread?.persistenceError) {
+        return new Error("External prewarm close was not confirmed", {
+          cause: thread.persistenceError,
+        });
+      }
       this.#threads.delete(params.threadId);
     }
     return null;
@@ -55,6 +65,7 @@ export class ExternalThreadPrewarms {
 
   clear(): void {
     this.#threads.clear();
+    this.#discarding.clear();
   }
 
   /** Closes and removes an unadopted, idle prewarm. Returns whether it was discarded. */
@@ -82,6 +93,7 @@ export class ExternalThreadPrewarms {
       this.#threads.delete(threadId);
       return false;
     }
+    this.#discarding.add(threadId);
     try {
       await thread.session.close();
       await thread.outputTask;
@@ -93,6 +105,8 @@ export class ExternalThreadPrewarms {
       thread.persistenceError = error instanceof Error ? error : new Error(String(error));
       thread.stateObserver.fault(thread.persistenceError);
       throw error;
+    } finally {
+      this.#discarding.delete(threadId);
     }
   }
 }

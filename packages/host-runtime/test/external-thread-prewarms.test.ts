@@ -104,7 +104,34 @@ describe("External Thread prewarms", () => {
     expect(options.removed).toEqual([]);
     expect(fault).toHaveBeenCalledOnce();
     // Another native writer must not start while the first may still run.
-    expect(prewarms.observe(turnStart("draft"))?.message).toBe("process group is still alive");
+    const refusal = prewarms.observe(turnStart("draft"));
+    expect(refusal?.message).toBe("External prewarm close was not confirmed");
+    expect((refusal?.cause as Error).message).toBe("process group is still alive");
+  });
+
+  it("refuses adoption while a discard is closing the prewarm", async () => {
+    const prewarms = new ExternalThreadPrewarms();
+    let finishClose!: () => void;
+    const { thread } = prewarm("draft", {
+      close: () =>
+        new Promise<void>((resolve) => {
+          finishClose = resolve;
+        }),
+    });
+    const options = host(thread);
+    prewarms.register(thread);
+
+    const discarding = prewarms.discard("draft", options);
+    // A native command does not share the Thread's request queue with the discard.
+    const command = {
+      id: 3,
+      method: "codexhost/thread/command/execute",
+      params: { threadId: "draft", commandId: "compact" },
+    };
+    expect(prewarms.observe(command)?.message).toBe("External prewarm is being released");
+    finishClose();
+    await expect(discarding).resolves.toBe(true);
+    expect(prewarms.observe(command)).toBeNull();
   });
 
   it("forgets a prewarm the Host replaced or removed", async () => {

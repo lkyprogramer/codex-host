@@ -558,6 +558,7 @@ class OrderedWriter {
 export class AppServerHost {
   readonly #desktopRequests = new DesktopRequestDispatcher();
   readonly #externalPrewarms = new ExternalThreadPrewarms();
+  readonly #publishedExternalThreads = new Set<string>();
   readonly #replyGuards = new DesktopReplyGuards(async (request, error, answered) => {
     this.#diagnose(error);
     if (answered) return;
@@ -985,11 +986,9 @@ export class AppServerHost {
     request: JsonRpcRequest,
     frame: Buffer<ArrayBufferLike>,
   ): Promise<void> {
-    const unconfirmedPrewarmClose = this.#externalPrewarms.observe(request);
-    if (unconfirmedPrewarmClose) {
-      await this.#writer.json(
-        rpcError(request, -32075, "External prewarm close was not confirmed"),
-      );
+    const prewarmRefusal = this.#externalPrewarms.observe(request);
+    if (prewarmRefusal) {
+      await this.#writer.json(rpcError(request, -32075, prewarmRefusal.message));
       return;
     }
     if (request.method === THREAD_PREWARM_DISCARD_METHOD) {
@@ -2820,6 +2819,9 @@ export class AppServerHost {
         await this.#writer.json(rpcError(request, -32078, errorMessage(error)));
         return;
       }
+      // Still in admission: an interrupt meanwhile cancels it, and the handoff below stays
+      // synchronous with the final check.
+      if (!(await this.#submitPrewarmForCommand(request, thread))) return;
       if (
         signal.aborted ||
         this.#closeRequested ||
@@ -2903,12 +2905,6 @@ export class AppServerHost {
       await this.#writer.json(
         rpcError(request, -32072, "External Thread already has an active operation"),
       );
-      return;
-    }
-    try {
-      await this.#submitPrewarm(thread);
-    } catch {
-      await this.#writer.json(rpcError(request, -32081, "External Thread could not be persisted"));
       return;
     }
     const turnId = requestedTurnId ?? hostTurnIdSchema.parse(randomUUID());
@@ -3204,13 +3200,7 @@ export class AppServerHost {
       );
       // A Thread without a committed identity cannot be restored after release: it is published
       // once its identity is committed (a later Session state event, or a submitted prewarm).
-      if (record.state === "ready") {
-        await this.#writer.json({
-          method: "thread/started",
-          emittedAtMs: Date.now(),
-          params: { thread },
-        });
-      }
+      if (record.state === "ready") await this.#notifyExternalThreadStarted(thread);
     } catch {
       this.#externalRuntime.remove(record.hostThreadId);
       this.#routeObservationTracker.forgetThread(record.hostThreadId);
@@ -3409,7 +3399,27 @@ export class AppServerHost {
     }
   }
 
+  /** `#submitPrewarm` for a command admission; answers the request and returns false on failure. */
+  async #submitPrewarmForCommand(
+    request: JsonRpcRequest,
+    thread: ExternalThread,
+  ): Promise<boolean> {
+    try {
+      await this.#submitPrewarm(thread);
+      return true;
+    } catch {
+      await this.#writer.json(rpcError(request, -32081, "External Thread could not be persisted"));
+      return false;
+    }
+  }
+
   async #notifyExternalThreadStarted(thread: JsonObject): Promise<void> {
+    // Several paths may publish one Thread (its identity commit, a delegation that waited for
+    // it): Desktop learns of each Thread once.
+    if (typeof thread.id === "string") {
+      if (this.#publishedExternalThreads.has(thread.id)) return;
+      this.#publishedExternalThreads.add(thread.id);
+    }
     await this.#writer.json({
       method: "thread/started",
       emittedAtMs: Date.now(),
@@ -3850,7 +3860,13 @@ export class AppServerHost {
           return;
         }
         if (matched) {
-          if (signal.aborted) {
+          // Still in admission; the check below keeps the handoff synchronous.
+          if (!(await this.#submitPrewarmForCommand(request, thread))) return;
+          if (
+            signal.aborted ||
+            this.#closeRequested ||
+            this.#externalRuntime.get(thread.id) !== thread
+          ) {
             await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
             return;
           }
@@ -4000,6 +4016,12 @@ export class AppServerHost {
     turn: JsonObject;
     gate: TurnProjectionGate;
   }> {
+    // Before the checks below: they and the claim of the Thread run without an await between them.
+    try {
+      await this.#submitPrewarm(thread);
+    } catch {
+      throw new ExternalSteerError(-32081, "External Thread could not be persisted");
+    }
     if (this.#closeRequested || this.#externalRuntime.get(thread.id) !== thread) {
       throw new ExternalSteerError(-32073, "External Thread is no longer available");
     }
@@ -4009,11 +4031,6 @@ export class AppServerHost {
       this.#pendingExternalCommandRequests.has(thread.id)
     ) {
       throw new ExternalSteerError(-32072, "External Thread already has an active Turn");
-    }
-    try {
-      await this.#submitPrewarm(thread);
-    } catch {
-      throw new ExternalSteerError(-32081, "External Thread could not be persisted");
     }
     thread.running = true;
     let turnId: HostTurnId | undefined;

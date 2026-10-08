@@ -484,6 +484,65 @@ describe("Renderer draft prewarm policy", () => {
     expect(target.__codexhostDraftWorkspacesV1).toEqual({});
   });
 
+  it("releases external prewarms through a connection that was already retired", async () => {
+    // Serialized like the Renderer installer, so the retired path stays self-contained too.
+    const injected = runInNewContext(`(${createDraftPrewarmPolicyBridge.toString()})`, {
+      TextDecoder,
+      TextEncoder,
+      CustomEvent,
+      setTimeout,
+      clearTimeout,
+      crypto: globalThis.crypto,
+    }) as typeof createDraftPrewarmPolicyBridge;
+    const sendRequest = vi.fn<(method: string, parameters: unknown) => Promise<unknown>>(
+      async () => ({ discarded: true }),
+    );
+    const bridge = requestBridgeFixture({
+      sendRequest,
+      prewarmThreadStart: vi.fn(async () => ({ thread: { id: "draft-1" } })),
+    });
+    let current = true;
+    const policy = injected(
+      requestManagerFixture(),
+      bridge,
+      "local",
+      {},
+      { discardAllPrewarmedThreads: vi.fn() },
+      () => current,
+    );
+    policy.select("codexhost/pi-native");
+    await bridge.prewarmThreadStart({ cwd: "/tmp/project", model: "gpt-5" });
+
+    // Routing disposes a policy only after its connection stopped being current.
+    current = false;
+    policy.dispose();
+    expect(sendRequest).toHaveBeenCalledWith("codexhost/thread/prewarm/discard", {
+      threadId: "draft-1",
+    });
+  });
+
+  it("still hands out a native Codex prewarm that settles after the draft changed", async () => {
+    let settle!: (value: unknown) => void;
+    const bridge = requestBridgeFixture({
+      prewarmThreadStart: vi.fn(
+        () =>
+          new Promise<unknown>((resolve) => {
+            settle = resolve;
+          }),
+      ),
+    });
+    const target: DraftPrewarmPolicyTarget = {};
+    installDraftPrewarmPolicyBridge(requestManagerFixture(), bridge, "local", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+    const policy = target.__codexhostDraftPrewarmPolicyV1 as { clear(): Promise<void> };
+
+    const prewarm = bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    await policy.clear();
+    settle({ thread: { id: "codex-thread" } });
+    await expect(prewarm).resolves.toEqual({ thread: { id: "codex-thread" } });
+  });
+
   it("routes a draft Codex Account without changing the default Account", async () => {
     const sendRequest = vi.fn(async () => undefined);
     const manager = requestManagerFixture();

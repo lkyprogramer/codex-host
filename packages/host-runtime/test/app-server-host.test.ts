@@ -4661,6 +4661,87 @@ describe("AppServerHost HarnessAdapter projection", () => {
       await stopFixture(fixture);
     });
 
+    it("publishes a prewarm adopted by a native command or a native autonomous Turn", async () => {
+      const fixture = createFixture();
+      const commandDraft = await startPrewarm(fixture, 110);
+      const session = fixture.adapter.sessions[0];
+      if (!session) throw new Error("Prewarm opened no Session");
+      session.commands = {
+        list: async () => ({
+          ok: true,
+          value: {
+            commands: [
+              harnessCommandDescriptorSchema.parse({
+                id: "fake.compact",
+                invocation: "/compact",
+                label: "Compact",
+                argumentMode: "none" as const,
+              }),
+            ],
+          },
+        }),
+        execute: async ({ turnId }) => {
+          session.publishEphemeralCommand(turnId, {
+            type: "contextCompaction",
+            itemId: hostItemIdSchema.parse("prewarm-command-item"),
+          });
+          return { ok: true, value: { turnId } };
+        },
+      };
+      writeRequest(fixture.desktopInput, {
+        id: 111,
+        method: "codexhost/thread/command/execute",
+        params: {
+          threadId: commandDraft,
+          commandId: "fake.compact",
+          turnId: hostTurnIdSchema.parse("prewarm-command"),
+        },
+      });
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 111)),
+      ).resolves.toMatchObject({ result: { accepted: true } });
+      expect(published(fixture, commandDraft)).toBe(true);
+      expect(await stored(fixture, commandDraft)).toMatchObject({ state: "ready" });
+
+      const autonomousDraft = await startPrewarm(fixture, 112);
+      const autonomous = fixture.adapter.sessions[1];
+      if (!autonomous) throw new Error("Prewarm opened no Session");
+      // The Harness starts native work on its own: no longer a disposable draft.
+      autonomous.publishAutonomousTurn(hostTurnIdSchema.parse("native-autonomous"), [
+        { type: "text", text: "background result" },
+      ]);
+      await vi.waitFor(() => expect(published(fixture, autonomousDraft)).toBe(true));
+      expect(await stored(fixture, autonomousDraft)).toMatchObject({ state: "ready" });
+      await stopFixture(fixture);
+    });
+
+    it("runs no user work when a prewarm cannot be committed", async () => {
+      const fixture = createFixture();
+      const draft = await startPrewarm(fixture, 113);
+      const session = fixture.adapter.sessions[0];
+      if (!session) throw new Error("Prewarm opened no Session");
+      const execute = vi.spyOn(session, "execute");
+      vi.spyOn(fixture.mappingStore, "commitReady").mockRejectedValueOnce(
+        new Error("synthetic Mapping Store failure"),
+      );
+      writeRequest(fixture.desktopInput, {
+        id: 114,
+        method: "turn/start",
+        params: { threadId: draft, input: [{ type: "text", text: "synthetic" }] },
+      });
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 114)),
+      ).resolves.toMatchObject({ id: 114, error: { code: -32081 } });
+      expect(execute).not.toHaveBeenCalled();
+      expect(published(fixture, draft)).toBe(false);
+      expect(await stored(fixture, draft)).toMatchObject({ state: "creating" });
+
+      // A later submission commits it and runs.
+      await startPiTurn(fixture, draft, 115);
+      expect(published(fixture, draft)).toBe(true);
+      await stopFixture(fixture);
+    });
+
     it("releases only an unadopted prewarm", async () => {
       const fixture = createFixture();
       const draft = await startPrewarm(fixture, 82);
