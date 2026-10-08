@@ -2819,17 +2819,6 @@ export class AppServerHost {
         await this.#writer.json(rpcError(request, -32078, errorMessage(error)));
         return;
       }
-      // Still in admission: an interrupt meanwhile cancels it, and the handoff below stays
-      // synchronous with the final check.
-      if (!(await this.#submitPrewarmForCommand(request, thread))) return;
-      if (
-        signal.aborted ||
-        this.#closeRequested ||
-        this.#externalRuntime.get(thread.id) !== thread
-      ) {
-        await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
-        return;
-      }
       const descriptor = catalog.commands.find(({ id }) => id === params.data.commandId);
       if (!descriptor) {
         await this.#writer.json(
@@ -2841,9 +2830,16 @@ export class AppServerHost {
         );
         return;
       }
+      // Still in admission, and only for a command the Harness exposes: an interrupt meanwhile
+      // cancels it, and the handoff below stays synchronous with the final check.
+      if (!(await this.#submitPrewarmForCommand(request, thread))) return;
       // Admission ends here. The command owns the active Turn before its first await,
       // so interrupts from this point must reach native Turn cancellation.
-      if (signal.aborted) {
+      if (
+        signal.aborted ||
+        this.#closeRequested ||
+        this.#externalRuntime.get(thread.id) !== thread
+      ) {
         await this.#writer.json(rpcError(request, -32078, "Command admission was cancelled"));
         return;
       }

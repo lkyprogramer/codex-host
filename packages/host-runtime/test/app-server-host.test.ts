@@ -4742,6 +4742,116 @@ describe("AppServerHost HarnessAdapter projection", () => {
       await stopFixture(fixture);
     });
 
+    it("lets one claim win when a native command arrives while a Turn commits a prewarm", async () => {
+      const fixture = createFixture();
+      const draft = await startPrewarm(fixture, 116);
+      const session = fixture.adapter.sessions[0];
+      if (!session) throw new Error("Prewarm opened no Session");
+      let finishCommand!: () => void;
+      const commandExecute = vi.fn(
+        ({ turnId }: { turnId: string }) =>
+          new Promise<{ ok: true; value: { turnId: string } }>((resolve) => {
+            finishCommand = () => resolve({ ok: true, value: { turnId } });
+          }),
+      );
+      session.commands = {
+        list: async () => ({
+          ok: true,
+          value: {
+            commands: [
+              harnessCommandDescriptorSchema.parse({
+                id: "fake.compact",
+                invocation: "/compact",
+                label: "Compact",
+                argumentMode: "none" as const,
+              }),
+            ],
+          },
+        }),
+        execute: commandExecute as never,
+      };
+      const execute = vi.spyOn(session, "execute");
+      const commitReady = fixture.mappingStore.commitReady.bind(fixture.mappingStore);
+      let releaseCommit!: () => void;
+      const commitHeld = new Promise<void>((resolve) => {
+        releaseCommit = resolve;
+      });
+      let commitStarted!: () => void;
+      const commitReached = new Promise<void>((resolve) => {
+        commitStarted = resolve;
+      });
+      vi.spyOn(fixture.mappingStore, "commitReady").mockImplementationOnce(async (...args) => {
+        commitStarted();
+        await commitHeld;
+        return commitReady(...args);
+      });
+
+      writeRequest(fixture.desktopInput, {
+        id: 117,
+        method: "turn/start",
+        params: { threadId: draft, input: [{ type: "text", text: "synthetic" }] },
+      });
+      await commitReached;
+      // The command does not queue behind the Turn: it commits and claims the Thread first.
+      writeRequest(fixture.desktopInput, {
+        id: 118,
+        method: "codexhost/thread/command/execute",
+        params: {
+          threadId: draft,
+          commandId: "fake.compact",
+          turnId: hostTurnIdSchema.parse("racing-command"),
+        },
+      });
+      await vi.waitFor(() => expect(commandExecute).toHaveBeenCalledOnce());
+
+      // The Turn's commit completes while the command still owns the Thread.
+      releaseCommit();
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 117)),
+      ).resolves.toMatchObject({ error: expect.anything() });
+      expect(execute).not.toHaveBeenCalled();
+      finishCommand();
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 118)),
+      ).resolves.toMatchObject({ result: { accepted: true } });
+      expect(
+        fixture.collector.messages.filter(
+          (message) =>
+            message.method === "thread/started" &&
+            ((message.params as JsonObject).thread as JsonObject).id === draft,
+        ),
+      ).toHaveLength(1);
+      await stopFixture(fixture);
+    });
+
+    it("keeps a prewarm unpublished when a native command is not exposed", async () => {
+      const fixture = createFixture();
+      const draft = await startPrewarm(fixture, 119);
+      const session = fixture.adapter.sessions[0];
+      if (!session) throw new Error("Prewarm opened no Session");
+      session.commands = {
+        list: async () => ({ ok: true, value: { commands: [] } }),
+        execute: async ({ turnId }) => ({ ok: true, value: { turnId } }),
+      };
+      writeRequest(fixture.desktopInput, {
+        id: 120,
+        method: "codexhost/thread/command/execute",
+        params: {
+          threadId: draft,
+          commandId: "fake.missing",
+          turnId: hostTurnIdSchema.parse("missing-command"),
+        },
+      });
+      await expect(
+        fixture.collector.waitFor((message) => requestId(message, 120)),
+      ).resolves.toMatchObject({ error: { code: -32078 } });
+      expect(await stored(fixture, draft)).toMatchObject({ state: "creating" });
+      const later = await startPrewarm(fixture, 121, false);
+      await vi.waitFor(() => expect(published(fixture, later)).toBe(true));
+      expect(published(fixture, draft)).toBe(false);
+      await stopFixture(fixture);
+    });
+
     it("releases only an unadopted prewarm", async () => {
       const fixture = createFixture();
       const draft = await startPrewarm(fixture, 82);

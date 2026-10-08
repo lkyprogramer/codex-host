@@ -616,20 +616,19 @@ export function createDraftPrewarmPolicyBridge(
    *
    * `retired`: this connection was replaced or disposed, so the current-connection guard would
    * refuse it, yet it is still the only transport that reaches the Host owning these prewarms.
-   * A Remote Control bridge is stopped right after, so that cleanup is best effort.
+   * A retired Remote Control connection sends nothing: its bridge is killed before a queued frame
+   * could be written, and the Host session behind that bridge closes every Harness Session it
+   * opened, prewarms included, once the bridge disconnects.
    */
   const discardExternalPrewarm = (threadId: string, retired = false): void => {
     externalPrewarms.delete(threadId);
+    if (retired && isRemoteControlHost) return;
     const method = "codexhost/thread/prewarm/discard";
     const parameters = { threadId };
     try {
-      const sent = !retired
-        ? routedSend(method, parameters)
-        : !isRemoteControlHost
-          ? originalSend.call(bridge, method, parameters)
-          : bridgeState === "ready"
-            ? enqueueBridgeRequest(method, parameters)
-            : undefined;
+      const sent = retired
+        ? originalSend.call(bridge, method, parameters)
+        : routedSend(method, parameters);
       void Promise.resolve(sent).catch(() => undefined);
     } catch {
       // Ignored by design.

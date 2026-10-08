@@ -807,6 +807,51 @@ describe("Renderer draft prewarm policy", () => {
     expect(writtenBridgeFrames(directSend)).toHaveLength(3);
   });
 
+  it("leaves a retired Remote Control connection's prewarms to the Host session it stops", async () => {
+    const manager = requestManagerFixture();
+    const { bridge, directSend } = remoteRequestBridgeFixture();
+    const notifications = remoteNotificationTargetFixture();
+    const target = notifications.target;
+    installDraftPrewarmPolicyBridge(manager, bridge, "remote-control:fixture-host", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+    const policy = target.__codexhostDraftPrewarmPolicyV1 as {
+      select(model: string | null): boolean;
+      dispose(): void;
+    };
+    policy.select("codexhost/pi-native");
+
+    const prewarm = bridge.prewarmThreadStart?.({ cwd: "C:\\workspace", model: "gpt-5" });
+    const processHandle = (directSend.mock.calls[0]?.[1] as { processHandle: string })
+      .processHandle;
+    emitRemoteBridgeOutput(notifications, processHandle, {
+      method: "codexhost/remote-control-bridge/ready",
+      params: { protocolVersion: 1 },
+    });
+    await vi.waitFor(() => expect(writtenBridgeFrames(directSend)).toHaveLength(1));
+    emitRemoteBridgeOutput(notifications, processHandle, {
+      id: writtenBridgeFrames(directSend)[0]?.id,
+      result: {},
+    });
+    await vi.waitFor(() => expect(writtenBridgeFrames(directSend)).toHaveLength(3));
+    const start = writtenBridgeFrames(directSend)[2];
+    expect(start).toMatchObject({ method: "thread/start", params: { codexhostPrewarm: true } });
+    emitRemoteBridgeOutput(notifications, processHandle, {
+      id: start?.id,
+      result: { thread: { id: "draft-1" } },
+    });
+    await expect(prewarm).resolves.toEqual({ thread: { id: "draft-1" } });
+
+    // Killing the bridge disconnects its Host session, which closes the prewarm's Session; a
+    // discard queued behind the kill would never be written.
+    const enqueueRequest = vi.spyOn(bridge, "enqueueRequest");
+    policy.dispose();
+    expect(enqueueRequest).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(directSend).toHaveBeenLastCalledWith("process/kill", { processHandle });
+    expect(writtenBridgeFrames(directSend)).toHaveLength(3);
+  });
+
   it("leaves stock Remote Control requests direct and terminates its bridge on dispose", async () => {
     const manager = requestManagerFixture();
     const { bridge, directSend } = remoteRequestBridgeFixture();

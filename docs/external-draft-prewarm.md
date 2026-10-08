@@ -18,9 +18,9 @@ Desktop Control（`renderer-draft-prewarm-runtime.ts`）只给外部 Harness、�
 
 ## 提交
 
-用户第一次在预热里发起 Turn、执行原生命令，或 Harness 自己开始一个原生 Turn 时，Host 先把内存中的身份提交到映射记录，再发布 `thread/started`，然后才执行这次工作。提交失败时这次工作不执行（返回 `-32081`），草稿仍保持隐藏，下一次提交会重试。身份还没报告的，由之后的 Session 状态事件提交并发布。
+用户第一次在预热里发起 Turn、执行 Harness 提供的原生命令，或 Harness 自己开始一个原生 Turn 时，Host 先把内存中的身份提交到映射记录，再发布 `thread/started`，然后才执行这次工作。提交失败时这次工作不执行（返回 `-32081`），草稿仍保持隐藏，下一次提交会重试。身份还没报告的，由之后的 Session 状态事件提交并发布。
 
-提交发生在 Thread 被占用之前：发起 Turn 时，提交完成后才检查 Thread 是否空闲并占用它；执行原生命令时，提交在命令准入阶段完成，准入期间的中断会取消命令。检查与占用之间没有 await，两个请求不会同时占用同一个原生 Session。
+提交发生在 Thread 被占用之前：发起 Turn 时，提交完成后才检查 Thread 是否空闲并占用它；执行原生命令时，提交在命令准入阶段、确认 Harness 提供这个命令之后完成，准入期间的中断会取消命令；不存在的命令不会提交预热。检查与占用之间没有 await，两个请求不会同时占用同一个原生 Session。
 
 读取、恢复或选择配置会“接管”预热（之后的释放请求不再关闭它），但不会发布它。这样被接管、却一直没有提交工作的预热，既不能再被释放，也不参与空闲释放（见下），会保持打开到 Host 退出；提交失败后未再提交的预热也一样。
 
@@ -30,7 +30,9 @@ Desktop Control 在以下时机向 Host 发送 `codexhost/thread/prewarm/discard
 
 - 草稿选择的外部 Model 变化；
 - 草稿被清空；
-- Desktop Control 的这条 Host 连接被替换或销毁。这时连接已不是当前连接，释放请求仍通过这条旧连接发出：本机 Host 直接发送；Remote Control Host 只在 bridge 已就绪时排入 bridge，而 bridge 随即被停止，所以只是尽力而为。
+- Desktop Control 的这条本机 Host 连接被替换或销毁。这时连接已不是当前连接，释放请求仍通过这条旧连接直接发出。
+
+Remote Control Host 的连接被替换或销毁时不发送释放请求：bridge 进程随即被结束，排在后面的请求写不出去。每条 Remote Control 连接在 Host 中有自己的会话，bridge 断开后，这个会话结束时会关闭它打开的所有 Harness Session，预热也在其中；映射记录停在 `creating`，由下次 Host 启动时的 Mapping Store 清理删除。
 
 预热还在打开时草稿就变了，返回的预热会被释放，并以错误结束，不交给 Desktop 使用。
 
@@ -49,12 +51,17 @@ Host 在该 Thread 的请求队列内处理释放，结果为 `{ discarded: bool
 
 ## 验证
 
-- `packages/host-runtime/test/app-server-host.test.ts` 的 “external draft prewarms”：预热不发布、首次 Turn 时提交并发布；原生命令与原生自主 Turn 提交预热；提交失败时不执行用户工作；身份晚到的普通 Thread 与预热；只释放未接管的预热（含通过 `thread/resume` 接管）。
+- `packages/host-runtime/test/app-server-host.test.ts` 的 “external draft prewarms”：预热不发布、首次 Turn 时提交并发布；原生命令与原生自主 Turn 提交预热；不存在的命令不提交预热；Turn 提交身份期间到达的原生命令先占用 Thread 时，Turn 被拒绝且 `thread/started` 只发布一次；提交失败时不执行用户工作；身份晚到的普通 Thread 与预热；只释放未接管的预热（含通过 `thread/resume` 接管）。
 - `packages/host-runtime/test/external-thread-prewarms.test.ts`：释放、接管、后台工作、关闭未确认后拒绝用户工作、释放进行中拒绝接管。
 - `packages/host-runtime/test/external-thread-runtime.test.ts`：未提交的预热不空闲释放。
 - `packages/host-runtime/test/external-thread-repository.test.ts`：未发送草稿的快照对齐。
-- `packages/desktop-control/test/renderer-draft-prewarm-policy.test.ts`：标记、换 Model / 清空 / 销毁时释放、连接已不是当前连接时销毁仍释放（按 Renderer 注入方式序列化执行）、接管后不释放、草稿变化后返回的预热被释放、官方预热不受影响（含草稿变化后返回的官方预热）。
+- `packages/desktop-control/test/renderer-draft-prewarm-policy.test.ts`：标记、换 Model / 清空 / 销毁时释放、连接已不是当前连接时销毁仍释放（按 Renderer 注入方式序列化执行）、Remote Control 连接销毁时不再排队释放请求、接管后不释放、草稿变化后返回的预热被释放、官方预热不受影响（含草稿变化后返回的官方预热）。
 
-没有自动化测试的部分：“关闭未确认”的 Host 级路径（`ManagedHarnessSession` 关闭失败后会按 1、5、30 秒重试，由单元测试覆盖）；检查与占用之间的并发窗口；`thread/started` 去重（需要身份晚到的委派子 Thread）。没有在真实 Desktop 上验证。
+没有自动化测试的部分：“关闭未确认”的 Host 级路径（`ManagedHarnessSession` 关闭失败后会按 1、5、30 秒重试，由单元测试覆盖）；Remote Control 连接断开后 Host 会话关闭预热 Session 的端到端路径（Remote Control bridge 只在 Windows 上可用）。没有在真实 Desktop 上验证。
+
+已知差异：
+
+- Harness 自己开始的原生 Turn 提交身份失败时，整个 Session 以失败结束；用户发起的工作提交失败则返回 `-32081`、可以重试。
+- `thread/started` 按 Thread 只发布一次，因此对已有映射的原生 Session 重复导入时不会再次发布。
 
 来源：借鉴上游 `bac41c30`、`6897e530`、`aeae5642`（BytePioneer-AI/codex-host，#482）；fork 用 Session 资源生命周期判断后台工作，并让未提交的预热不参与空闲释放。见 [上游对比 V07](upstream-comparison-20261007/README.md)。
