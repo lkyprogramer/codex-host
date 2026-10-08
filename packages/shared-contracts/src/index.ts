@@ -2,6 +2,13 @@ import { z } from "zod";
 import { WORKSPACE_CONTRACT_VERSION } from "./version.js";
 
 export {
+  EXTERNAL_THREAD_PREWARM_PARAM,
+  THREAD_PREWARM_DISCARD_METHOD,
+  threadPrewarmDiscardParamsSchema,
+  threadPrewarmDiscardResultSchema,
+} from "./thread-prewarm.js";
+
+export {
   harnessAccountSnapshotSchema,
   harnessAccountListParamsSchema,
   harnessAccountListResultSchema,

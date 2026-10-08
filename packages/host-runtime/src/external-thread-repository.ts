@@ -477,6 +477,11 @@ export class ExternalThreadRepository {
     snapshot: HostThreadSnapshot,
   ): Promise<AlignedExternalSnapshot> {
     const nativeSessionRef = record.nativeSessionRef;
+    // An unsent draft (a prewarm, or a Harness that reports its identity only on the first Turn)
+    // has no history to reconcile or persist yet.
+    if (record.state === "creating" && !nativeSessionRef && snapshot.turns.length === 0) {
+      return { record, turns: [] };
+    }
     if (!nativeSessionRef || record.state !== "ready") {
       throw new Error("External Thread has no committed Native Session identity");
     }

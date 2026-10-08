@@ -4546,6 +4546,171 @@ describe("AppServerHost HarnessAdapter projection", () => {
     await stopFixture(fixture);
   });
 
+  describe("external draft prewarms", () => {
+    async function startPrewarm(
+      fixture: ReturnType<typeof createFixture>,
+      id: number,
+      prewarm = true,
+    ): Promise<string> {
+      await fixture.ready;
+      writeRequest(fixture.desktopInput, {
+        id,
+        method: "thread/start",
+        params: {
+          model: "codexhost/pi-native",
+          cwd: "/synthetic",
+          ...(prewarm ? { codexhostPrewarm: true } : {}),
+        },
+      });
+      const response = await fixture.collector.waitFor((message) => requestId(message, id));
+      const thread = (response.result as JsonObject).thread as JsonObject;
+      if (typeof thread.id !== "string") throw new Error("Prewarm returned no Thread");
+      return thread.id;
+    }
+    const published = (fixture: ReturnType<typeof createFixture>, threadId: string) =>
+      fixture.collector.messages.some(
+        (message) =>
+          message.method === "thread/started" &&
+          ((message.params as JsonObject).thread as JsonObject).id === threadId,
+      );
+    const stored = (fixture: ReturnType<typeof createFixture>, threadId: string) =>
+      fixture.mappingStore.getThread(hostThreadIdSchema.parse(threadId));
+    async function discard(
+      fixture: ReturnType<typeof createFixture>,
+      id: number,
+      threadId: string,
+    ): Promise<JsonObject> {
+      writeRequest(fixture.desktopInput, {
+        id,
+        method: "codexhost/thread/prewarm/discard",
+        params: { threadId },
+      });
+      return fixture.collector.waitFor((message) => requestId(message, id));
+    }
+
+    it("keeps a prewarm out of history until the user submits work", async () => {
+      const fixture = createFixture();
+      const threadId = await startPrewarm(fixture, 80);
+      const session = fixture.adapter.sessions[0];
+      if (!session) throw new Error("Prewarm opened no Session");
+      // The Harness already reported its identity, but the draft stays provisional.
+      expect(session.initialState.nativeRef).toBeDefined();
+      expect(await stored(fixture, threadId)).toMatchObject({ state: "creating" });
+      // Desktop output is ordered: once a later Thread is published, a publication of the
+      // prewarm would already have arrived.
+      const later = await startPrewarm(fixture, 79, false);
+      await vi.waitFor(() => expect(published(fixture, later)).toBe(true));
+      expect(published(fixture, threadId)).toBe(false);
+
+      await startPiTurn(fixture, threadId, 81);
+      expect(published(fixture, threadId)).toBe(true);
+      expect(await stored(fixture, threadId)).toMatchObject({
+        state: "ready",
+        nativeSessionRef: session.initialState.nativeRef,
+      });
+      await stopFixture(fixture);
+    });
+
+    it("publishes a Thread whose identity arrives later only once it is committed", async () => {
+      const adapter = new FakeHarnessAdapter(harnessIdSchema.parse("pi"));
+      const open = adapter.open.bind(adapter);
+      // The Harness reports its Native identity only after creation.
+      vi.spyOn(adapter, "open").mockImplementation(async (input) => {
+        const opened = await open(input);
+        if (opened.ok) {
+          const { nativeRef: _deferred, ...initialState } = opened.value.initialState;
+          void _deferred;
+          Object.defineProperty(opened.value, "initialState", { value: initialState });
+        }
+        return opened;
+      });
+      const fixture = createFixture({ externalAdapters: new Map([["pi", adapter]]) });
+      const model = adapter.catalog.models[1]?.ref;
+      if (!model) throw new Error("Fake catalog has no secondary Model");
+      const selectModel = async (id: number, threadId: string) => {
+        writeRequest(fixture.desktopInput, {
+          id,
+          method: "codexhost/thread/model/select",
+          params: { threadId, model },
+        });
+        await fixture.collector.waitFor((message) => requestId(message, id));
+      };
+
+      const ordinary = await startPrewarm(fixture, 96, false);
+      expect(await stored(fixture, ordinary)).toMatchObject({ state: "creating" });
+      // The configuration change reports the identity: committed and published only now.
+      await selectModel(97, ordinary);
+      await vi.waitFor(() => expect(published(fixture, ordinary)).toBe(true));
+      expect(await stored(fixture, ordinary)).toMatchObject({ state: "ready" });
+
+      const draft = await startPrewarm(fixture, 98);
+      await selectModel(99, draft);
+      // A draft keeps the reported identity in memory: still unpublished and provisional.
+      const later = await startPrewarm(fixture, 100, false);
+      await selectModel(101, later);
+      await vi.waitFor(() => expect(published(fixture, later)).toBe(true));
+      expect(published(fixture, draft)).toBe(false);
+      expect(await stored(fixture, draft)).toMatchObject({ state: "creating" });
+
+      await startPiTurn(fixture, draft, 102);
+      expect(published(fixture, draft)).toBe(true);
+      expect(await stored(fixture, draft)).toMatchObject({
+        state: "ready",
+        nativeSessionRef: adapter.sessions[1]?.state.nativeRef,
+      });
+      await stopFixture(fixture);
+    });
+
+    it("releases only an unadopted prewarm", async () => {
+      const fixture = createFixture();
+      const draft = await startPrewarm(fixture, 82);
+      await expect(discard(fixture, 83, draft)).resolves.toEqual({
+        id: 83,
+        result: { discarded: true },
+      });
+      expect(fixture.adapter.sessions[0]?.closed).toBe(true);
+      expect(await stored(fixture, draft)).toBeNull();
+      // A repeated discard has nothing left to release.
+      await expect(discard(fixture, 84, draft)).resolves.toEqual({
+        id: 84,
+        result: { discarded: false },
+      });
+
+      const adopted = await startPrewarm(fixture, 85);
+      await startPiTurn(fixture, adopted, 86);
+      await expect(discard(fixture, 87, adopted)).resolves.toEqual({
+        id: 87,
+        result: { discarded: false },
+      });
+      expect(fixture.adapter.sessions[1]?.closed).toBe(false);
+
+      // Adoption alone protects a prewarm, even with no Turn running in it.
+      const resumed = await startPrewarm(fixture, 93);
+      writeRequest(fixture.desktopInput, {
+        id: 94,
+        method: "thread/resume",
+        params: { threadId: resumed },
+      });
+      await fixture.collector.waitFor((message) => requestId(message, 94));
+      await expect(discard(fixture, 95, resumed)).resolves.toEqual({
+        id: 95,
+        result: { discarded: false },
+      });
+      expect(fixture.adapter.sessions[2]?.closed).toBe(false);
+
+      // An ordinary empty Thread is never a disposable draft.
+      const ordinary = await startPrewarm(fixture, 88, false);
+      // An ordinary Thread is published right after its create response.
+      await vi.waitFor(() => expect(published(fixture, ordinary)).toBe(true));
+      await expect(discard(fixture, 89, ordinary)).resolves.toEqual({
+        id: 89,
+        result: { discarded: false },
+      });
+      expect(fixture.adapter.sessions[3]?.closed).toBe(false);
+      await stopFixture(fixture);
+    });
+  });
+
   it("preserves the Desktop Thread persistence mode for an external Harness", async () => {
     const fixture = createFixture();
     writeRequest(fixture.desktopInput, {

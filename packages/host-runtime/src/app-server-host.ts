@@ -1,10 +1,14 @@
 import { openWithin } from "./bounded-open.js";
 import {
+  EXTERNAL_THREAD_PREWARM_PARAM,
   LOADED_SESSIONS_METHOD,
+  THREAD_PREWARM_DISCARD_METHOD,
   loadedSessionsParamsSchema,
   loadedSessionsResultSchema,
+  threadPrewarmDiscardParamsSchema,
 } from "@codexhost/shared-contracts";
 import { DesktopReplyGuards } from "./desktop-reply-guard.js";
+import { ExternalThreadPrewarms } from "./external-thread-prewarms.js";
 import { DesktopRequestDispatcher } from "./desktop-request-dispatcher.js";
 import { AccountRateLimits } from "./codex-runtime/account-rate-limits.js";
 import { inspectHarnessAccounts } from "./harness-accounts.js";
@@ -553,6 +557,7 @@ class OrderedWriter {
 
 export class AppServerHost {
   readonly #desktopRequests = new DesktopRequestDispatcher();
+  readonly #externalPrewarms = new ExternalThreadPrewarms();
   readonly #replyGuards = new DesktopReplyGuards(async (request, error, answered) => {
     this.#diagnose(error);
     if (answered) return;
@@ -870,6 +875,7 @@ export class AppServerHost {
       }
       await this.#codexRuntimePool.close();
       this.#externalRuntime.clear();
+      this.#externalPrewarms.clear();
       this.#pendingOfficialTurnStarts.clear();
       this.#routeObservationTracker.clear();
       this.#unregisterDelegationApi?.();
@@ -979,6 +985,17 @@ export class AppServerHost {
     request: JsonRpcRequest,
     frame: Buffer<ArrayBufferLike>,
   ): Promise<void> {
+    const unconfirmedPrewarmClose = this.#externalPrewarms.observe(request);
+    if (unconfirmedPrewarmClose) {
+      await this.#writer.json(
+        rpcError(request, -32075, "External prewarm close was not confirmed"),
+      );
+      return;
+    }
+    if (request.method === THREAD_PREWARM_DISCARD_METHOD) {
+      await this.#discardExternalPrewarm(request);
+      return;
+    }
     if (request.method === LOADED_SESSIONS_METHOD) {
       if (
         !loadedSessionsParamsSchema.safeParse(request.params === undefined ? {} : request.params)
@@ -2888,6 +2905,12 @@ export class AppServerHost {
       );
       return;
     }
+    try {
+      await this.#submitPrewarm(thread);
+    } catch {
+      await this.#writer.json(rpcError(request, -32081, "External Thread could not be persisted"));
+      return;
+    }
     const turnId = requestedTurnId ?? hostTurnIdSchema.parse(randomUUID());
     const projection: ProjectedTurn = {
       projector: new CodexTurnProjector({
@@ -3129,8 +3152,11 @@ export class AppServerHost {
       return;
     }
     const session = validated.value;
+    // A draft prewarm stays provisional even when the Harness already has an identity: only user
+    // work publishes it to Desktop history (see `#submitPrewarm`).
+    const prewarm = params[EXTERNAL_THREAD_PREWARM_PARAM] === true;
     try {
-      if (session.initialState.nativeRef) {
+      if (session.initialState.nativeRef && !prewarm) {
         record = await this.#repository.commitNative(
           record.hostThreadId,
           session.initialState.nativeRef,
@@ -3150,7 +3176,9 @@ export class AppServerHost {
         ...(requestedModel ? { requestedModel } : {}),
         ...(requestedThinkingOptionId ? { requestedThinkingOptionId } : {}),
         ...(requestedPermissionModeId ? { requestedPermissionModeId } : {}),
+        ...(prewarm ? { unsubmittedPrewarm: true } : {}),
       });
+      if (prewarm) this.#externalPrewarms.register(externalThread);
       this.#routeObservationTracker.bindCreatedThread(request.id, externalThread.id);
       await this.#writer.json(
         rpcEnvelope(request, {
@@ -3174,11 +3202,15 @@ export class AppServerHost {
           },
         }),
       );
-      await this.#writer.json({
-        method: "thread/started",
-        emittedAtMs: Date.now(),
-        params: { thread },
-      });
+      // A Thread without a committed identity cannot be restored after release: it is published
+      // once its identity is committed (a later Session state event, or a submitted prewarm).
+      if (record.state === "ready") {
+        await this.#writer.json({
+          method: "thread/started",
+          emittedAtMs: Date.now(),
+          params: { thread },
+        });
+      }
     } catch {
       this.#externalRuntime.remove(record.hostThreadId);
       this.#routeObservationTracker.forgetThread(record.hostThreadId);
@@ -3197,6 +3229,7 @@ export class AppServerHost {
     requestedModel?: HarnessModelRef;
     requestedThinkingOptionId?: HarnessThinkingOptionId;
     requestedPermissionModeId?: HarnessPermissionModeId;
+    unsubmittedPrewarm?: boolean;
   }): ExternalThread {
     return this.#externalRuntime.register(input);
   }
@@ -3340,6 +3373,39 @@ export class AppServerHost {
       await this.#notifyExternalThreadStarted(result.thread);
     } finally {
       this.#pendingExternalCommandRequests.delete(source.id);
+    }
+  }
+
+  /** Releases a draft prewarm no user work adopted; an adopted or busy Thread is left alone. */
+  async #discardExternalPrewarm(request: JsonRpcRequest): Promise<void> {
+    const parsed = threadPrewarmDiscardParamsSchema.safeParse(request.params);
+    if (!parsed.success) {
+      await this.#writer.json(rpcError(request, -32602, "Invalid prewarm discard request"));
+      return;
+    }
+    try {
+      const discarded = await this.#externalPrewarms.discard(parsed.data.threadId, {
+        get: (id) => this.#externalRuntime.get(id),
+        remove: async (thread) => {
+          await this.#repository.removeThread(thread.id);
+          this.#externalRuntime.remove(thread.id);
+          this.#routeObservationTracker.forgetThread(thread.id);
+        },
+      });
+      await this.#writer.json(rpcEnvelope(request, { result: { discarded } }));
+    } catch (error) {
+      this.#diagnose(error);
+      await this.#writer.json(rpcError(request, -32075, "External prewarm could not close"));
+    }
+  }
+
+  /**
+   * Turns a draft prewarm the user now works in into a published Thread: commits its Native
+   * identity first, so a failure leaves it hidden and runs no user work.
+   */
+  async #submitPrewarm(thread: ExternalThread): Promise<void> {
+    if (thread.unsubmittedPrewarm && (await this.#externalRuntime.submitPrewarm(thread))) {
+      await this.#notifyExternalThreadStarted(thread.thread);
     }
   }
 
@@ -3944,6 +4010,11 @@ export class AppServerHost {
     ) {
       throw new ExternalSteerError(-32072, "External Thread already has an active Turn");
     }
+    try {
+      await this.#submitPrewarm(thread);
+    } catch {
+      throw new ExternalSteerError(-32081, "External Thread could not be persisted");
+    }
     thread.running = true;
     let turnId: HostTurnId | undefined;
     const gate = turnProjectionGate();
@@ -4163,13 +4234,19 @@ export class AppServerHost {
     if (event.type === "session.state.changed") {
       try {
         if (event.state.nativeRef) {
-          if (!thread.record.nativeSessionRef) {
-            thread.record = await this.#repository.commitNative(thread.id, event.state.nativeRef);
-          } else if (
-            thread.record.nativeSessionRef.harnessId !== event.state.nativeRef.harnessId ||
-            thread.record.nativeSessionRef.nativeSessionId !== event.state.nativeRef.nativeSessionId
+          // A draft prewarm keeps its identity in memory only; compare against that too.
+          const nativeRef = thread.record.nativeSessionRef ?? thread.stateObserver.state.nativeRef;
+          if (
+            nativeRef &&
+            (nativeRef.harnessId !== event.state.nativeRef.harnessId ||
+              nativeRef.nativeSessionId !== event.state.nativeRef.nativeSessionId)
           ) {
             throw new Error("External Session changed Native identity");
+          }
+          if (!thread.record.nativeSessionRef && !thread.unsubmittedPrewarm) {
+            thread.record = await this.#repository.commitNative(thread.id, event.state.nativeRef);
+            // A Thread whose identity arrived after creation is published only now.
+            await this.#notifyExternalThreadStarted(thread.thread);
           }
         }
         thread.stateObserver.update(event.state);
@@ -4267,6 +4344,8 @@ export class AppServerHost {
         promise: Promise.resolve(),
         resolve: () => undefined,
       });
+      // Real native work is no longer a disposable draft, even when the Harness started it.
+      await this.#submitPrewarm(thread);
       return;
     }
 

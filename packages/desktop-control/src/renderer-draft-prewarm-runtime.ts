@@ -94,6 +94,11 @@ export function createDraftPrewarmPolicyBridge(
   let selectedCodexAccountId: string | null = null;
   const draftWorkspaceOwner = Symbol(hostId);
   let prewarmGeneration = 0;
+  // Draft prewarms of external Harness Threads this Host opened and no user work adopted yet.
+  // A configuration change, a cleared draft or disposal releases them on the Host; an epoch
+  // change also invalidates a prewarm still in flight.
+  const externalPrewarms = new Set<string>();
+  let prewarmEpoch = 0;
   const isRecord = (value: unknown): value is Record<string, unknown> =>
     typeof value === "object" && value !== null && !Array.isArray(value);
   const isRemoteControlHost = hostId.startsWith("remote-control:");
@@ -576,6 +581,15 @@ export function createDraftPrewarmPolicyBridge(
   };
   const routedSend = (method: string, parameters: unknown, options?: unknown): unknown => {
     assertCurrent();
+    if (
+      method === "turn/start" ||
+      method === "thread/resume" ||
+      method === "codexhost/thread/command/execute"
+    ) {
+      // User work adopts the prewarm: the Host no longer treats it as a disposable draft.
+      const adoptedThreadId = threadIdFromParameters(parameters);
+      if (adoptedThreadId) externalPrewarms.delete(adoptedThreadId);
+    }
     const routedParameters = method === "thread/start" ? routeThreadStart(parameters) : parameters;
     const sendBridged = (): Promise<unknown> =>
       initializeBridge().then(() => {
@@ -596,9 +610,33 @@ export function createDraftPrewarmPolicyBridge(
     }
     return shouldUseBridge(method, routedParameters) ? sendBridged() : sendDirect();
   };
+  const discardExternalPrewarm = (threadId: string): void => {
+    externalPrewarms.delete(threadId);
+    // The Host refuses the discard once user work adopted the Thread. A failed cleanup must not
+    // turn a configuration change into a failed submission, and a retired transport cannot clean
+    // up at all: never replay user work to recover it.
+    try {
+      void Promise.resolve(routedSend("codexhost/thread/prewarm/discard", { threadId })).catch(
+        () => undefined,
+      );
+    } catch {
+      // Ignored by design.
+    }
+  };
+  const discardExternalPrewarms = (): void => {
+    for (const threadId of [...externalPrewarms]) discardExternalPrewarm(threadId);
+  };
   const routedPrewarm = (parameters: unknown, options?: unknown): unknown => {
     assertCurrent();
-    const routedParameters = routeThreadStart(parameters);
+    const routed = routeThreadStart(parameters);
+    const external =
+      isRecord(routed) &&
+      routed.ephemeral !== true &&
+      typeof routed.model === "string" &&
+      routed.model.startsWith("codexhost/");
+    // Only an external, persistent prewarm is a disposable Host draft (`codexhostPrewarm`).
+    const routedParameters = external ? { ...routed, codexhostPrewarm: true } : routed;
+    const epoch = prewarmEpoch;
     const generation = ++prewarmGeneration;
     publishDraftWorkspace(routedParameters);
     const result = shouldUseBridge("thread/start", routedParameters)
@@ -614,7 +652,17 @@ export function createDraftPrewarmPolicyBridge(
     )
       return result;
     return Promise.resolve(result).then((value) => {
-      if (!disposed && isCurrent() && generation === prewarmGeneration) {
+      const threadId =
+        external && isRecord(value) && isRecord(value.thread) && typeof value.thread.id === "string"
+          ? value.thread.id
+          : null;
+      if (disposed || epoch !== prewarmEpoch) {
+        // The draft changed while this prewarm opened: release it rather than hand it out.
+        if (threadId) discardExternalPrewarm(threadId);
+        throw new Error("Renderer draft prewarm was invalidated by a configuration change");
+      }
+      if (threadId) externalPrewarms.add(threadId);
+      if (isCurrent() && generation === prewarmGeneration) {
         publishDraftWorkspace(routedParameters);
       }
       return value;
@@ -692,6 +740,8 @@ export function createDraftPrewarmPolicyBridge(
       }
       if (selectedModel === model) return false;
       selectedModel = model;
+      prewarmEpoch += 1;
+      discardExternalPrewarms();
       return true;
     },
     selectAccount(accountId: string | null): boolean {
@@ -705,12 +755,17 @@ export function createDraftPrewarmPolicyBridge(
     },
     clear(): Promise<void> {
       assertCurrent();
+      prewarmEpoch += 1;
+      discardExternalPrewarms();
       prewarmedThreadManager.discardAllPrewarmedThreads();
       return Promise.resolve();
     },
     dispose(): void {
       if (disposed) return;
+      // Before disposal, while the transport may still carry the discard requests.
+      discardExternalPrewarms();
       disposed = true;
+      prewarmEpoch += 1;
       prewarmGeneration += 1;
       clearDraftWorkspace();
       if (bridge.sendRequest === routedSend) bridge.sendRequest = originalSend;

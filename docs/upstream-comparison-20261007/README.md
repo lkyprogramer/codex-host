@@ -360,6 +360,7 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 | --- | --- | --- | --- |
 | A | V01、V02 | `fix/official-traffic-ownership` | 已实现；首轮评审结论“修后可合”，发现已修复；复审结论“修后可合”，剩余的测试缺口与文档措辞已补齐。设计说明见 [官方流量归属](../official-traffic-ownership.md) |
 | B | V03、V04、V06（V05 关闭） | `fix/official-traffic-ownership` | 已实现；评审结论“修后可合”，发现已修复（见下）；V06 说明见 [Host Runtime 运行日志](../host-runtime-log.md) |
+| C | V07 | `fix/official-traffic-ownership` | 已实现，待评审；说明见 [外部 Harness 草稿预热](../external-draft-prewarm.md) |
 
 迭代 A 与卡片验收的差异：
 
@@ -373,3 +374,9 @@ process anchor 与 owned-process API、插件 API v2 的资源能力声明、`Ha
 - V04：同一 uuid 取最后一条记录、保留首次出现的位置，与原生 SDK 一致。
 - V06：不移植上游对 `uncaughtExceptionMonitor` 的监听，致命堆栈由 fork 的进程守卫写入 stderr 后进入日志，避免重复；新增环境变量凭据脱敏，名称规则含 `nonce`（覆盖 launcher 控制端口的 `CODEXHOST_CONTROL_NONCE`）。日志也收录官方 app-server 与插件写到 stderr 的内容；原生崩溃不进入日志。均已写入 [运行日志说明](../host-runtime-log.md)。
 - 评审补齐的测试：重试期间的并发调用方、端口分配期间关闭、已退出的尝试在清理期间关闭、端口分配失败、健康检查应答后退出的 Server 被重启、整行脱敏断言、当前进程文件不被清理。
+
+迭代 C 的实现说明与验证边界：
+
+- V07：Desktop Control 给外部预热加标记，并在换 Model、清空草稿、销毁时请求释放；Host 让未提交的预热只在内存中保留原生身份、不发布、不进列表，用户首次提交工作时才提交并发布，释放只关闭未接管且空闲的预热。所有外部 Thread 现在都只在身份提交后才发出 `thread/started`（上游 `aeae5642` 的做法），身份晚到的在提交时发布。
+- 与上游的差异：后台工作改用 Session 资源生命周期的 `workLevel` 判断；未提交的预热不参与空闲释放（否则身份未提交、释放后无法为首条消息恢复），代价是 Desktop 异常退出时预热保留到 Host 退出。fork 的 `codexhost/thread/command/execute` 不排在同一 Thread 的请求队列中，它与释放请求并发时，命令可能落在正在关闭的 Session 上并失败，不会出现两个写入者。
+- “关闭未确认后拒绝用户工作”只有单元测试：`ManagedHarnessSession` 的关闭重试（1、5、30 秒）使 Host 级测试需要三十多秒。未在真实 Desktop 上验证。

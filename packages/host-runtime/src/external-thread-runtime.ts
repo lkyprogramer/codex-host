@@ -61,6 +61,11 @@ export interface ExternalThread {
   requestedThinkingOptionId?: HarnessThinkingOptionId;
   requestedPermissionModeId?: HarnessPermissionModeId;
   record: StoredThreadRecordV1;
+  /**
+   * A Desktop draft prewarm no user work has submitted yet: its Native identity stays in memory
+   * (the record stays `creating`) and Desktop history never shows it.
+   */
+  unsubmittedPrewarm: boolean;
   sessionId: string;
   stateObserver: SessionStateObserver;
   thread: JsonObject;
@@ -365,6 +370,7 @@ export class ExternalThreadRuntime {
     requestedPermissionModeId?: HarnessPermissionModeId;
     transportModelId?: string;
     restoredState?: HarnessSessionState;
+    unsubmittedPrewarm?: boolean;
   }): ExternalThread {
     const harnessId = input.record.harnessId as ExternalHarnessId;
     if (!this.#adapters.has(harnessId)) {
@@ -399,6 +405,7 @@ export class ExternalThreadRuntime {
         ? { requestedPermissionModeId: effectivePermissionModeId }
         : {}),
       record: input.record,
+      unsubmittedPrewarm: input.unsubmittedPrewarm === true,
       sessionId: input.sessionId,
       stateObserver: new SessionStateObserver(observerState),
       thread: running
@@ -437,6 +444,21 @@ export class ExternalThreadRuntime {
     this.#threads.set(externalThread.id, externalThread);
     this.#touchIdleTimer(externalThread);
     return externalThread;
+  }
+
+  /**
+   * Turns a draft prewarm into the user's Thread before its first user work runs: commits the
+   * Native identity the Session already reported. Returns whether the Thread can now be published;
+   * an identity reported later is committed and published by its Session state event.
+   */
+  async submitPrewarm(thread: ExternalThread): Promise<boolean> {
+    if (!thread.unsubmittedPrewarm) return false;
+    const nativeRef = thread.stateObserver.state.nativeRef;
+    if (nativeRef && !thread.record.nativeSessionRef) {
+      thread.record = await this.#repository.commitNative(thread.id, nativeRef);
+    }
+    thread.unsubmittedPrewarm = false;
+    return thread.record.state === "ready";
   }
 
   markIdle(thread: ExternalThread): void {
@@ -496,6 +518,9 @@ export class ExternalThreadRuntime {
     if (
       this.#threads.get(thread.id) !== thread ||
       !thread.session.resourceLifecycle ||
+      // An unsubmitted draft prewarm keeps its identity in memory only, so a released one could
+      // not be resumed for the user's first message. Desktop discards it instead.
+      thread.unsubmittedPrewarm ||
       !this.#canSuspend(thread)
     ) {
       return;

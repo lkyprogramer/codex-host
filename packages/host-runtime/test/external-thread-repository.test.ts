@@ -69,6 +69,32 @@ afterEach(async () => {
 });
 
 describe("ExternalThreadRepository", () => {
+  it("aligns an unsent draft without a committed identity as empty history", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = new MappingStore({ directory });
+    const repository = new ExternalThreadRepository(store);
+    await repository.initialize();
+    const draft = await store.createProvisional({
+      hostThreadId,
+      createRequestId: "unsent-draft",
+      harnessId,
+      cwd: "/synthetic",
+      transportModelId: "codexhost/claude-code-native",
+      ephemeral: false,
+      historyMode: "legacy",
+    });
+    // A prewarm keeps its identity in memory; reading it before any Turn must not fail.
+    await expect(repository.alignSnapshot(draft, { turns: [] })).resolves.toEqual({
+      record: draft,
+      turns: [],
+    });
+    // History without a committed identity still cannot be persisted.
+    await expect(
+      repository.alignSnapshot(draft, { turns: [snapshotTurn("native-a")] }),
+    ).rejects.toThrow("no committed Native Session identity");
+    await repository.close();
+  });
+
   it("revokes a persisted checkpoint when the native Snapshot no longer advertises it", async () => {
     const directory = await temporaryStoreDirectory();
     const store = new MappingStore({ directory });

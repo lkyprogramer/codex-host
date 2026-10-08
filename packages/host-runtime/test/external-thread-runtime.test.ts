@@ -1226,6 +1226,44 @@ describe("idle native resource lifecycle", () => {
     }
   });
 
+  it("never releases an unsubmitted draft prewarm while idle", async () => {
+    const adapter = new FakeHarnessAdapter(harnessId);
+    const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });
+    if (!opened.ok || !(opened.value instanceof FakeHarnessSession)) {
+      throw new Error("Missing fake Session");
+    }
+    const session = opened.value;
+    const suspend = vi.fn(async () => ({ status: "suspended" as const, scope: "native-session" }));
+    Object.defineProperty(session, "resourceLifecycle", {
+      configurable: true,
+      value: { suspend },
+    });
+    const runtime = new ExternalThreadRuntime({
+      adapters: new Map([["pi", adapter]]),
+      repository: {} as ExternalThreadRepository,
+      consumeOutputs: async () => undefined,
+      diagnose: () => undefined,
+      idleSuspendTimeoutMs: 5,
+    });
+    try {
+      runtime.register({
+        record: record(),
+        session,
+        sessionId: hostThreadId,
+        thread: { id: hostThreadId },
+        turns: [],
+        unsubmittedPrewarm: true,
+      });
+      // Its identity is not committed: a released prewarm could not be resumed for the first
+      // message, so it stays loaded until Desktop discards or the user adopts it.
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(suspend).not.toHaveBeenCalled();
+    } finally {
+      runtime.clear();
+      await adapter.close();
+    }
+  });
+
   it("reports every failed idle release and retries it", async () => {
     const adapter = new FakeHarnessAdapter(harnessId);
     const opened = await adapter.open({ kind: "create", cwd: "/synthetic" });

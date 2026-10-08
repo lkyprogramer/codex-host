@@ -314,11 +314,106 @@ describe("Renderer draft prewarm policy", () => {
     expect(prewarmThreadStart).toHaveBeenNthCalledWith(1, {
       cwd: "/tmp/project",
       model: "codexhost/pi-native",
+      codexhostPrewarm: true,
     });
     expect(prewarmThreadStart).toHaveBeenNthCalledWith(2, {
       ephemeral: true,
       model: "gpt-5",
     });
+  });
+
+  it("releases external draft prewarms the user did not adopt", async () => {
+    const sendRequest = vi.fn<(method: string, parameters: unknown) => Promise<unknown>>(
+      async () => ({ discarded: true }),
+    );
+    let next = 0;
+    const prewarmThreadStart = vi.fn(async () => ({ thread: { id: `thread-${++next}` } }));
+    const manager = requestManagerFixture();
+    const bridge = requestBridgeFixture({ sendRequest, prewarmThreadStart });
+    const target: DraftPrewarmPolicyTarget = {};
+    const prewarmedThreadManager = { discardAllPrewarmedThreads: vi.fn() };
+    installDraftPrewarmPolicyBridge(manager, bridge, "local", target, prewarmedThreadManager);
+    const policy = target.__codexhostDraftPrewarmPolicyV1 as {
+      select(model: string | null): boolean;
+      clear(): Promise<void>;
+      dispose(): void;
+    };
+    const discards = () =>
+      sendRequest.mock.calls
+        .filter(([method]) => method === "codexhost/thread/prewarm/discard")
+        .map(([, parameters]) => parameters);
+
+    policy.select("codexhost/pi-native");
+    await bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    // A configuration change releases the draft opened for the previous one.
+    policy.select("codexhost/claude-code-native");
+    expect(discards()).toEqual([{ threadId: "thread-1" }]);
+
+    await bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    await bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    // The user adopted thread-3: it is no longer a disposable draft.
+    await bridge.sendRequest("turn/start", { threadId: "thread-3", input: [] });
+    await policy.clear();
+    expect(discards()).toEqual([{ threadId: "thread-1" }, { threadId: "thread-2" }]);
+    expect(prewarmedThreadManager.discardAllPrewarmedThreads).toHaveBeenCalledOnce();
+
+    await bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    policy.dispose();
+    expect(discards()).toEqual([
+      { threadId: "thread-1" },
+      { threadId: "thread-2" },
+      { threadId: "thread-4" },
+    ]);
+  });
+
+  it("releases a prewarm that settles after its draft changed instead of handing it out", async () => {
+    const sendRequest = vi.fn<(method: string, parameters: unknown) => Promise<unknown>>(
+      async () => ({ discarded: true }),
+    );
+    let settle!: (value: unknown) => void;
+    const prewarmThreadStart = vi.fn(
+      () =>
+        new Promise<unknown>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    const bridge = requestBridgeFixture({ sendRequest, prewarmThreadStart });
+    const target: DraftPrewarmPolicyTarget = {};
+    installDraftPrewarmPolicyBridge(requestManagerFixture(), bridge, "local", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+    const policy = target.__codexhostDraftPrewarmPolicyV1 as {
+      select(model: string | null): boolean;
+    };
+
+    policy.select("codexhost/pi-native");
+    const prewarm = bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    policy.select("codexhost/claude-code-native");
+    settle({ thread: { id: "late-thread" } });
+
+    await expect(prewarm).rejects.toThrow("invalidated by a configuration change");
+    expect(sendRequest).toHaveBeenCalledWith("codexhost/thread/prewarm/discard", {
+      threadId: "late-thread",
+    });
+  });
+
+  it("neither marks nor releases a native Codex prewarm", async () => {
+    const sendRequest = vi.fn<(method: string, parameters: unknown) => Promise<unknown>>(
+      async () => undefined,
+    );
+    const prewarmThreadStart = vi.fn(async () => ({ thread: { id: "codex-thread" } }));
+    const bridge = requestBridgeFixture({ sendRequest, prewarmThreadStart });
+    const target: DraftPrewarmPolicyTarget = {};
+    installDraftPrewarmPolicyBridge(requestManagerFixture(), bridge, "local", target, {
+      discardAllPrewarmedThreads: vi.fn(),
+    });
+    const policy = target.__codexhostDraftPrewarmPolicyV1 as { clear(): Promise<void> };
+
+    await bridge.prewarmThreadStart?.({ cwd: "/tmp/project", model: "gpt-5" });
+    await policy.clear();
+
+    expect(prewarmThreadStart).toHaveBeenCalledWith({ cwd: "/tmp/project", model: "gpt-5" });
+    expect(sendRequest).not.toHaveBeenCalled();
   });
 
   it("publishes the current draft workspace and clears it on replacement", async () => {
